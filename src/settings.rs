@@ -297,6 +297,10 @@ pub struct Settings {
     pub playback_authorized: bool,
     /// Closing the window hides to the tray and keeps the music playing.
     pub keep_playing_in_background: bool,
+    /// Connect device id of the speaker playback starts on when nothing
+    /// else plays, found on the local network (a Sonos, typically).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_speaker: Option<String>,
     /// Show the interactive Now Playing widget when hovering over the MacBook notch.
     pub mac_notch_widget: bool,
     /// Ask GitHub once a day whether a newer release exists.
@@ -449,6 +453,7 @@ impl Default for Settings {
             personal_app_intro_seen: false,
             playback_authorized: false,
             keep_playing_in_background: true,
+            default_speaker: None,
             mac_notch_widget: false,
             check_for_updates: true,
             download_updates_automatically: false,

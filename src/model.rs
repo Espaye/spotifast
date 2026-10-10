@@ -1040,6 +1040,8 @@ pub enum Action {
     },
     DeletePlaylist(String),
     Transfer(String),
+    /// Set or clear the speaker playback starts on when nothing plays.
+    SetDefaultSpeaker(Option<String>),
     /// Send the account to a receiver found on the local network.
     ActivateReceiver(Box<crate::zeroconf::Receiver>),
     RefreshDevices,

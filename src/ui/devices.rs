@@ -333,8 +333,12 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                                 theme::medium(14.0),
                                 color,
                             );
+                            let is_default = device.id.is_some()
+                                && device.id == app.settings.default_speaker;
                             let status = if active {
                                 gettext(locale, "Listening on this device").into_owned()
+                            } else if is_default {
+                                gettext(locale, "Default speaker").into_owned()
                             } else if device.is_restricted {
                                 gettext(locale, "Restricted").into_owned()
                             } else if is_local {
@@ -362,6 +366,21 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                                 && let Some(id) = &device.id
                             {
                                 app.actions.push(Action::Transfer(id.clone()));
+                            }
+                            if !is_local && let Some(id) = &device.id {
+                                response.context_menu(|ui| {
+                                    let label = if is_default {
+                                        gettext(locale, "Stop using as default speaker")
+                                    } else {
+                                        gettext(locale, "Use as default speaker")
+                                    };
+                                    if ui.button(label.as_ref()).clicked() {
+                                        app.actions.push(Action::SetDefaultSpeaker(
+                                            (!is_default).then(|| id.clone()),
+                                        ));
+                                        ui.close();
+                                    }
+                                });
                             }
                         }
                         for receiver in &waiting {

@@ -451,6 +451,8 @@ pub struct App {
     pub devices_loading: bool,
     devices_fetched_at: Option<Instant>,
     pub selected_device: Option<String>,
+    /// When the network was last searched for the default speaker.
+    default_speaker_searched_at: Option<Instant>,
     pub queue: Loadable<Queue>,
     queue_fetched_at: Option<Instant>,
     /// Latest queue request sequence. Older responses are discarded.
@@ -939,6 +941,7 @@ impl App {
             devices_loading: false,
             devices_fetched_at: None,
             selected_device: None,
+            default_speaker_searched_at: None,
             queue: if session.last_track.is_some() && !session.last_queue_rows.is_empty() {
                 // The queue as it was at close, shown until something
                 // plays; then the live queue takes over.
@@ -1665,12 +1668,12 @@ impl App {
             }
         };
         let volume = match (self.pending_remote_volume, self.pushed_remote_volume) {
-            (Some((volume, at)), _) if at.elapsed() < OPTIMISTIC_HOLD || self.remote_volume.busy() => {
+            (Some((volume, at)), _)
+                if at.elapsed() < OPTIMISTIC_HOLD || self.remote_volume.busy() =>
+            {
                 volume
             }
-            (_, Some((volume, at))) if at.elapsed() < OPTIMISTIC_HOLD => {
-                volume
-            }
+            (_, Some((volume, at))) if at.elapsed() < OPTIMISTIC_HOLD => volume,
             _ => device
                 .and_then(|device| device.volume_percent)
                 .unwrap_or(50),
@@ -2032,7 +2035,10 @@ impl App {
                 }
                 Event::Auth(status) => self.handle_auth(status),
                 Event::Playback(status) => self.handle_playback(status),
-                Event::Receivers(receivers) => self.receivers = receivers,
+                Event::Receivers(receivers) => {
+                    self.receivers = receivers;
+                    self.pick_default_speaker();
+                }
                 Event::ReceiverActivated { name, result } => {
                     self.activating_receiver = None;
                     match result {
@@ -2949,6 +2955,7 @@ impl App {
         self.toasts
             .retain(|toast| toast.created.elapsed() < TOAST_LIFETIME);
         self.maybe_suggest_personal_app();
+        self.search_for_default_speaker();
 
         if self.settings.check_for_updates
             && !self.offline
@@ -7711,6 +7718,50 @@ impl App {
         }
     }
 
+    /// Looks for the default speaker until it is found, while nothing has
+    /// been chosen. Receivers are invisible to the Web API, so this browses
+    /// the network.
+    fn search_for_default_speaker(&mut self) {
+        let Some(wanted) = &self.settings.default_speaker else {
+            return;
+        };
+        if !self.local_ready
+            || self.selected_device.is_some()
+            || self
+                .receivers
+                .iter()
+                .any(|receiver| receiver.device_id.as_ref() == Some(wanted))
+            || self
+                .default_speaker_searched_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        {
+            return;
+        }
+        self.default_speaker_searched_at = Some(Instant::now());
+        self.backend.send(Command::DiscoverReceivers);
+    }
+
+    /// Makes the default speaker the target once it is on the network,
+    /// unless something already plays or another device was chosen.
+    fn pick_default_speaker(&mut self) {
+        let Some(wanted) = self.settings.default_speaker.clone() else {
+            return;
+        };
+        let elsewhere = self
+            .remote_fresh()
+            .is_some_and(|remote| remote.state.is_playing);
+        if self.selected_device.is_some() || self.local.is_active() || elsewhere {
+            return;
+        }
+        if self
+            .receivers
+            .iter()
+            .any(|receiver| receiver.device_id.as_deref() == Some(wanted.as_str()))
+        {
+            self.selected_device = Some(wanted);
+        }
+    }
+
     fn transfer(&mut self, device_id: String) {
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
             self.selected_device = None;
@@ -9087,6 +9138,10 @@ impl App {
                     .api(ApiRequest::FollowPlaylist { id, follow: false });
             }
             Action::Transfer(device_id) => self.transfer(device_id),
+            Action::SetDefaultSpeaker(device_id) => {
+                self.settings.default_speaker = device_id;
+                self.settings_dirty = true;
+            }
             Action::ActivateReceiver(receiver) => {
                 if self.activating_receiver.is_none() {
                     self.activating_receiver = Some(receiver.name.clone());
@@ -21678,7 +21733,11 @@ mod tests {
         )
         .unwrap();
         assert!(state.actions.disallows.skipping_prev);
-        for json in [r#"{"actions":null}"#, r#"{"actions":{"disallows":{}}}"#, "{}"] {
+        for json in [
+            r#"{"actions":null}"#,
+            r#"{"actions":{"disallows":{}}}"#,
+            "{}",
+        ] {
             let state: PlaybackState = serde_json::from_str(json).unwrap();
             assert!(!state.actions.disallows.skipping_prev);
         }
@@ -21730,7 +21789,11 @@ mod tests {
         volume.finished(false, at(300));
 
         volume.queue(30, Some("phone".into()));
-        assert_eq!(volume.take_due(at(600)), None, "an unchanged value is not sent");
+        assert_eq!(
+            volume.take_due(at(600)),
+            None,
+            "an unchanged value is not sent"
+        );
         assert!(!volume.busy());
     }
 
@@ -21764,7 +21827,10 @@ mod tests {
 
         volume.queue(40, None);
         assert!(volume.take_due(at(0)).is_some());
-        assert!(volume.finished(true, at(100)), "the first refusal is reported");
+        assert!(
+            volume.finished(true, at(100)),
+            "the first refusal is reported"
+        );
         assert!(volume.busy(), "the refused value is kept");
         assert_eq!(volume.take_due(at(1_000)), None);
         volume.queue(45, None);
@@ -21773,7 +21839,9 @@ mod tests {
             !volume.finished(true, at(5_200)),
             "a refusal soon after is not reported again"
         );
-        assert!(refused_as_too_many(&crate::api::client::ApiError::RateLimited));
+        assert!(refused_as_too_many(
+            &crate::api::client::ApiError::RateLimited
+        ));
         assert!(refused_as_too_many(&crate::api::client::ApiError::Network(
             "Resource has been exhausted { Response status code: 429 Too Many Requests }".into()
         )));

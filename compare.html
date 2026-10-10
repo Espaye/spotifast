@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device icon comparison</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f6f7f8; --fg: #16181c; --muted: #5d636b; --line: #d6d9de; --accent: #1db954; --panel: #ffffff; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121417; --fg: #e8eaed; --muted: #9aa0a8; --line: #2c3036; --panel: #1b1e22; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { margin: 6px 0; color: var(--muted); }
+  code { font-size: 13px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin: 18px 0 12px; }
+  .group { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .group button { border: 0; background: var(--panel); color: var(--fg); padding: 7px 14px; font: inherit; cursor: pointer; }
+  .group button + button { border-left: 1px solid var(--line); }
+  .group button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .label { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-right: 6px; }
+  figure { margin: 0; }
+  .shot { border: 1px solid var(--line); border-radius: 8px; overflow: auto; background: var(--panel); }
+  .shot img { display: block; max-width: 100%; height: auto; }
+  .zooms { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; }
+  .zooms figure { flex: 0 1 auto; }
+  .zooms img { display: block; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; image-rendering: pixelated; }
+  figcaption { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .note { margin-top: 10px; font-size: 14px; }
+  ul { color: var(--muted); padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Show the playing device's own icon for remote playback</h1>
+  <p>The "Playing on" badge in the top bar and the device button in the player bar always drew a speaker. They now draw the playing device's own icon, the same one the device picker already uses, so a phone is drawn as a phone. Nothing else moves: in every pair only those two icons differ, and with the speaker playing the captures are byte-identical.</p>
+  <p><b>Before:</b> <code>c78aa9b</code> (main <code>dd2d5e3</code> plus the <code>phone-playing</code> demo surface). <b>After:</b> <code>f5596a4</code> (the same plus the change). The captures were taken from the same two commits before a rustfmt-only line wrap in the demo surface. Captured with <code>--demo-shot</code> on Windows 11 x64 (GNU toolchain, built without MilkDrop). macOS and Linux were not captured.</p>
+
+  <div class="bar">
+    <span><span class="label">Version</span><span class="group" data-key="v">
+      <button data-val="before">Before</button><button data-val="after">After</button></span></span>
+    <span><span class="label">State</span><span class="group" data-key="st">
+      <button data-val="phone">Phone playing</button><button data-val="phone-devices">Device list open</button><button data-val="speaker">Speaker playing</button></span></span>
+    <span><span class="label">Theme</span><span class="group" data-key="th">
+      <button data-val="dark">Dark</button><button data-val="light">Light</button></span></span>
+    <span><span class="label">Window</span><span class="group" data-key="sz">
+      <button data-val="normal">Normal 1280x800</button><button data-val="narrow">Narrow 760x800</button></span></span>
+  </div>
+  <p class="note">Press <b>B</b> to flip between Before and After.</p>
+
+  <figure class="shot"><img id="shot" alt=""></figure>
+  <div class="zooms" id="zooms">
+    <figure><img id="zbadge" alt=""><figcaption>Top bar badge, 3x</figcaption></figure>
+    <figure><img id="zbutton" alt=""><figcaption>Player bar device button, 3x</figcaption></figure>
+  </div>
+
+  <h2 style="font-size:17px;margin-top:28px">Remaining checks</h2>
+  <ul>
+    <li>macOS and Linux captures (only Windows was available).</li>
+    <li>The narrow window shows the badge as an icon only, before and after; that is unchanged.</li>
+  </ul>
+</main>
+<script>
+  const state = { v: "after", st: "phone", th: "dark", sz: "normal" };
+  function render() {
+    document.querySelectorAll(".group").forEach(g => {
+      g.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(state[g.dataset.key] === b.dataset.val)));
+    });
+    const shot = document.getElementById("shot");
+    shot.src = `${state.v}-${state.st}-${state.th}-${state.sz}.png`;
+    shot.alt = `${state.v}, ${state.st}, ${state.th}, ${state.sz}`;
+    const zooms = document.getElementById("zooms");
+    zooms.hidden = state.st === "speaker";
+    for (const part of ["badge", "button"]) {
+      const img = document.getElementById("z" + part);
+      img.src = `zoom-${part}-${state.v}-${state.th}-${state.sz}.png`;
+      img.alt = `${part}, ${state.v}`;
+    }
+  }
+  document.querySelectorAll(".group").forEach(g => g.addEventListener("click", e => {
+    const b = e.target.closest("button"); if (!b) return;
+    state[g.dataset.key] = b.dataset.val; render();
+  }));
+  document.addEventListener("keydown", e => {
+    if (e.key === "b" || e.key === "B") { state.v = state.v === "before" ? "after" : "before"; render(); }
+  });
+  render();
+</script>
+</body>
+</html>

@@ -983,6 +983,8 @@ pub enum Event {
         result: Result<(), String>,
     },
     Local(Box<LocalState>),
+    /// Playback on another device changed; poll it now rather than later.
+    RemoteChanged,
     Api(Box<ApiResponse>),
     Accent {
         url: String,
@@ -3296,6 +3298,10 @@ impl Worker {
                 }
                 EngineEvent::SessionEnded => {
                     let _ = commands.send(Command::Reconnect);
+                }
+                EngineEvent::RemoteChanged => {
+                    let _ = events.send(Event::RemoteChanged);
+                    waker.wake();
                 }
             }
         })

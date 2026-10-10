@@ -306,8 +306,14 @@ pub enum EngineEvent {
     State(LocalState),
     SessionEnded,
     /// Spotify pushed a change to playback on another device: a switch,
-    /// play or pause, another song, shuffle or repeat, or its volume.
+    /// play or pause, another song, shuffle or repeat.
     RemoteChanged,
+    /// Spotify pushed a new volume for the device playing elsewhere, and
+    /// nothing else changed. It carries the value, so no poll is needed.
+    RemoteVolume {
+        device_id: String,
+        volume: u16,
+    },
 }
 
 /// The parts of a Connect cluster push that the interface shows for
@@ -349,11 +355,22 @@ impl ClusterView {
         let ours = self.active_device == own_device && next.active_device == own_device;
         self != next && !ours
     }
+
+    /// The new volume, when it is all that changed on the same device.
+    fn volume_only(&self, next: &Self) -> Option<u16> {
+        let volume = next.volume?;
+        let same_otherwise = Self {
+            volume: next.volume,
+            ..self.clone()
+        } == *next;
+        same_otherwise.then(|| volume.min(u32::from(u16::MAX)) as u16)
+    }
 }
 
 /// Forwards cluster pushes that change another device's playback, so the
-/// interface asks for it at once instead of on its next poll. The first
-/// push is only the baseline: the interface polls when it connects anyway.
+/// interface shows them at once instead of on its next poll: a new volume
+/// as it is, anything else as a reason to poll. The first push is only the
+/// baseline: the interface polls when it connects anyway.
 async fn watch_cluster(
     mut updates: BoxedStreamResult<ClusterUpdate>,
     own_device: String,
@@ -366,11 +383,16 @@ async fn watch_cluster(
             continue;
         };
         let view = ClusterView::of(&cluster);
-        if shown
-            .as_ref()
-            .is_some_and(|shown| shown.changed_elsewhere(&view, &own_device))
+        if let Some(shown) = &shown
+            && shown.changed_elsewhere(&view, &own_device)
         {
-            notify(EngineEvent::RemoteChanged);
+            notify(match shown.volume_only(&view) {
+                Some(volume) => EngineEvent::RemoteVolume {
+                    device_id: view.active_device.clone(),
+                    volume,
+                },
+                None => EngineEvent::RemoteChanged,
+            });
         }
         shown = Some(view);
     }
@@ -1812,6 +1834,24 @@ mod tests {
 
         let louder = cluster("sonos", "spotify:track:a", true, 32_000);
         assert!(shown.changed_elsewhere(&ClusterView::of(&louder), "this"));
+        assert_eq!(shown.volume_only(&ClusterView::of(&louder)), Some(32_000));
+    }
+
+    /// A new volume alone is shown as pushed; with anything else it waits
+    /// for the poll, which brings both.
+    #[test]
+    fn a_volume_alone_is_carried_and_with_more_it_is_polled() {
+        let shown = ClusterView::of(&cluster("sonos", "spotify:track:a", true, 30_000));
+        for next in [
+            cluster("phone", "spotify:track:a", true, 32_000),
+            cluster("sonos", "spotify:track:b", true, 32_000),
+            cluster("sonos", "spotify:track:a", false, 32_000),
+        ] {
+            assert_eq!(shown.volume_only(&ClusterView::of(&next)), None);
+        }
+        let mut gone = cluster("sonos", "spotify:track:a", true, 30_000);
+        gone.device.clear();
+        assert_eq!(shown.volume_only(&ClusterView::of(&gone)), None);
     }
 
     #[test]

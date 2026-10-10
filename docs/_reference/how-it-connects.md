@@ -352,14 +352,15 @@ does not cause the previous local song to restart or replace the remote queue.
 Spotify also pushes the Connect cluster to the session over its existing
 Dealer connection whenever playback changes anywhere. Spotifast reads the
 active device, song, play or pause, shuffle, repeat and the active device's
-volume from each push. When one of those changed for another device, it asks
-the Web API for playback at once instead of on its next poll, so a device
-switch or a volume turned on the speaker itself shows within about a second
-instead of up to four. Pushes about this computer's own playback, and the
-position updates Spotify sends in between, cause no request. Polls caused by
-pushes are at least a second apart, so a turned volume knob costs at most one
-request a second. The regular poll continues unchanged as a fallback, and
-without playback enabled there is no session and nothing is pushed.
+volume from each push. A new volume alone is shown straight from the push,
+so a volume turned on the speaker itself follows as Spotify reports it and
+costs no request. When anything else changed for another device, Spotifast
+asks the Web API for playback at once instead of on its next poll, so a
+device switch shows within about a second instead of up to four. Pushes
+about this computer's own playback, and the position updates Spotify sends
+in between, cause no request. Polls caused by pushes are at least a second
+apart. The regular poll continues unchanged as a fallback, and without
+playback enabled there is no session and nothing is pushed.
 
 When the PulseAudio backend is selected on Linux, its PulseAudio or PipeWire
 stream is named **Spotifast**, with **Spotify playback** as its description, so

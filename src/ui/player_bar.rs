@@ -823,11 +823,10 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
         ) {
             SliderEvent::Dragging(value) => {
                 app.volume_preview = Some(value);
-                // Local volume is cheap to apply continuously; remote goes on release.
-                if now.is_none_or(|now| now.local) {
-                    app.actions
-                        .push(Action::PreviewVolume((value * 100.0).round() as u8));
-                }
+                // Another device follows the drag too, paced so Spotify is
+                // not flooded; the release always sends the final value.
+                app.actions
+                    .push(Action::PreviewVolume((value * 100.0).round() as u8));
             }
             SliderEvent::Committed(value) => {
                 app.volume_preview = None;

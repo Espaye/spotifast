@@ -63,6 +63,17 @@ const ASSUMED_CONTEXT_HOLD: Duration = Duration::from_secs(8);
 const PLAYBACK_HOLD: Duration = Duration::from_secs(6);
 /// Delay before checking playback again after a command.
 const REMOTE_RECHECK: Duration = Duration::from_millis(1200);
+/// Least time between volume changes sent to another device, so a drag
+/// changes the volume as it moves without flooding Spotify.
+const REMOTE_VOLUME_INTERVAL: Duration = Duration::from_millis(250);
+/// Volume changes sent to another device within [`REMOTE_VOLUME_WINDOW`]
+/// before they slow to one a second. Spotify refused one about every third
+/// of a second after roughly 90 in half a minute.
+const REMOTE_VOLUME_BUDGET: usize = 40;
+const REMOTE_VOLUME_WINDOW: Duration = Duration::from_secs(30);
+const REMOTE_VOLUME_SLOW_INTERVAL: Duration = Duration::from_secs(1);
+/// How long volume changes wait after Spotify refuses one as too many.
+const REMOTE_VOLUME_BACKOFF: Duration = Duration::from_secs(5);
 /// Delay before checking the queue after a local change.
 const QUEUE_RECHECK: Duration = Duration::from_millis(700);
 /// Number of stale queue responses accepted before trusting Spotify's state.
@@ -84,6 +95,105 @@ struct AssumedContext {
     /// Shuffle state included in the play request, if any.
     shuffle: Option<bool>,
     at: Instant,
+}
+
+/// Volume changes for another device. One request is on its way at a time,
+/// at most one per [`REMOTE_VOLUME_INTERVAL`], and the newest value always
+/// goes last, so a drag ends on the volume it was let go at.
+#[derive(Default)]
+struct RemoteVolume {
+    /// The newest value not yet sent, and the device it is for.
+    queued: Option<(u8, Option<String>)>,
+    in_flight: bool,
+    /// The last value sent, its device, and when.
+    sent: Option<(u8, Option<String>, Instant)>,
+    /// When recent requests went, for [`REMOTE_VOLUME_BUDGET`].
+    recent: std::collections::VecDeque<Instant>,
+    /// Until when Spotify asked for fewer requests.
+    backoff_until: Option<Instant>,
+    /// When a refusal was last reported, so it is said once in a while.
+    reported_at: Option<Instant>,
+}
+
+impl RemoteVolume {
+    fn queue(&mut self, percent: u8, device_id: Option<String>) {
+        self.queued = Some((percent, device_id));
+    }
+
+    /// Whether a change is waiting or on its way, so the shown volume holds.
+    fn busy(&self) -> bool {
+        self.in_flight || self.queued.is_some()
+    }
+
+    /// When the queued value may go, if one is waiting.
+    fn next_due(&self, now: Instant) -> Option<Instant> {
+        if self.in_flight || self.queued.is_none() {
+            return None;
+        }
+        let window_start = now.checked_sub(REMOTE_VOLUME_WINDOW);
+        let in_window = self
+            .recent
+            .iter()
+            .filter(|at| window_start.is_none_or(|start| **at > start))
+            .count();
+        let interval = if in_window >= REMOTE_VOLUME_BUDGET {
+            REMOTE_VOLUME_SLOW_INTERVAL
+        } else {
+            REMOTE_VOLUME_INTERVAL
+        };
+        let spaced = self.sent.as_ref().map(|(_, _, at)| *at + interval);
+        Some(
+            [spaced, self.backoff_until]
+                .into_iter()
+                .flatten()
+                .max()
+                .unwrap_or(now),
+        )
+    }
+
+    /// The value to send now, if one is due and differs from the one sent.
+    fn take_due(&mut self, now: Instant) -> Option<(u8, Option<String>)> {
+        if self.next_due(now)? > now {
+            return None;
+        }
+        let (percent, device_id) = self.queued.take()?;
+        // Within the hold the sent value is still what the device has.
+        if self.sent.as_ref().is_some_and(|(sent, device, at)| {
+            *sent == percent && *device == device_id && now.duration_since(*at) < OPTIMISTIC_HOLD
+        }) {
+            return None;
+        }
+        self.in_flight = true;
+        self.sent = Some((percent, device_id.clone(), now));
+        self.recent.push_back(now);
+        while self.recent.len() > REMOTE_VOLUME_BUDGET {
+            self.recent.pop_front();
+        }
+        Some((percent, device_id))
+    }
+
+    /// Notes the answer. A refusal as too many requests keeps the value to
+    /// send again after [`REMOTE_VOLUME_BACKOFF`]; the result says whether
+    /// to report it, at most once per [`REMOTE_VOLUME_WINDOW`].
+    fn finished(&mut self, too_many: bool, now: Instant) -> bool {
+        self.in_flight = false;
+        if !too_many {
+            return false;
+        }
+        let report = self
+            .reported_at
+            .is_none_or(|at| now.duration_since(at) >= REMOTE_VOLUME_WINDOW);
+        if report {
+            self.reported_at = Some(now);
+        }
+        self.backoff_until = Some(now + REMOTE_VOLUME_BACKOFF);
+        if let Some((percent, device_id, _)) = self.sent.take()
+            && self.queued.is_none()
+        {
+            self.queued = Some((percent, device_id));
+        }
+        report
+    }
 }
 
 /// A track the interface shows before playback has reported its new state.
@@ -485,6 +595,7 @@ pub struct App {
     pub web_app: Option<String>,
     pending_remote_position: Option<(u32, Instant)>,
     pending_remote_volume: Option<(u8, Instant)>,
+    remote_volume: RemoteVolume,
     /// A local volume set here that the engine has not echoed back yet. It
     /// reports `VolumeChanged` asynchronously while position snapshots land
     /// every second, so a snapshot must not undo the change on its way past.
@@ -920,6 +1031,7 @@ impl App {
             web_app: None,
             pending_remote_position: None,
             pending_remote_volume: None,
+            remote_volume: RemoteVolume::default(),
             pending_local_volume: None,
             pending_local_position: None,
             optimistic_playing: None,
@@ -1540,7 +1652,9 @@ impl App {
             }
         };
         let volume = match self.pending_remote_volume {
-            Some((volume, at)) if at.elapsed() < OPTIMISTIC_HOLD => volume,
+            Some((volume, at)) if at.elapsed() < OPTIMISTIC_HOLD || self.remote_volume.busy() => {
+                volume
+            }
             _ => device
                 .and_then(|device| device.volume_percent)
                 .unwrap_or(50),
@@ -2838,6 +2952,13 @@ impl App {
             {
                 self.remote_recheck_at = None;
                 self.poll_remote(true);
+            }
+            if let Some(due) = self.remote_volume.next_due(Instant::now()) {
+                if Instant::now() >= due {
+                    self.send_remote_volume();
+                } else {
+                    ctx.request_repaint_after(due.saturating_duration_since(Instant::now()));
+                }
             }
             if self.show_devices
                 && !self.devices_loading
@@ -6220,6 +6341,27 @@ impl App {
                 if matches!(action, RemoteAction::Play | RemoteAction::Pause) {
                     self.clear_play_pending();
                 }
+                if action == RemoteAction::Volume {
+                    let too_many = result.as_ref().err().is_some_and(refused_as_too_many);
+                    let report = self.remote_volume.finished(too_many, Instant::now());
+                    if too_many {
+                        // The value is kept and sent again after a pause,
+                        // so the shown volume holds and this is said once.
+                        if report {
+                            self.toast_error(gettext(
+                                self.locale,
+                                "Spotify is limiting volume changes; the volume follows in a moment",
+                            ));
+                        }
+                        return;
+                    }
+                    self.send_remote_volume();
+                    // Checking playback after every step of a drag would
+                    // double its requests; check once it has settled.
+                    if result.is_ok() && self.remote_volume.busy() {
+                        return;
+                    }
+                }
                 match result {
                     Ok(()) => {
                         self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
@@ -7408,19 +7550,28 @@ impl App {
                     PlayerCommand::VolumePreview(volume)
                 });
             }
-            Target::Remote(_) if !settle || !self.can_set_volume() => {}
+            Target::Remote(_) if !self.can_set_volume() => {}
+            // A drag previews on another device too, paced by RemoteVolume.
             Target::Remote(device_id) => {
                 self.pending_remote_volume = Some((percent, Instant::now()));
-                self.backend.api(ApiRequest::Remote {
-                    action: RemoteAction::Volume,
-                    device_id,
-                    play: None,
-                    position_ms: 0,
-                    percent,
-                    flag: false,
-                    repeat: String::new(),
-                });
+                self.remote_volume.queue(percent, device_id);
+                self.send_remote_volume();
             }
+        }
+    }
+
+    /// Sends the queued volume for another device once it is due.
+    fn send_remote_volume(&mut self) {
+        if let Some((percent, device_id)) = self.remote_volume.take_due(Instant::now()) {
+            self.backend.api(ApiRequest::Remote {
+                action: RemoteAction::Volume,
+                device_id,
+                play: None,
+                position_ms: 0,
+                percent,
+                flag: false,
+                repeat: String::new(),
+            });
         }
     }
 
@@ -10423,6 +10574,13 @@ fn page_related_needs_load(pages: &HashMap<String, ArtistPage>, id: &str) -> boo
 /// restricted device answers 403 too, as "Restricted device", which differs.
 fn refused_going_back(error: &crate::api::client::ApiError) -> bool {
     error.status() == Some(403) && error.to_string().contains("Restriction violated")
+}
+
+/// Spotify asking for fewer requests, through the Web API or Connect.
+fn refused_as_too_many(error: &crate::api::client::ApiError) -> bool {
+    matches!(error, crate::api::client::ApiError::RateLimited)
+        || error.status() == Some(429)
+        || error.to_string().contains("429 Too Many Requests")
 }
 
 fn remote_action_label(locale: Locale, action: RemoteAction) -> Cow<'static, str> {
@@ -21436,6 +21594,110 @@ mod tests {
             crate::ui::devices::device_icon(now.device_kind.as_deref().unwrap()),
             crate::theme::Icon::Smartphone
         ));
+        app.backend.shutdown();
+    }
+
+    /// A drag sends one volume at a time, at most every 250 ms, and ends on
+    /// the value it was let go at.
+    #[test]
+    fn remote_volume_is_paced_and_ends_on_the_newest_value() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut volume = RemoteVolume::default();
+
+        volume.queue(10, Some("phone".into()));
+        assert_eq!(volume.take_due(at(0)), Some((10, Some("phone".into()))));
+        volume.queue(20, Some("phone".into()));
+        volume.queue(30, Some("phone".into()));
+        assert_eq!(volume.take_due(at(50)), None, "one request at a time");
+        assert!(!volume.finished(false, at(100)));
+        assert_eq!(volume.take_due(at(100)), None, "spaced 250 ms apart");
+        assert_eq!(volume.next_due(at(100)), Some(at(250)));
+        assert_eq!(
+            volume.take_due(at(250)),
+            Some((30, Some("phone".into()))),
+            "the newest value wins"
+        );
+        volume.finished(false, at(300));
+
+        volume.queue(30, Some("phone".into()));
+        assert_eq!(volume.take_due(at(600)), None, "an unchanged value is not sent");
+        assert!(!volume.busy());
+    }
+
+    #[test]
+    fn remote_volume_slows_after_its_budget() {
+        let start = Instant::now();
+        let mut volume = RemoteVolume::default();
+        let mut now = start;
+        for step in 0..REMOTE_VOLUME_BUDGET {
+            volume.queue((step % 100) as u8, None);
+            assert!(volume.take_due(now).is_some());
+            volume.finished(false, now);
+            now += REMOTE_VOLUME_INTERVAL;
+        }
+        volume.queue(99, None);
+        assert!(volume.take_due(now).is_none(), "the budget is spent");
+        let sent_at = now - REMOTE_VOLUME_INTERVAL;
+        assert_eq!(
+            volume.next_due(now),
+            Some(sent_at + REMOTE_VOLUME_SLOW_INTERVAL)
+        );
+    }
+
+    /// Spotify refusing a volume change as too many requests pauses volume
+    /// changes, reports it once, and then sends the newest value.
+    #[test]
+    fn remote_volume_waits_after_too_many_requests() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut volume = RemoteVolume::default();
+
+        volume.queue(40, None);
+        assert!(volume.take_due(at(0)).is_some());
+        assert!(volume.finished(true, at(100)), "the first refusal is reported");
+        assert!(volume.busy(), "the refused value is kept");
+        assert_eq!(volume.take_due(at(1_000)), None);
+        volume.queue(45, None);
+        assert_eq!(volume.take_due(at(5_100)), Some((45, None)));
+        assert!(
+            !volume.finished(true, at(5_200)),
+            "a refusal soon after is not reported again"
+        );
+        assert!(refused_as_too_many(&crate::api::client::ApiError::RateLimited));
+        assert!(refused_as_too_many(&crate::api::client::ApiError::Network(
+            "Resource has been exhausted { Response status code: 429 Too Many Requests }".into()
+        )));
+        assert!(!refused_as_too_many(
+            &crate::api::client::ApiError::Status {
+                status: 403,
+                message: "Restricted device".into(),
+            }
+        ));
+    }
+
+    /// Dragging the volume bar changes another device's volume while it
+    /// moves, and the bar keeps the dragged value while changes are pending.
+    #[test]
+    fn dragging_the_volume_changes_a_remote_device_at_once() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        app.local_ready = false;
+        app.frame_now = None;
+        assert!(matches!(app.target(), Target::Remote(_)));
+
+        app.apply(Action::PreviewVolume(30), &ctx);
+        assert!(app.remote_volume.in_flight, "the first step goes at once");
+        app.apply(Action::PreviewVolume(35), &ctx);
+        app.apply(Action::SetVolume(40), &ctx);
+        assert_eq!(app.now_playing().unwrap().volume_percent, 40);
+        assert!(matches!(app.remote_volume.queued, Some((40, _))));
+
+        // Long after the hold, a pending value still holds the bar.
+        app.pending_remote_volume = Some((40, Instant::now() - OPTIMISTIC_HOLD * 2));
+        assert_eq!(app.now_playing().unwrap().volume_percent, 40);
         app.backend.shutdown();
     }
 

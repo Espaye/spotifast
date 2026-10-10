@@ -193,6 +193,13 @@ song details Spotify did not supply in full, hands the read to the Web API
 instead of caching rows without songs. A song Spotify no longer has, or
 withholds for legal reasons, is an empty row, as the Web API shows it.
 
+Dragging the volume of another device changes it as the bar moves. One
+volume request is sent at a time, at most every 250 ms, and only when the
+value changed; the value at release is always sent last. After 40 changes
+within 30 seconds they slow to one a second. If Spotify still refuses one as
+too many requests, volume changes pause for five seconds and then send only
+the newest value, so other playback commands keep working.
+
 Spotify can also explicitly refuse the key needed to decrypt a track. When
 that happens, Spotifast stops local playback and leaves the rest of the queue
 alone instead of treating every following track as unavailable. This refusal

@@ -634,6 +634,10 @@ pub struct App {
     pub web_app: Option<String>,
     pending_remote_position: Option<(u32, Instant)>,
     pending_remote_volume: Option<(u8, Instant)>,
+    /// A volume Spotify pushed for the remote device. A poll already on
+    /// its way may still carry the one before, so it is held like a
+    /// volume set here.
+    pushed_remote_volume: Option<(u8, Instant)>,
     /// A local volume set here that the engine has not echoed back yet. It
     /// reports `VolumeChanged` asynchronously while position snapshots land
     /// every second, so a snapshot must not undo the change on its way past.
@@ -1216,6 +1220,7 @@ impl App {
             web_app: None,
             pending_remote_position: None,
             pending_remote_volume: None,
+            pushed_remote_volume: None,
             pending_local_volume: None,
             pending_local_position: None,
             optimistic_playing: None,
@@ -2015,8 +2020,10 @@ impl App {
                 }
             }
         };
-        let volume = match self.pending_remote_volume {
-            Some((volume, at)) if at.elapsed() < OPTIMISTIC_HOLD => volume,
+        let volume = match (self.pending_remote_volume, self.pushed_remote_volume) {
+            (Some((volume, at)), _) | (_, Some((volume, at))) if at.elapsed() < OPTIMISTIC_HOLD => {
+                volume
+            }
             _ => device
                 .and_then(|device| device.volume_percent)
                 .unwrap_or(50),
@@ -2485,6 +2492,9 @@ impl App {
                 Event::Local(state) => self.handle_local(*state),
                 Event::RemoteChanged => {
                     self.remote_pushed_at.get_or_insert_with(Instant::now);
+                }
+                Event::RemoteVolume { device_id, volume } => {
+                    self.handle_remote_volume(&device_id, volume);
                 }
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent {
@@ -8140,6 +8150,27 @@ impl App {
                 self.refresh_queue(true);
             }
         }
+    }
+
+    /// Shows a volume Spotify pushed for the device playing elsewhere, such
+    /// as one turned on the speaker itself, without asking the Web API. A
+    /// volume set here and not yet confirmed still wins. A Web API device
+    /// without an id (a restricted one, such as Sonos) is taken to be the
+    /// pushed one, since the push names the device that plays.
+    fn handle_remote_volume(&mut self, device_id: &str, volume: u16) {
+        let Some(device) = self
+            .remote
+            .as_mut()
+            .and_then(|remote| remote.state.device.as_mut())
+        else {
+            return;
+        };
+        if device.id.as_deref().is_some_and(|id| id != device_id) {
+            return;
+        }
+        let percent = volume_to_percent(volume);
+        device.volume_percent = Some(percent);
+        self.pushed_remote_volume = Some((percent, Instant::now()));
     }
 
     /// When to poll for a change Spotify pushed: at once, unless the last
@@ -26902,6 +26933,51 @@ mod tests {
             crate::ui::devices::device_icon(now.device_kind.as_deref().unwrap()),
             crate::theme::Icon::Smartphone
         ));
+        app.backend.shutdown();
+    }
+
+    /// A volume turned on the speaker itself shows as Spotify pushes it,
+    /// without a poll, and a poll already on its way cannot undo it. A
+    /// volume set here and not yet confirmed still wins.
+    #[test]
+    fn a_pushed_volume_shows_at_once_and_outlasts_a_late_poll() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        app.local_ready = false;
+        app.frame_now = None;
+        let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
+        device.id = None;
+        device.is_restricted = true;
+        device.volume_percent = Some(40);
+        assert!(matches!(app.target(), Target::Remote(_)));
+
+        app.handle_remote_volume("sonos", percent_to_volume(55));
+        assert_eq!(app.now_playing().unwrap().volume_percent, 55);
+        let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
+        device.volume_percent = Some(40);
+        assert_eq!(
+            app.now_playing().unwrap().volume_percent,
+            55,
+            "a late poll from before the push"
+        );
+
+        app.pending_remote_volume = Some((20, Instant::now()));
+        app.handle_remote_volume("sonos", percent_to_volume(60));
+        assert_eq!(app.now_playing().unwrap().volume_percent, 20);
+
+        app.pending_remote_volume = None;
+        let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
+        device.id = Some("phone".into());
+        app.pushed_remote_volume = None;
+        device.volume_percent = Some(40);
+        app.handle_remote_volume("sonos", percent_to_volume(70));
+        assert_eq!(
+            app.now_playing().unwrap().volume_percent,
+            40,
+            "a push about another device than the one shown"
+        );
         app.backend.shutdown();
     }
 

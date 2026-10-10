@@ -608,6 +608,7 @@ pub fn populate(app: &mut App) {
             is_playing: true,
             item: Some(PlayableItem::Track(tracks[0].clone())),
             currently_playing_type: Some("track".into()),
+            actions: Default::default(),
         },
         received_at: Instant::now(),
     });

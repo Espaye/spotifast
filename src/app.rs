@@ -1336,6 +1336,26 @@ impl App {
         }
     }
 
+    /// Whether Previous restarts the song on a remote device rather than
+    /// stepping back. The device itself steps back however far into the
+    /// song it is, and Spotify refuses to go back from the first song of a
+    /// list, so after three seconds, or with nothing to go back to, Previous
+    /// restarts the song, as librespot does locally.
+    fn remote_previous_restarts(&self) -> bool {
+        if !matches!(self.target(), Target::Remote(_)) {
+            return false;
+        }
+        let late = self
+            .now_playing_live()
+            .is_some_and(|now| now.position_ms > RESTART_BEFORE_PREVIOUS);
+        // A song change still settling makes the reported refusal stale.
+        let first = self.intent_track.is_none()
+            && self
+                .remote_fresh()
+                .is_some_and(|remote| remote.state.actions.disallows.skipping_prev);
+        late || first
+    }
+
     /// Playback state shown by the UI, including a recent local request.
     pub fn believed_playing(&self) -> bool {
         if let Some((playing, at)) = self.optimistic_playing
@@ -6193,6 +6213,15 @@ impl App {
                             }
                         }
                     }
+                    // Spotify refuses to go back from the first song. A quick
+                    // second Previous can reach it before the poll that says
+                    // so, so restart the song, as when it is known in time.
+                    Err(error)
+                        if matches!(action, RemoteAction::Previous)
+                            && refused_going_back(&error) =>
+                    {
+                        self.seek(0);
+                    }
                     Err(error) => {
                         self.optimistic_playing = None;
                         self.pending_remote_position = None;
@@ -8426,6 +8455,9 @@ impl App {
                     self.step_resume(false);
                 }
             }
+            Action::Previous if self.remote_previous_restarts() => {
+                self.seek(0);
+            }
             Action::Previous => {
                 // Next names its expected destination so the row moves before
                 // the engine does. Previous has no forward queue row to name;
@@ -10350,6 +10382,12 @@ fn winamp_on_top_level(winamp_window: bool, on_top: bool) -> Option<egui::Window
 
 fn page_related_needs_load(pages: &HashMap<String, ArtistPage>, id: &str) -> bool {
     pages.get(id).is_some_and(|page| page.related.needs_load())
+}
+
+/// Spotify's answer to Previous when there is no song to go back to. A
+/// restricted device answers 403 too, as "Restricted device", which differs.
+fn refused_going_back(error: &crate::api::client::ApiError) -> bool {
+    error.status() == Some(403) && error.to_string().contains("Restriction violated")
 }
 
 fn remote_action_label(locale: Locale, action: RemoteAction) -> Cow<'static, str> {
@@ -21240,6 +21278,71 @@ mod tests {
         app.apply(Action::SetVolume(10), &ctx);
         assert!(matches!(app.pending_remote_volume, Some((10, _))));
         app.backend.shutdown();
+    }
+
+    /// Previous restarts a remote song after three seconds, as it does locally,
+    /// and on the first song, where Spotify would refuse to go back.
+    #[test]
+    fn previous_restarts_a_remote_song_after_three_seconds() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        app.local_ready = false;
+        assert!(matches!(app.target(), Target::Remote(_)));
+
+        app.remote.as_mut().unwrap().state.progress_ms = Some(42_000);
+        app.apply(Action::Previous, &ctx);
+        assert!(matches!(app.pending_remote_position, Some((0, _))));
+
+        app.pending_remote_position = None;
+        app.remote.as_mut().unwrap().state.progress_ms = Some(1_000);
+        app.remote.as_mut().unwrap().state.is_playing = false;
+        app.apply(Action::Previous, &ctx);
+        assert!(
+            app.pending_remote_position.is_none(),
+            "early in a song Previous steps back instead of seeking"
+        );
+
+        // On the first song Spotify refuses to go back, so it restarts.
+        app.intent_track = None;
+        app.remote
+            .as_mut()
+            .unwrap()
+            .state
+            .actions
+            .disallows
+            .skipping_prev = true;
+        app.apply(Action::Previous, &ctx);
+        assert!(matches!(app.pending_remote_position, Some((0, _))));
+
+        // A Previous that reached the first song before the poll did is
+        // refused; the song restarts instead of reporting an error.
+        app.pending_remote_position = None;
+        let toasts = app.toasts.len();
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Previous,
+            result: Err(crate::api::client::ApiError::Status {
+                status: 403,
+                message: "Player command failed: Restriction violated".into(),
+            }),
+        });
+        assert!(matches!(app.pending_remote_position, Some((0, _))));
+        assert_eq!(app.toasts.len(), toasts, "no error is shown");
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn playback_state_reads_the_actions_spotify_disallows() {
+        let state: PlaybackState = serde_json::from_str(
+            r#"{"is_playing":true,"actions":{"disallows":{"pausing":true,"skipping_prev":true}}}"#,
+        )
+        .unwrap();
+        assert!(state.actions.disallows.skipping_prev);
+        for json in [r#"{"actions":null}"#, r#"{"actions":{"disallows":{}}}"#, "{}"] {
+            let state: PlaybackState = serde_json::from_str(json).unwrap();
+            assert!(!state.actions.disallows.skipping_prev);
+        }
     }
 
     #[test]

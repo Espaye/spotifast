@@ -719,6 +719,26 @@ pub struct PlaybackState {
     pub item: Option<PlayableItem>,
     #[serde(default)]
     pub currently_playing_type: Option<String>,
+    /// What the playing device refuses right now.
+    #[serde(default)]
+    #[serde(deserialize_with = "null_default")]
+    pub actions: PlaybackActions,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct PlaybackActions {
+    #[serde(default)]
+    #[serde(deserialize_with = "null_default")]
+    pub disallows: Disallows,
+}
+
+/// Commands Spotify reports it would refuse, such as going back from the
+/// first song. A listed action is `true`; one left out is allowed.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Disallows {
+    #[serde(default)]
+    #[serde(deserialize_with = "null_default")]
+    pub skipping_prev: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]

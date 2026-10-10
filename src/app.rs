@@ -81,6 +81,10 @@ const ASSUMED_CONTEXT_HOLD: Duration = Duration::from_secs(8);
 const PLAYBACK_HOLD: Duration = Duration::from_secs(6);
 /// Delay before checking playback again after a command.
 const REMOTE_RECHECK: Duration = Duration::from_millis(1200);
+/// Least time between polls that Spotify's pushes ask for. Turning another
+/// device's volume knob pushes several changes a second; this answers the
+/// first at once and folds the rest into one poll a second later.
+const REMOTE_PUSH_SPACING: Duration = Duration::from_secs(1);
 /// Delay before checking the queue after a local change.
 const QUEUE_RECHECK: Duration = Duration::from_millis(700);
 /// Number of stale queue responses accepted before trusting Spotify's state.
@@ -522,6 +526,9 @@ pub struct App {
     pending_transfer_to: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
     remote_recheck_at: Option<Instant>,
+    /// When Spotify pushed a change to another device that no poll since
+    /// has asked about.
+    remote_pushed_at: Option<Instant>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
     /// The main window's size, position and maximized state: from the
@@ -1023,6 +1030,7 @@ impl App {
             local_list: None,
             pending_transfer_to: None,
             remote_recheck_at: None,
+            remote_pushed_at: None,
             seek_preview: None,
             volume_preview: None,
             window_geometry: fastframe_shell::window::Geometry {
@@ -2065,6 +2073,9 @@ impl App {
                     }
                 }
                 Event::Local(state) => self.handle_local(*state),
+                Event::RemoteChanged => {
+                    self.remote_pushed_at.get_or_insert_with(Instant::now);
+                }
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent { url, color } => {
                     self.accent_pending.remove(&url);
@@ -3234,6 +3245,13 @@ impl App {
                 && Instant::now() >= due
             {
                 self.remote_recheck_at = None;
+                self.poll_remote(true);
+            }
+            if self
+                .remote_push_due()
+                .is_some_and(|due| Instant::now() >= due)
+            {
+                self.remote_pushed_at = None;
                 self.poll_remote(true);
             }
             if self.show_devices
@@ -7348,6 +7366,16 @@ impl App {
         }
     }
 
+    /// When to poll for a change Spotify pushed: at once, unless the last
+    /// poll was under [`REMOTE_PUSH_SPACING`] ago.
+    fn remote_push_due(&self) -> Option<Instant> {
+        if !self.is_connected() || self.offline {
+            return None;
+        }
+        let pushed = self.remote_pushed_at?;
+        Some(pushed.max(self.remote_polled_at + REMOTE_PUSH_SPACING))
+    }
+
     /// Makes the next poll due within 700 ms, whatever the interval: it
     /// counts back from the longest one, so a window hidden meanwhile does
     /// not put a follow-up poll off.
@@ -11147,7 +11175,13 @@ impl App {
         let polling = self
             .is_connected()
             .then(|| self.connected_repaint_interval());
-        [playing, pending, polling].into_iter().flatten().min()
+        let pushed = self
+            .remote_push_due()
+            .map(|due| due.saturating_duration_since(Instant::now()));
+        [playing, pending, polling, pushed]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// How long the headless loop may sleep after this tick: until the next
@@ -21364,6 +21398,49 @@ mod tests {
         assert!(matches!(app.target(), Target::Local));
         app.poll_remote_if_due();
         assert!(app.remote_poll_pending, "polled at once");
+    }
+
+    /// A change Spotify pushes for another device is polled at once. A
+    /// burst of them, such as a turned volume knob, waits for the spacing
+    /// and folds into one more poll.
+    #[test]
+    fn a_pushed_change_polls_at_once_and_a_burst_waits_its_turn() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        assert_eq!(app.remote_push_due(), None, "nothing pushed, nothing due");
+
+        app.remote_polled_at = Instant::now() - REMOTE_POLL_ACTIVE;
+        app.remote_pushed_at = Some(Instant::now());
+        assert!(
+            app.remote_push_due()
+                .is_some_and(|due| due <= Instant::now()),
+            "the last poll was long ago, so the push polls now"
+        );
+        assert_eq!(app.next_pass(), Some(Duration::ZERO));
+
+        app.remote_polled_at = Instant::now();
+        app.remote_pushed_at = Some(Instant::now());
+        let wait = app.next_pass().expect("a pass is due for the push");
+        assert!(
+            wait > Duration::from_millis(500) && wait <= REMOTE_PUSH_SPACING,
+            "a push right after a poll waits for the spacing, not the 4 s poll: {wait:?}"
+        );
+    }
+
+    /// A push left over from before signing out or going offline asks for
+    /// no pass, or the logic would spin.
+    #[test]
+    fn a_push_while_disconnected_asks_for_nothing() {
+        let mut app = headless_app();
+        app.remote_pushed_at = Some(Instant::now());
+        assert_eq!(app.remote_push_due(), None);
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.offline = true;
+        assert_eq!(app.remote_push_due(), None);
     }
 
     #[test]

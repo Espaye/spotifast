@@ -124,6 +124,8 @@ struct QueueShufflePending {
 pub struct NowPlaying {
     pub local: bool,
     pub device_name: Option<String>,
+    /// Spotify's device type, such as "Smartphone", for the device's icon.
+    pub device_kind: Option<String>,
     pub uri: String,
     pub id: Option<String>,
     pub title: String,
@@ -1423,6 +1425,7 @@ impl App {
         now.resuming = false;
         if let Some(actual) = actual {
             now.device_name = actual.device_name;
+            now.device_kind = actual.device_kind;
             now.repeat = actual.repeat;
             now.volume_percent = actual.volume_percent;
             now.can_control = actual.can_control;
@@ -1457,6 +1460,7 @@ impl App {
             return Some(NowPlaying {
                 local: true,
                 device_name: None,
+                device_kind: None,
                 uri: track.uri.clone(),
                 id: util::uri_id(&track.uri).map(str::to_string),
                 title: track.title.clone(),
@@ -1563,6 +1567,7 @@ impl App {
         Some(NowPlaying {
             local: false,
             device_name: device.map(|device| device.name.clone()),
+            device_kind: device.map(|device| device.kind.clone()),
             uri: item.uri().to_string(),
             id: item.id().map(str::to_string),
             title: item.name().to_string(),
@@ -1602,6 +1607,7 @@ impl App {
         Some(NowPlaying {
             local: true,
             device_name: None,
+            device_kind: None,
             uri: uri.to_string(),
             id: track.id.clone(),
             title: track.name.clone(),
@@ -12389,6 +12395,7 @@ mod tests {
         app.frame_now = Some(NowPlaying {
             local: true,
             device_name: None,
+            device_kind: None,
             uri: in_progress.into(),
             id: None,
             title: String::new(),
@@ -21343,6 +21350,28 @@ mod tests {
             let state: PlaybackState = serde_json::from_str(json).unwrap();
             assert!(!state.actions.disallows.skipping_prev);
         }
+    }
+
+    /// The "Playing on" badge shows the playing device's own icon, so a
+    /// phone is drawn as a phone rather than as a speaker.
+    #[test]
+    fn remote_playback_reports_the_device_kind_for_its_icon() {
+        let mut app = headless_app();
+        crate::demo::populate(&mut app);
+        app.local_ready = false;
+        app.frame_now = None;
+        let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
+        device.name = "Galaxy S23".into();
+        device.kind = "Smartphone".into();
+
+        let now = app.now_playing().unwrap();
+        assert!(!now.local);
+        assert_eq!(now.device_kind.as_deref(), Some("Smartphone"));
+        assert!(matches!(
+            crate::ui::devices::device_icon(now.device_kind.as_deref().unwrap()),
+            crate::theme::Icon::Smartphone
+        ));
+        app.backend.shutdown();
     }
 
     #[test]

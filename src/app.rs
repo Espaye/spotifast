@@ -453,8 +453,9 @@ pub struct App {
     pending_transfer_to: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
     remote_recheck_at: Option<Instant>,
-    /// Until when a song just started elsewhere is polled every second.
-    remote_starting_until: Option<Instant>,
+    /// Until when a song just started elsewhere is polled every second, and
+    /// the last poll sent before the command, whose answer is stale.
+    remote_starting: Option<(u64, Instant)>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
     /// Window geometry to restore on next attach, from the session file.
@@ -900,7 +901,7 @@ impl App {
             local_list: None,
             pending_transfer_to: None,
             remote_recheck_at: None,
-            remote_starting_until: None,
+            remote_starting: None,
             seek_preview: None,
             volume_preview: None,
             session_window_size: session.window_size,
@@ -4997,13 +4998,14 @@ impl App {
                                 .map(|item| item.uri().to_string())
                         });
                         self.reconcile_remote_track_intent(seq, uri.as_deref());
-                        if self.intent_track.is_none()
+                        if self.remote_starting.is_some_and(|(before, _)| seq > before)
+                            && self.intent_track.is_none()
                             && self
                                 .remote
                                 .as_ref()
                                 .is_some_and(|remote| remote.state.is_playing)
                         {
-                            self.remote_starting_until = None;
+                            self.remote_starting = None;
                         }
                         if let Some(remote) = &self.remote
                             && let Some(device) = &remote.state.device
@@ -6195,7 +6197,8 @@ impl App {
                             action,
                             RemoteAction::Play | RemoteAction::Next | RemoteAction::Previous
                         ) {
-                            self.remote_starting_until = Some(Instant::now() + PLAYBACK_HOLD);
+                            self.remote_starting =
+                                Some((self.remote_poll_seq, Instant::now() + PLAYBACK_HOLD));
                         }
                         if action == RemoteAction::Shuffle {
                             self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
@@ -10052,8 +10055,8 @@ impl App {
     /// starts within a second instead of up to four.
     fn connected_repaint_interval(&self) -> Duration {
         if self
-            .remote_starting_until
-            .is_some_and(|until| Instant::now() < until)
+            .remote_starting
+            .is_some_and(|(_, until)| Instant::now() < until)
         {
             return REMOTE_POLL_STARTING;
         }
@@ -18156,6 +18159,8 @@ mod tests {
 
     /// A song started on another device is polled every second until that
     /// device reports it playing, then the usual four-second poll resumes.
+    /// A poll sent before the command describes the old song, so its
+    /// answer does not end the fast poll.
     #[test]
     fn a_remote_start_is_polled_every_second_until_it_plays() {
         let mut app = headless_app();
@@ -18164,12 +18169,24 @@ mod tests {
         assert_eq!(app.connected_repaint_interval(), REMOTE_POLL_ACTIVE);
 
         app.handle_api(ApiResponse::Remote {
-            action: RemoteAction::Play,
+            action: RemoteAction::Previous,
             result: Ok(()),
         });
         assert_eq!(app.connected_repaint_interval(), REMOTE_POLL_STARTING);
 
         let mut state = app.remote.as_ref().unwrap().state.clone();
+        state.is_playing = true;
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(state.clone())),
+        });
+        assert_eq!(
+            app.connected_repaint_interval(),
+            REMOTE_POLL_STARTING,
+            "a late answer to a poll sent before the command is stale"
+        );
+
+        app.remote_poll_seq += 1;
         state.is_playing = false;
         app.handle_api(ApiResponse::PlaybackState {
             seq: app.remote_poll_seq,

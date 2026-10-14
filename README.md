@@ -142,8 +142,9 @@ is Spotifast's sibling. Both are built on
 With local playback enabled, Spotify pushes changes from other devices over
 Spotifast's existing Connect session. Playback changes trigger a refresh;
 volume-only changes appear directly without an extra request. Push-triggered
-refreshes are at least a second apart. This computer's own playback pushes
-and position updates cause no requests, and regular polling remains the fallback.
+refreshes are at least a second apart. Connect pushes are ignored when this
+computer is the active device both before and after; position-only updates
+cause no requests. Regular polling remains the fallback.
 
 ## Sonos playback
 

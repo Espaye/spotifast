@@ -558,7 +558,7 @@ pub struct App {
     /// A volume Spotify pushed for the remote device. A poll already on
     /// its way may still carry the one before, so it is held like a
     /// volume set here.
-    pushed_remote_volume: Option<(u8, Instant)>,
+    pushed_remote_volume: Option<(u8, Instant, String)>,
     /// A local volume set here that the engine has not echoed back yet. It
     /// reports `VolumeChanged` asynchronously while position snapshots land
     /// every second, so a snapshot must not undo the change on its way past.
@@ -1657,10 +1657,12 @@ impl App {
                 }
             }
         };
-        let volume = match (self.pending_remote_volume, self.pushed_remote_volume) {
-            (Some((volume, at)), _) | (_, Some((volume, at))) if at.elapsed() < OPTIMISTIC_HOLD => {
-                volume
-            }
+        let volume = match (
+            self.pending_remote_volume,
+            self.pushed_remote_volume.as_ref(),
+        ) {
+            (Some((volume, at)), _) if at.elapsed() < OPTIMISTIC_HOLD => volume,
+            (_, Some((volume, at, _))) if at.elapsed() < OPTIMISTIC_HOLD => *volume,
             _ => device
                 .and_then(|device| device.volume_percent)
                 .unwrap_or(50),
@@ -5945,6 +5947,15 @@ impl App {
                             .remote
                             .as_ref()
                             .map(|remote| remote.state.shuffle_state);
+                        if let Some((_, _, pushed_device_id)) = &self.pushed_remote_volume
+                            && state
+                                .as_ref()
+                                .and_then(|state| state.device.as_ref())
+                                .and_then(|device| device.id.as_deref())
+                                .is_some_and(|id| id != pushed_device_id)
+                        {
+                            self.pushed_remote_volume = None;
+                        }
                         self.remote = state.map(|state| RemoteSnapshot {
                             state,
                             received_at: Instant::now(),
@@ -7394,7 +7405,7 @@ impl App {
         }
         let percent = volume_to_percent(volume);
         device.volume_percent = Some(percent);
-        self.pushed_remote_volume = Some((percent, Instant::now()));
+        self.pushed_remote_volume = Some((percent, Instant::now(), device_id.to_owned()));
     }
 
     /// When to poll for a change Spotify pushed: at once, unless the last
@@ -24631,10 +24642,37 @@ mod tests {
         app.handle_remote_volume("sonos", percent_to_volume(60));
         assert_eq!(app.now_playing().unwrap().volume_percent, 20);
 
+        app.pending_remote_volume = Some((20, Instant::now() - OPTIMISTIC_HOLD));
+        assert_eq!(
+            app.now_playing().unwrap().volume_percent,
+            60,
+            "an expired user change must not hide a fresh push"
+        );
         app.pending_remote_volume = None;
+
+        // Unknown and matching identified snapshots retain the held volume.
+        for id in [None, Some("sonos")] {
+            let mut state = app.remote.as_ref().unwrap().state.clone();
+            let device = state.device.as_mut().unwrap();
+            device.id = id.map(str::to_owned);
+            device.volume_percent = Some(40);
+            app.handle_api(ApiResponse::PlaybackState {
+                seq: app.remote_poll_seq,
+                result: Ok(Some(state)),
+            });
+            assert!(app.pushed_remote_volume.is_some());
+            assert_eq!(app.now_playing().unwrap().volume_percent, 60);
+        }
+
+        let mut state = app.remote.as_ref().unwrap().state.clone();
+        state.device.as_mut().unwrap().id = Some("phone".into());
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(state)),
+        });
+        assert!(app.pushed_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 40);
         let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
-        device.id = Some("phone".into());
-        app.pushed_remote_volume = None;
         device.volume_percent = Some(40);
         app.handle_remote_volume("sonos", percent_to_volume(70));
         assert_eq!(

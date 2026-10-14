@@ -3770,7 +3770,6 @@ impl App {
                 .remote_push_due()
                 .is_some_and(|due| Instant::now() >= due)
             {
-                self.remote_pushed_at = None;
                 self.poll_remote(true);
             }
             if self.show_devices
@@ -5724,6 +5723,9 @@ impl App {
         if !self.is_connected() {
             return;
         }
+        // This read covers every push received before it starts. A push
+        // arriving while it is pending remains for a follow-up.
+        self.remote_pushed_at = None;
         self.remote_poll_pending = true;
         self.remote_polled_at = Instant::now();
         self.remote_poll_seq += 1;
@@ -8184,10 +8186,11 @@ impl App {
         self.pushed_remote_volume = Some((percent, Instant::now(), device_id.to_owned()));
     }
 
-    /// When to poll for a change Spotify pushed: at once, unless the last
-    /// poll was under [`REMOTE_PUSH_SPACING`] ago.
+    /// When to poll for a change Spotify pushed: after a pending poll
+    /// completes, and at least [`REMOTE_PUSH_SPACING`] after its start. The
+    /// response wakes the app, so waiting for it needs no push timer.
     fn remote_push_due(&self) -> Option<Instant> {
-        if !self.is_connected() || self.offline {
+        if !self.is_connected() || self.offline || self.remote_poll_pending {
             return None;
         }
         let pushed = self.remote_pushed_at?;
@@ -23522,6 +23525,116 @@ mod tests {
             wait > Duration::from_millis(500) && wait <= REMOTE_PUSH_SPACING,
             "a push right after a poll waits for the spacing, not the 4 s poll: {wait:?}"
         );
+    }
+
+    /// Slow polls must still update playback during a burst of pushes. A
+    /// push that arrives after the poll started asks for one follow-up.
+    #[test]
+    fn pushed_changes_wait_for_a_slow_poll_and_keep_its_response() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.settings.check_for_updates = false;
+        app.poll_remote(false);
+
+        for progress_ms in [1_000, 2_000] {
+            let seq = app.remote_poll_seq;
+            app.remote_polled_at = Instant::now() - Duration::from_secs(2);
+            let pushed = Instant::now();
+            for _ in 0..3 {
+                app.remote_pushed_at.get_or_insert(pushed);
+                app.tick(&ctx);
+                assert_eq!(app.remote_poll_seq, seq, "the pending poll still counts");
+                assert_eq!(app.remote_pushed_at, Some(pushed));
+                assert_eq!(app.remote_push_due(), None, "wait for the response");
+                assert_ne!(app.next_pass(), Some(Duration::ZERO), "no timer spin");
+            }
+
+            app.handle_api(ApiResponse::PlaybackState {
+                seq,
+                result: Ok(Some(PlaybackState {
+                    progress_ms: Some(progress_ms),
+                    ..Default::default()
+                })),
+            });
+            assert!(!app.remote_poll_pending);
+            assert_eq!(
+                app.remote.as_ref().unwrap().state.progress_ms,
+                Some(progress_ms)
+            );
+            assert_eq!(app.remote_pushed_at, Some(pushed));
+
+            app.tick(&ctx);
+            assert_eq!(app.remote_poll_seq, seq + 1, "one follow-up for the burst");
+            assert!(app.remote_poll_pending);
+            assert_eq!(app.remote_pushed_at, None);
+        }
+        app.backend.shutdown();
+    }
+
+    /// A regular poll started after a push already covers it, even if its
+    /// response takes longer than the push spacing.
+    #[test]
+    fn a_poll_started_after_a_push_covers_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.settings.check_for_updates = false;
+        app.remote_polled_at = Instant::now() - REMOTE_POLL_UNSEEN;
+        app.remote_pushed_at = Some(Instant::now());
+        app.tick(&ctx);
+        let seq = app.remote_poll_seq;
+        assert!(app.remote_poll_pending);
+        assert_eq!(
+            app.remote_pushed_at, None,
+            "the regular poll covers the push"
+        );
+
+        app.remote_polled_at = Instant::now() - Duration::from_secs(2);
+        app.tick(&ctx);
+        assert_eq!(app.remote_poll_seq, seq);
+        app.handle_api(ApiResponse::PlaybackState {
+            seq,
+            result: Ok(None),
+        });
+        app.tick(&ctx);
+        assert_eq!(app.remote_poll_seq, seq, "no redundant follow-up");
+        assert!(!app.remote_poll_pending);
+        app.backend.shutdown();
+    }
+
+    /// An empty or failed read also releases the pending poll, so a newer
+    /// push gets its follow-up instead of being lost or waiting forever.
+    #[test]
+    fn a_push_after_a_poll_retries_after_an_empty_or_failed_response() {
+        let ctx = egui::Context::default();
+        for result in [
+            Ok(None),
+            Err(crate::api::ApiError::Network("read failed".into())),
+        ] {
+            let mut app = headless_app();
+            app.auth = AuthStatus::Connected {
+                username: "alice".into(),
+            };
+            app.settings.check_for_updates = false;
+            app.poll_remote(false);
+            let seq = app.remote_poll_seq;
+            app.remote_polled_at = Instant::now() - Duration::from_secs(2);
+            app.remote_pushed_at = Some(Instant::now());
+            app.tick(&ctx);
+            assert_eq!(app.remote_poll_seq, seq);
+            app.handle_api(ApiResponse::PlaybackState { seq, result });
+            assert!(!app.remote_poll_pending);
+            app.tick(&ctx);
+            assert_eq!(app.remote_poll_seq, seq + 1);
+            assert!(app.remote_poll_pending);
+            assert_eq!(app.remote_pushed_at, None);
+            app.backend.shutdown();
+        }
     }
 
     /// A push left over from before signing out or going offline asks for

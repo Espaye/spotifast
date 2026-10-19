@@ -371,23 +371,23 @@ impl ClusterView {
 
 /// Forwards cluster pushes that change another device's playback, so the
 /// interface shows them at once instead of on its next poll: a new volume
-/// as it is, anything else as a reason to poll. The first push is only the
-/// baseline: the interface polls when it connects anyway.
+/// as it is, anything else as a reason to poll. Spotify pushes no cluster
+/// back for this device's own announcement, so the first push often is the
+/// next change on another device, and it counts as one: at most one extra
+/// poll per connect.
 async fn watch_cluster(
     mut updates: BoxedStreamResult<ClusterUpdate>,
     own_device: String,
     notify: Notify,
 ) {
     use futures_util::StreamExt as _;
-    let mut shown: Option<ClusterView> = None;
+    let mut shown = ClusterView::default();
     while let Some(update) = updates.next().await {
         let Some(cluster) = update.ok().and_then(|update| update.cluster.into_option()) else {
             continue;
         };
         let view = ClusterView::of(&cluster);
-        if let Some(shown) = &shown
-            && shown.changed_elsewhere(&view, &own_device)
-        {
+        if shown.changed_elsewhere(&view, &own_device) {
             notify(match shown.volume_only(&view) {
                 Some(volume) => EngineEvent::RemoteVolume {
                     device_id: view.active_device.clone(),
@@ -396,7 +396,7 @@ async fn watch_cluster(
                 None => EngineEvent::RemoteChanged,
             });
         }
-        shown = Some(view);
+        shown = view;
     }
 }
 
@@ -2110,6 +2110,15 @@ mod tests {
             .mut_or_insert_default()
             .shuffling_context = true;
         assert!(shown.changed_elsewhere(&ClusterView::of(&shuffled), "this"));
+    }
+
+    /// The first push after connecting is often already a change on another
+    /// device, such as a pause on the phone, so it is news and polls.
+    #[test]
+    fn the_first_push_after_connecting_is_news() {
+        let first = ClusterView::of(&cluster("sonos", "spotify:track:a", false, 30_000));
+        assert!(ClusterView::default().changed_elsewhere(&first, "this"));
+        assert_eq!(ClusterView::default().volume_only(&first), None);
     }
 
     /// While this device plays, its own events carry every change, so its

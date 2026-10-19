@@ -102,6 +102,16 @@ pub struct RemoteSnapshot {
     pub received_at: Instant,
 }
 
+/// A volume Spotify pushed for the remote device.
+struct PushedVolume {
+    percent: u8,
+    at: Instant,
+    device_id: String,
+    /// The last poll sent before the push. Its response, or an older one,
+    /// may still carry the volume from before.
+    poll_seq: u64,
+}
+
 /// A context shown as playing before Spotify confirms it.
 struct AssumedContext {
     uri: String,
@@ -637,7 +647,7 @@ pub struct App {
     /// A volume Spotify pushed for the remote device. A poll already on
     /// its way may still carry the one before, so it is held like a
     /// volume set here.
-    pushed_remote_volume: Option<(u8, Instant, String)>,
+    pushed_remote_volume: Option<PushedVolume>,
     /// A local volume set here that the engine has not echoed back yet. It
     /// reports `VolumeChanged` asynchronously while position snapshots land
     /// every second, so a snapshot must not undo the change on its way past.
@@ -2025,7 +2035,7 @@ impl App {
             self.pushed_remote_volume.as_ref(),
         ) {
             (Some((volume, at)), _) if at.elapsed() < OPTIMISTIC_HOLD => volume,
-            (_, Some((volume, at, _))) if at.elapsed() < OPTIMISTIC_HOLD => *volume,
+            (_, Some(pushed)) if pushed.at.elapsed() < OPTIMISTIC_HOLD => pushed.percent,
             _ => device
                 .and_then(|device| device.volume_percent)
                 .unwrap_or(50),
@@ -3770,6 +3780,14 @@ impl App {
                 .remote_push_due()
                 .is_some_and(|due| Instant::now() >= due)
             {
+                // A change Spotify pushed after a command's recheck was
+                // planned makes this read the confirming look.
+                if let (Some(recheck), Some(pushed)) =
+                    (self.remote_recheck_at, self.remote_pushed_at)
+                    && pushed + REMOTE_RECHECK >= recheck
+                {
+                    self.remote_recheck_at = None;
+                }
                 self.poll_remote(true);
             }
             if self.show_devices
@@ -6650,7 +6668,7 @@ impl App {
                 }
                 self.remote_poll_pending = false;
                 match result {
-                    Ok(state) => {
+                    Ok(mut state) => {
                         let previous_uri = self.remote.as_ref().and_then(|remote| {
                             remote
                                 .state
@@ -6662,14 +6680,24 @@ impl App {
                             .remote
                             .as_ref()
                             .map(|remote| remote.state.shuffle_state);
-                        if let Some((_, _, pushed_device_id)) = &self.pushed_remote_volume
+                        if let Some(pushed) = &self.pushed_remote_volume
                             && state
                                 .as_ref()
                                 .and_then(|state| state.device.as_ref())
                                 .and_then(|device| device.id.as_deref())
-                                .is_some_and(|id| id != pushed_device_id)
+                                .is_some_and(|id| id != pushed.device_id)
                         {
                             self.pushed_remote_volume = None;
+                        }
+                        // A poll sent before the push read the volume from
+                        // before it. Kept as pushed, it still shows once the
+                        // hold ends, and a volume-only push asks for no poll.
+                        if let Some(pushed) = &self.pushed_remote_volume
+                            && seq <= pushed.poll_seq
+                            && let Some(device) =
+                                state.as_mut().and_then(|state| state.device.as_mut())
+                        {
+                            device.volume_percent = Some(pushed.percent);
                         }
                         self.remote = state.map(|state| RemoteSnapshot {
                             state,
@@ -8183,7 +8211,12 @@ impl App {
         }
         let percent = volume_to_percent(volume);
         device.volume_percent = Some(percent);
-        self.pushed_remote_volume = Some((percent, Instant::now(), device_id.to_owned()));
+        self.pushed_remote_volume = Some(PushedVolume {
+            percent,
+            at: Instant::now(),
+            device_id: device_id.to_owned(),
+            poll_seq: self.remote_poll_seq,
+        });
     }
 
     /// When to poll for a change Spotify pushed: after a pending poll
@@ -23527,6 +23560,31 @@ mod tests {
         );
     }
 
+    /// A command's own push polls at once and stands in for the recheck the
+    /// command planned. A push from before the command does not.
+    #[test]
+    fn a_push_after_a_command_stands_in_for_its_recheck() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.settings.check_for_updates = false;
+        app.poll_remote(false);
+        app.remote_poll_pending = false;
+
+        for (pushed_ago, stands_in) in [(Duration::ZERO, true), (Duration::from_secs(2), false)] {
+            let seq = app.remote_poll_seq;
+            app.remote_poll_pending = false;
+            app.remote_polled_at = Instant::now() - REMOTE_PUSH_SPACING;
+            app.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
+            app.remote_pushed_at = Some(Instant::now() - pushed_ago);
+            app.tick(&ctx);
+            assert_eq!(app.remote_poll_seq, seq + 1, "the push polls at once");
+            assert_eq!(app.remote_recheck_at.is_none(), stands_in);
+        }
+    }
+
     /// Slow polls must still update playback during a burst of pushes. A
     /// push that arrives after the poll started asks for one follow-up.
     #[test]
@@ -27112,9 +27170,28 @@ mod tests {
             assert!(app.pushed_remote_volume.is_some());
             assert_eq!(app.now_playing().unwrap().volume_percent, 60);
         }
+        app.pushed_remote_volume.as_mut().unwrap().at -= OPTIMISTIC_HOLD;
+        assert_eq!(
+            app.now_playing().unwrap().volume_percent,
+            60,
+            "a late poll's volume must not return once the hold ends"
+        );
 
+        // A poll sent after the push read the newer volume.
+        app.remote_poll_seq += 1;
         let mut state = app.remote.as_ref().unwrap().state.clone();
-        state.device.as_mut().unwrap().id = Some("phone".into());
+        state.device.as_mut().unwrap().volume_percent = Some(45);
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(state)),
+        });
+        assert_eq!(app.now_playing().unwrap().volume_percent, 45);
+
+        app.handle_remote_volume("sonos", percent_to_volume(60));
+        let mut state = app.remote.as_ref().unwrap().state.clone();
+        let device = state.device.as_mut().unwrap();
+        device.id = Some("phone".into());
+        device.volume_percent = Some(40);
         app.handle_api(ApiResponse::PlaybackState {
             seq: app.remote_poll_seq,
             result: Ok(Some(state)),

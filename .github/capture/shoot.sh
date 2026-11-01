@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shoot.sh BINARY OUTDIR [CLICKS_FILE]
 # Every page at a narrow and a normal size in dark and light, each in fresh
-# XDG directories. CLICKS_FILE lines: NAME PAGE WIDTHxHEIGHT X,Y
+# XDG directories. CLICKS_FILE lines: NAME PAGE WIDTHxHEIGHT X,Y [X,Y]; with
+# a second point the shot right-clicks the first and then hovers the second.
 set -u
 bin=$1 out=$2 clicks=${3:-}
 mkdir -p "$out"
@@ -24,10 +25,12 @@ for size in 800x600 1280x800; do
   done
 done
 if [ -n "$clicks" ]; then
-  while read -r name page size point; do
+  while read -r name page size point hover; do
     [ -z "$name" ] && continue
+    pointer=(--demo-click "$point")
+    [ -n "$hover" ] && pointer=(--demo-drag "$point:$hover")
     for theme in dark light; do
-      shot "$name" "$page" "$size" "$theme" --demo-click "$point"
+      shot "$name" "$page" "$size" "$theme" "${pointer[@]}"
     done
   done < "$clicks"
 fi

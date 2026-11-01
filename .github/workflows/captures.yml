@@ -11,8 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: picker
-            ref: playlist-picker-checks
+          - name: before
+            ref: 9bc5b21bc30fb2897fa637e9f76f06da43d09296
+          - name: after
+            ref: playlist-picker-checks-next
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,7 +37,9 @@ jobs:
           workspaces: app
           key: captures-${{ matrix.name }}
       - name: Capture-only demo data
-        run: python3 tools/.github/capture/patch_demo.py app/src/demo.rs
+        run: |
+          python3 tools/.github/capture/patch_demo.py app/src/demo.rs
+          python3 tools/.github/capture/patch_pointer.py app/src/entrypoint.rs
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo

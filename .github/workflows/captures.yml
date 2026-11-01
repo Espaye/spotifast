@@ -13,10 +13,8 @@ jobs:
         include:
           - name: base
             ref: 796393c458c7f0244319179ee0d8119620cadc95
-          - name: picker
-            ref: playlist-picker-checks
-          - name: links
-            ref: playlist-description-links
+          - name: listeners
+            ref: artist-monthly-listeners
     steps:
       - uses: actions/checkout@v4
         with:

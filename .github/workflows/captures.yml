@@ -31,7 +31,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri fonts-noto-cjk
+            libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri fonts-noto-cjk \
+            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2
       - name: Toolchain
         working-directory: app
         run: rustup show active-toolchain || rustup toolchain install
@@ -46,7 +47,8 @@ jobs:
         run: cargo build --locked --features demo
       - name: Shoot
         run: bash tools/.github/capture/shoot.sh "$PWD/app/target/debug/spotifast" shots tools/.github/capture/clicks.txt
-      - uses: actions/upload-artifact@v4
+      - if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: shots-${{ matrix.name }}
           path: shots

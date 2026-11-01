@@ -13,8 +13,9 @@ shot() {
   XDG_CONFIG_HOME=$home/config XDG_DATA_HOME=$home/data XDG_STATE_HOME=$home/state \
     XDG_CACHE_HOME=$home/cache timeout 120 xvfb-run -a -s "-screen 0 1920x1200x24" \
     "$bin" --demo-page "$page" --demo-size "$size" --demo-shot "$out/$name-$size-$theme.png" \
-    "${show[@]}" "$@" || echo "FAILED $name $size $theme"
+    "${show[@]}" "$@" || { echo "FAILED $name $size $theme"; failed=1; }
 }
+failed=0
 for size in 800x600 1280x800; do
   for theme in dark light; do
     shot home home $size $theme
@@ -31,3 +32,4 @@ if [ -n "$clicks" ]; then
   done < "$clicks"
 fi
 ls -la "$out"
+exit $failed

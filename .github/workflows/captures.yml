@@ -1,0 +1,52 @@
+name: captures
+on:
+  push:
+    branches: [ci/captures]
+jobs:
+  shots:
+    name: shots (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: base
+            ref: 796393c458c7f0244319179ee0d8119620cadc95
+          - name: picker
+            ref: playlist-picker-checks
+          - name: links
+            ref: playlist-description-links
+          - name: listeners
+            ref: artist-monthly-listeners
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.ref }}
+          path: app
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri fonts-noto-cjk
+      - name: Toolchain
+        working-directory: app
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+          key: captures-${{ matrix.name }}
+      - name: Capture-only demo data
+        run: python3 tools/.github/capture/patch_demo.py app/src/demo.rs
+      - name: Build
+        working-directory: app
+        run: cargo build --locked --features demo
+      - name: Shoot
+        run: bash tools/.github/capture/shoot.sh "$PWD/app/target/debug/spotifast" shots tools/.github/capture/clicks.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shots-${{ matrix.name }}
+          path: shots

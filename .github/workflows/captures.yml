@@ -17,8 +17,6 @@ jobs:
             ref: playlist-picker-checks
           - name: links
             ref: playlist-description-links
-          - name: listeners
-            ref: artist-monthly-listeners
     steps:
       - uses: actions/checkout@v4
         with:

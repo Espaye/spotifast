@@ -14,9 +14,10 @@ def swap(old, new):
 
 
 swap(
+    "\"Your weekly mixtape of fresh music. Enjoy new music and deep cuts "
     "picked for you. Updates every Monday.\".into()",
-    "picked for you. Updates every Monday. Also try "
-    "<a href=spotify:playlist:pl1>Late night focus</a>.\".into()",
+    "\"Pairs well with <a href=spotify:playlist:pl1>Late night focus</a>. "
+    "Updates every Monday.\".into()",
 )
 swap(
     '    app.saved.insert("spotify:artist:art0".into(), true);\n',

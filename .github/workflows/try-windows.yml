@@ -1,0 +1,41 @@
+name: Try build (Windows x64)
+
+# Fork-only: an unsigned portable Windows build of a ci/try-* branch, to try
+# fixes before they go upstream. Never part of an upstream pull request.
+on:
+  push:
+    branches: ["ci/try-*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - run: rustup target add x86_64-pc-windows-msvc
+      - run: vcpkg install glew:x64-windows-static
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Portable folder
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/spotifast.exe packaging/spotifast-portable.txt dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spotifast-try-windows-x64
+          path: dist/
+          if-no-files-found: error

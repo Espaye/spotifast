@@ -84,10 +84,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui,
             Rect::from_min_size(
                 ui.max_rect().min,
-                vec2(
-                    ui.max_rect().width(),
-                    theme::top_bar_height() + theme::titlebar_inset(ui.ctx()),
-                ),
+                vec2(ui.max_rect().width(), header_drag_height(ui.ctx())),
             ),
         );
     }
@@ -636,12 +633,32 @@ fn controls_reservation(
     space
 }
 
+/// Windows' caption feedback also covers the gap after the toolbar. The
+/// next view starts after that gap, so stopping at the row alone leaves a
+/// strip under Close that can still receive egui's nearby-pointer hover.
+fn caption_header_height(ctx: &Context) -> f32 {
+    let spacing = ctx.global_style().spacing.item_spacing.y;
+    caption_header_height_for(cfg!(windows), spacing)
+}
+
+fn caption_header_height_for(windows: bool, spacing: f32) -> f32 {
+    theme::CUSTOM_TOP_BAR_HEIGHT + if windows { spacing } else { 0.0 }
+}
+
+fn header_drag_height(ctx: &Context) -> f32 {
+    if cfg!(windows) && fastframe_titlebar::enabled() {
+        caption_header_height(ctx)
+    } else {
+        theme::top_bar_height() + theme::titlebar_inset(ctx)
+    }
+}
+
 /// Left-hand Linux controls sit above the sidebar's navigation rows.
 pub(super) fn linux_left_controls_inset(ctx: &egui::Context) -> f32 {
     if !cfg!(target_os = "linux") {
         return 0.0;
     }
-    let footprint = fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT);
+    let footprint = fastframe_titlebar::footprint(ctx, caption_header_height(ctx));
     if footprint.left > 0.0 {
         footprint.height
     } else {
@@ -656,7 +673,7 @@ pub(super) fn window_controls_reservation(
     topbar_width: f32,
 ) -> WindowControlsReservation {
     controls_reservation(
-        fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT),
+        fastframe_titlebar::footprint(ctx, caption_header_height(ctx)),
         queue,
         lyrics,
         topbar_width,
@@ -675,7 +692,7 @@ fn caption_buttons(ui: &mut egui::Ui, palette: &theme::Palette, locale: crate::i
             palette.secondary
         },
         button: palette.surface_hover,
-        header_height: theme::CUSTOM_TOP_BAR_HEIGHT,
+        header_height: caption_header_height(ui.ctx()),
     };
     // Literal calls, so xgettext extracts each label.
     let minimize = gettext(locale, "Minimize");
@@ -767,6 +784,31 @@ mod window_chrome_tests {
         right: 3.0 * 36.0 + 5.0,
         height: theme::CUSTOM_TOP_BAR_HEIGHT,
     };
+
+    /// Compare against egui's actual cursor advance, including its spacing,
+    /// rather than assuming the toolbar's requested size is its full extent.
+    #[test]
+    fn windows_caption_feedback_reaches_the_next_views_top() {
+        for spacing in [0.0, 6.0, 10.0] {
+            let ctx = Context::default();
+            let mut next_view_top = 0.0;
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.spacing_mut().item_spacing.y = spacing;
+                let top = ui.cursor().min.y;
+                let _ = ui.allocate_exact_size(
+                    vec2(200.0, theme::CUSTOM_TOP_BAR_HEIGHT),
+                    egui::Sense::hover(),
+                );
+                next_view_top = ui.cursor().min.y - top;
+            });
+            assert_eq!(caption_header_height_for(true, spacing), next_view_top);
+            assert_eq!(
+                caption_header_height_for(false, spacing),
+                theme::CUSTOM_TOP_BAR_HEIGHT,
+                "other platforms retain their caption row"
+            );
+        }
+    }
 
     #[test]
     fn the_side_panels_drag_a_window_without_a_native_title_bar() {

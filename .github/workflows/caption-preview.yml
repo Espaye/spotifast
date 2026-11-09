@@ -22,8 +22,12 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           cache-generation: test-v1
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check caption layout
+        run: mbx test --locked --no-default-features --features demo --lib ui::window_chrome_tests
       # Screenshot-only app: sample data by default and no optional audio
-      # visualizers. The title bar is the exact Fastframe PR 61 revision.
+      # visualizers. Fastframe PR 61 plus the app-side toolbar spacing fix.
       - name: Build Windows preview
         run: mbx build --locked --no-default-features --features demo --bin spotifast
       - name: Check preview entrypoint
@@ -38,6 +42,7 @@ jobs:
           Double-click Spotifast-caption-preview.exe.
           This screenshot preview opens with invented demo data and an isolated temporary profile.
           It uses Fastframe PR 61 at fa1d63b546eaecf60c17e7716a42b739c4e7cc0a.
+          The app also includes the correction for the gap below its toolbar.
           Spotifast base: b99170f234fe3e2e7f6473ff549d4dd3ed45d4c7.
           MilkDrop and native Soloist audio are omitted from this screenshot build.
           "@ | Set-Content -LiteralPath dist/README.txt

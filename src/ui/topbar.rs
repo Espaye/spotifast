@@ -218,7 +218,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui,
             egui::Rect::from_min_size(
                 ui.cursor().min,
-                vec2(width, content_height + window_controls.topbar_top),
+                vec2(
+                    width,
+                    super::header_drag_height(ui.ctx()) + window_controls.topbar_top,
+                ),
             ),
         );
     }

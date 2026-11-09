@@ -88,6 +88,11 @@ struct Cli {
     #[arg(long, value_name = "WIDTHxHEIGHT", value_parser = parse_demo_size)]
     demo_size: Option<[f32; 2]>,
 
+    /// Capture a maximized window instead of a full-screen demo.
+    #[cfg(feature = "demo")]
+    #[arg(long, hide = true, requires = "demo_shot", conflicts_with = "demo_size")]
+    demo_maximized: bool,
+
     /// Hold a drag for `--demo-shot`: press the primary button at the first
     /// point, move to the second and keep it held, as `X,Y:X,Y` in points.
     #[cfg(feature = "demo")]
@@ -625,12 +630,16 @@ pub(crate) fn run() -> eframe::Result<()> {
         let locale = lease.peek(|app| app.locale);
         #[cfg(feature = "demo")]
         let options = {
-            let options = native_options(
-                shot.is_some() && mini.is_none() && demo_inner.is_none(),
+            let maximize_shot = cli.demo_maximized && mini.is_none();
+            let mut options = native_options(
+                shot.is_some() && mini.is_none() && demo_inner.is_none() && !maximize_shot,
                 mini,
                 demo_inner,
                 geometry,
             );
+            if maximize_shot {
+                options.viewport = options.viewport.with_maximized(true);
+            }
             if demo {
                 demo_native_options(options, demo_storage.clone())
             } else {

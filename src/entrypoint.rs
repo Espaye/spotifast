@@ -90,7 +90,12 @@ struct Cli {
 
     /// Capture a maximized window instead of a full-screen demo.
     #[cfg(feature = "demo")]
-    #[arg(long, hide = true, requires = "demo_shot", conflicts_with = "demo_size")]
+    #[arg(
+        long,
+        hide = true,
+        requires = "demo_shot",
+        conflicts_with = "demo_size"
+    )]
     demo_maximized: bool,
 
     /// Hold a drag for `--demo-shot`: press the primary button at the first

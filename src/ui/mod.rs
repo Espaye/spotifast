@@ -792,7 +792,7 @@ mod window_chrome_tests {
         for spacing in [0.0, 6.0, 10.0] {
             let ctx = Context::default();
             let mut next_view_top = 0.0;
-            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 ui.spacing_mut().item_spacing.y = spacing;
                 let top = ui.cursor().min.y;
                 let _ = ui.allocate_exact_size(
@@ -801,6 +801,7 @@ mod window_chrome_tests {
                 );
                 next_view_top = ui.cursor().min.y - top;
             });
+            output.textures_delta.clear();
             assert_eq!(caption_header_height_for(true, spacing), next_view_top);
             assert_eq!(
                 caption_header_height_for(false, spacing),

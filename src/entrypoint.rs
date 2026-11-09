@@ -33,7 +33,7 @@ struct Cli {
 
     /// Start with sample data and no Spotify connection (for screenshots).
     #[cfg(feature = "demo")]
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     demo: bool,
 
     #[cfg(feature = "demo")]

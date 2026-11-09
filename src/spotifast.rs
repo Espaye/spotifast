@@ -1,6 +1,6 @@
 //! Spotifast desktop command.
 
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod entrypoint;
 

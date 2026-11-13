@@ -891,14 +891,19 @@ impl PlaylistChecks {
     }
 }
 
-/// Membership from the editable playlists already loaded, refreshed only when
-/// their rows change. Never scan every playlist's songs for every painted row.
+/// Membership from a playlist already loaded. Keep it across page eviction,
+/// and replace it when a new generation or row revision is available.
+#[derive(Clone)]
+struct PlaylistHeartSongs {
+    source: (u64, u64),
+    songs: std::collections::HashSet<String>,
+}
+
 #[derive(Clone, Default)]
 struct PlaylistMembership {
     frame: Option<u64>,
     account: Option<String>,
-    sources: Vec<(String, u64, u64)>,
-    songs: std::collections::HashSet<String>,
+    playlists: std::collections::HashMap<String, PlaylistHeartSongs>,
 }
 
 /// A green heart means Liked Songs or a known song in an editable playlist.
@@ -910,30 +915,43 @@ pub(crate) fn saved_to_library(app: &App, ctx: &egui::Context, uri: &str) -> boo
     }
     let frame = ctx.cumulative_frame_nr();
     ctx.data_mut(|data| {
-        let cache = data.get_temp_mut_or_default::<PlaylistMembership>(
-            egui::Id::new("playlist-heart-membership"),
-        );
+        let cache = data.get_temp_mut_or_default::<PlaylistMembership>(egui::Id::new(
+            "playlist-heart-membership",
+        ));
         if cache.frame != Some(frame) {
             cache.frame = Some(frame);
             let account = app.user_id().map(str::to_owned);
-            let sources: Vec<_> = app.editable_playlists().into_iter().filter_map(|(id, _)| {
-                let page = app.playlist_pages.get(&id)?;
-                Some((id, page.generation, page.items.revision))
-            }).collect();
-            if cache.account != account || cache.sources != sources {
-                cache.songs.clear();
-                for (id, _, _) in &sources {
-                    let page = &app.playlist_pages[id];
-                    cache.songs.extend(page.items.items.iter()
-                        .filter_map(PlaylistItem::playable)
-                        .map(|item| item.uri().to_string()));
-                    cache.songs.extend(page.local_additions.iter().cloned());
-                }
+            if cache.account != account {
+                cache.playlists.clear();
                 cache.account = account;
-                cache.sources = sources;
+            }
+            let editable = app.editable_playlists();
+            cache.playlists.retain(|id, _| editable.iter().any(|(editable, _)| editable == id));
+            for (id, _) in editable {
+                let Some(page) = app.playlist_pages.get(&id) else {
+                    continue;
+                };
+                // A revisited page can be waiting for its disk/network read.
+                // Keep prior knowledge until it has rows to replace it with.
+                if !page.items.loaded_once
+                    && page.pending_writes == 0
+                    && page.local_additions.is_empty()
+                {
+                    continue;
+                }
+                let source = (page.generation, page.items.revision);
+                if cache.playlists.get(&id).is_some_and(|known| known.source == source) {
+                    continue;
+                }
+                let songs = page.items.items.iter()
+                    .filter_map(PlaylistItem::playable)
+                    .map(|item| item.uri().to_string())
+                    .chain(page.local_additions.iter().cloned())
+                    .collect();
+                cache.playlists.insert(id, PlaylistHeartSongs { source, songs });
             }
         }
-        cache.songs.contains(uri)
+        cache.playlists.values().any(|playlist| playlist.songs.contains(uri))
     })
 }
 
@@ -970,7 +988,11 @@ pub(crate) fn playlist_checklist(
                 .unwrap_or_else(|| PlaylistChecks::new(app, item));
             let before = app.actions.len();
             let field = playlist_picker(
-                ui, app, std::slice::from_ref(item), &mut query, Some(&mut checks),
+                ui,
+                app,
+                std::slice::from_ref(item),
+                &mut query,
+                Some(&mut checks),
             );
             if fresh {
                 field.request_focus();
@@ -984,7 +1006,8 @@ pub(crate) fn playlist_checklist(
                 .clicked();
             if done {
                 if checks.liked != (app.is_saved(item.uri()) == Some(true)) {
-                    app.actions.push(Action::ToggleSaved(item.uri().to_string()));
+                    app.actions
+                        .push(Action::ToggleSaved(item.uri().to_string()));
                 }
                 let changes = checks.changes(app, item);
                 app.actions.extend(changes);

@@ -30,6 +30,23 @@ jobs:
         with:
           name: row-hearts-formatting
           path: formatting.patch
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+          bundler-cache: true
+          working-directory: docs
+      - name: Build documentation
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec jekyll-vitepress build --destination "$RUNNER_TEMP/row-heart-docs"
   windows:
     runs-on: windows-latest
     timeout-minutes: 90

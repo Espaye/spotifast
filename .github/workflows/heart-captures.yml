@@ -1,0 +1,94 @@
+name: Row heart visual evidence
+
+# Fork-only captures. Never part of the product commit.
+on:
+  push:
+    branches: ["ci/heart-evidence"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: row-heart-captures
+  cancel-in-progress: true
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all
+      - run: git diff --binary > formatting.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: row-hearts-evidence-formatting
+          path: formatting.patch
+  captures:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        revision: [before, after]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.revision == 'before' && 'b75af93ad5b157ab4205710be2f0ea7878587082' || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri \
+            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: row-heart-captures-v1
+      - name: Candidate heart regressions
+        if: matrix.revision == 'after'
+        run: |
+          mbx test --locked --lib --all-features heart
+          mbx test --locked --lib --all-features translated_player_bar_labels_follow_control_state_and_empty_playback
+          mbx test --locked --lib --all-features saved_toggles_stay_green_while_hovered
+      - name: Deterministic demo artwork
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('src/demo.rs')
+          source = path.read_text()
+          start = source.index('fn image(seed: u32) -> Vec<Image> {')
+          end = source.index('\nconst ARTISTS:', start)
+          source = source[:start] + 'fn image(_seed: u32) -> Vec<Image> { Vec::new() }\n' + source[end:]
+          path.write_text(source)
+          PY
+      - run: mbx build --locked --features demo
+      - name: Capture matching pages and themes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shots
+          for size in 800x600 1280x800; do
+            for theme in dark light; do
+              for page in playlist:pl1 artist:art0; do
+                state=$(mktemp -d "$RUNNER_TEMP/heart-state.XXXXXX")
+                extra=()
+                if [ "$theme" = light ]; then extra=(--demo-show light); fi
+                XDG_CONFIG_HOME="$state/config" XDG_DATA_HOME="$state/data" \
+                XDG_STATE_HOME="$state/state" XDG_CACHE_HOME="$state/cache" \
+                  timeout 90 xvfb-run -a -s '-screen 0 1920x1200x24' \
+                  target/debug/spotifast --demo-page "$page" --demo-size "$size" \
+                  --demo-shot "$PWD/shots/${page/:/-}-$size-$theme.png" \
+                  --demo-shot-delay 1000 "${extra[@]}"
+                rm -rf "$state"
+              done
+            done
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: row-hearts-${{ matrix.revision }}
+          path: shots/
+          if-no-files-found: error

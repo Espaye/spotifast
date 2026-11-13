@@ -2787,7 +2787,16 @@ mod tests {
             // independently of the playlists that hold the song.
             let click = |ctx: &egui::Context, app: &mut App, label: &'static str| {
                 let tree = accessible_frame(ctx, app, vec![]);
-                let button = accessible_node(&tree, &gettext(locale, label), Role::Button);
+                let translated = gettext(locale, label);
+                let button = if label == "Add to playlist" {
+                    tree.nodes.iter().find(|(_, node)| {
+                        node.label() == Some(translated.as_ref())
+                            && node.role() == Role::Button
+                            && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
+                    }).expect("player bar heart").0
+                } else {
+                    accessible_node(&tree, &translated, Role::Button)
+                };
                 accessible_frame(
                     ctx,
                     app,
@@ -5897,26 +5906,52 @@ mod tests {
                             let output = draw(vec![egui::Event::PointerGone]);
                             let tree = output.platform_output.accesskit_update.as_ref().unwrap();
                             let heart = accessible_node(tree, "Add to playlist", Role::Button);
-                            let bounds = tree.nodes.iter().find(|(id, _)| *id == heart)
-                                .unwrap().1.bounds().unwrap();
+                            let bounds = tree
+                                .nodes
+                                .iter()
+                                .find(|(id, _)| *id == heart)
+                                .unwrap()
+                                .1
+                                .bounds()
+                                .unwrap();
                             let centre = egui::pos2(
                                 ((bounds.x0 + bounds.x1) / 2.0) as f32,
                                 ((bounds.y0 + bounds.y1) / 2.0) as f32,
                             );
                             let tinted = |output: &egui::FullOutput, color| {
-                                output.shapes.iter().any(|shape| matches!(&shape.shape,
+                                output.shapes.iter().any(|shape| {
+                                    matches!(&shape.shape,
                                     egui::Shape::Rect(rect) if rect.brush.is_some()
-                                        && rect.rect.contains(centre) && rect.fill == color))
+                                        && rect.rect.contains(centre) && rect.fill == color)
+                                })
                             };
                             assert_eq!(tinted(&output, palette.accent), popular && saved);
                             draw(vec![egui::Event::PointerMoved(centre)]);
                             let output = draw(vec![egui::Event::PointerMoved(centre)]);
-                            assert!(tinted(&output, if saved { palette.accent_hover } else { palette.text }));
-                            draw(vec![egui::Event::PointerGone,
-                                accessible_action(heart, egui::accesskit::Action::Focus, None)]);
+                            assert!(tinted(
+                                &output,
+                                if saved {
+                                    palette.accent_hover
+                                } else {
+                                    palette.text
+                                }
+                            ));
+                            draw(vec![
+                                egui::Event::PointerGone,
+                                accessible_action(heart, egui::accesskit::Action::Focus, None),
+                            ]);
                             let output = draw(vec![egui::Event::PointerGone]);
-                            assert!(tinted(&output, if saved { palette.accent_hover } else { palette.text }),
-                                "keyboard focus reveals the heart too");
+                            assert!(
+                                tinted(
+                                    &output,
+                                    if saved {
+                                        palette.accent_hover
+                                    } else {
+                                        palette.text
+                                    }
+                                ),
+                                "keyboard focus reveals the heart too"
+                            );
                             ctx.memory_mut(|memory| {
                                 if let Some(id) = memory.focused() {
                                     memory.surrender_focus(id);
@@ -5938,32 +5973,50 @@ mod tests {
             let item = PlayableItem::Track(track(1));
             let draw = |app: &mut App, events| {
                 heart_row_frame(&ctx, app, &item, popular, 900.0, events)
-                    .platform_output.accesskit_update.unwrap()
+                    .platform_output
+                    .accesskit_update
+                    .unwrap()
             };
             let click = |app: &mut App, label, role| {
                 let tree = draw(app, vec![]);
                 let node = accessible_node(&tree, label, role);
-                draw(app, vec![accessible_action(node, AccessibleAction::Click, None)]);
+                draw(
+                    app,
+                    vec![accessible_action(node, AccessibleAction::Click, None)],
+                );
                 draw(app, vec![])
             };
             let liked = |tree: &egui::accesskit::TreeUpdate| {
                 let node = accessible_node(tree, "Liked Songs", Role::CheckBox);
-                tree.nodes.iter().find(|(id, _)| *id == node).unwrap().1.toggled()
+                tree.nodes
+                    .iter()
+                    .find(|(id, _)| *id == node)
+                    .unwrap()
+                    .1
+                    .toggled()
                     == Some(egui::accesskit::Toggled::True)
             };
             draw(&mut app, vec![]);
             app.actions.clear();
             assert!(!liked(&click(&mut app, "Add to playlist", Role::Button)));
-            assert!(app.actions.is_empty(), "opening an unliked row does not like it");
+            assert!(
+                app.actions.is_empty(),
+                "opening an unliked row does not like it"
+            );
             assert!(liked(&click(&mut app, "Liked Songs", Role::CheckBox)));
             assert!(app.actions.is_empty(), "checking waits for Done");
-            draw(&mut app, pointer_click(egui::pos2(8.0, 690.0), egui::PointerButton::Primary));
+            draw(
+                &mut app,
+                pointer_click(egui::pos2(8.0, 690.0), egui::PointerButton::Primary),
+            );
             draw(&mut app, vec![]);
             assert!(app.actions.is_empty(), "a click outside drops edits");
             assert!(!liked(&click(&mut app, "Add to playlist", Role::Button)));
             click(&mut app, "Liked Songs", Role::CheckBox);
             click(&mut app, "Done", Role::Button);
-            assert!(matches!(app.actions.as_slice(), [Action::ToggleSaved(uri)] if uri == item.uri()));
+            assert!(
+                matches!(app.actions.as_slice(), [Action::ToggleSaved(uri)] if uri == item.uri())
+            );
             for action in std::mem::take(&mut app.actions) {
                 app.apply(action, &ctx);
             }
@@ -5987,17 +6040,38 @@ mod tests {
         };
         assert_eq!(app.is_saved(&uri), Some(false));
         assert!(query(&app), "membership does not require Liked Songs");
+        let held = app.playlist_pages.remove("pl1").unwrap();
+        assert!(query(&app), "page eviction must not lose known membership");
+        app.playlist_pages.insert("pl1".into(), held);
         let page = app.playlist_pages.get_mut("pl1").unwrap();
-        page.items.items.retain(|row| row.playable().is_none_or(|item| item.uri() != uri));
+        page.items
+            .items
+            .retain(|row| row.playable().is_none_or(|item| item.uri() != uri));
         page.items.revision += 1;
         assert!(!query(&app), "removal invalidates the membership index");
         let page = app.playlist_pages.get_mut("pl1").unwrap();
         page.local_additions.insert(uri.clone());
         page.items.revision += 1;
-        assert!(query(&app), "optimistic additions count before Spotify responds");
-        app.library.playlists = Loadable::Loaded(vec![]);
+        assert!(
+            query(&app),
+            "optimistic additions count before Spotify responds"
+        );
+        let library = std::mem::replace(&mut app.library.playlists, Loadable::Loaded(vec![]));
         assert!(!query(&app), "an unfollowed playlist no longer counts");
-        app.user = None;
+        app.library.playlists = library;
+        assert!(query(&app));
+        let page = app.playlist_pages.get_mut("pl1").unwrap();
+        page.items.loaded_once = false;
+        page.items.items.clear();
+        page.local_additions.clear();
+        page.pending_writes = 1;
+        page.items.revision += 1;
+        assert!(!query(&app), "removing an optimistic addition updates an unread playlist");
+        let page = app.playlist_pages.get_mut("pl1").unwrap();
+        page.local_additions.insert(uri.clone());
+        page.items.revision += 1;
+        assert!(query(&app));
+        app.user.as_mut().unwrap().id = "another-account".into();
         assert!(!query(&app), "membership never leaks to another account");
         app.backend.shutdown();
     }
@@ -6132,7 +6206,14 @@ mod tests {
             Loadable::Loaded(vec![make("drive", "Night drive"), make("day", "Daylight")]);
         let click = |app: &mut App, label: &str, role: Role| {
             let tree = accessible_frame(&ctx, app, vec![]);
-            let node = accessible_node(&tree, label, role);
+            let node = if label == "Add to playlist" {
+                tree.nodes.iter().find(|(_, node)| {
+                    node.label() == Some(label) && node.role() == role
+                        && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
+                }).expect("player bar heart").0
+            } else {
+                accessible_node(&tree, label, role)
+            };
             accessible_frame(
                 &ctx,
                 app,

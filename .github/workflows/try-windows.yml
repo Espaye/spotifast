@@ -1,0 +1,64 @@
+name: Try build (Windows x64)
+
+# Fork-only test builds. Keep this workflow out of the product commit.
+on:
+  push:
+    branches: ["ci/try-row-hearts"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: try-row-hearts
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all
+      - run: git diff --binary > formatting.patch
+      - uses: actions/upload-artifact@v7
+        with:
+          name: row-hearts-formatting
+          path: formatting.patch
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all
+      - run: vcpkg install glew:x64-windows-static
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: row-hearts-v1
+      - name: Regression tests
+        run: mbx test --locked --lib --all-features
+      - name: Portable test build
+        run: mbx build --locked --release --features demo
+      - name: Portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/spotifast.exe, packaging/spotifast-portable.txt dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spotifast-try-windows-x64
+          path: dist/
+          if-no-files-found: error

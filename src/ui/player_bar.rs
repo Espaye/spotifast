@@ -9,14 +9,14 @@ use crate::player::RepeatMode;
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::widgets::{PlaylistChecks, SliderEvent, thin_slider};
+use super::widgets::{SliderEvent, thin_slider};
 
 /// How much of the playing art's tint the bar's fill carries.
 const TINT_STRENGTH: f32 = 0.12;
 /// How long the bar takes to cross over to a new song's tint.
 const TINT_FADE_SECONDS: f32 = 0.45;
 const TINT_SESSION_ID: &str = "player-bar-tint-session";
-/// The playlist checklist a liked song's heart opens.
+/// The playlist checklist a saved song's heart opens.
 const LIKED_POPUP_ID: &str = "player-bar-liked-playlists";
 /// How strongly the visualizer shows through behind the controls: the
 /// spectrum's bars fade from their foot to their top, with a glow around
@@ -598,8 +598,8 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     }
 
     if !now.is_episode {
-        let saved = app.is_saved(&now.uri).unwrap_or(false);
-        // A liked heart stays green under the pointer, like shuffle.
+        let saved = super::widgets::saved_to_library(app, ui.ctx(), &now.uri);
+        // A saved heart stays green under the pointer, like shuffle.
         let (icon, color, hover, tooltip) = if saved {
             (
                 Icon::HeartFilled,
@@ -626,76 +626,17 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
         );
         let response = theme::icon_button(&mut heart_ui, icon, 17.0, color, hover, &tooltip);
         let popup_id = egui::Id::new(LIKED_POPUP_ID);
-        let query_id = popup_id.with("query");
-        let checks_id = popup_id.with("checks");
-        // What the menu holds while open, dropped once it closes.
-        let forget = |ui: &mut egui::Ui| {
-            ui.data_mut(|data| {
-                data.remove::<String>(query_id);
-                data.remove::<PlaylistChecks>(checks_id);
-            });
-        };
-        // A liked song's heart opens a checklist of Liked Songs and the
-        // playlists, as Spotify's phone app does: checks change nothing
-        // until Done, and a click outside drops them. The first click on a
-        // song not yet liked still likes it at once (#792).
+        // Keep the first-click save for a song not yet in the library (#792).
+        // Songs already in a playlist open the same checklist as row hearts.
         match song.as_ref().filter(|_| saved) {
+            Some(item) => {
+                super::widgets::playlist_checklist(ui, app, &response, popup_id, item);
+            }
             None => {
+                super::widgets::forget_playlist_checklist(ui, popup_id);
                 egui::Popup::close_id(ui.ctx(), popup_id);
-                forget(ui);
                 if response.clicked() {
                     app.actions.push(Action::ToggleSaved(now.uri.clone()));
-                }
-            }
-            Some(item) => {
-                let shown = egui::Popup::menu(&response)
-                    .id(popup_id)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .frame(super::widgets::menu_frame(&palette))
-                    .show(|ui| {
-                        let stored = ui.data(|data| data.get_temp::<String>(query_id));
-                        let fresh = stored.is_none();
-                        let mut query = stored.unwrap_or_default();
-                        let mut checks = ui
-                            .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
-                            .filter(|checks| checks.uri == item.uri())
-                            .unwrap_or_else(|| PlaylistChecks::new(app, item));
-                        let before = app.actions.len();
-                        let field = super::widgets::playlist_picker(
-                            ui,
-                            app,
-                            std::slice::from_ref(item),
-                            &mut query,
-                            Some(&mut checks),
-                        );
-                        if fresh {
-                            field.request_focus();
-                        }
-                        super::widgets::menu_separator(ui, &palette);
-                        let done = ui
-                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                theme::pill_button(ui, &palette, &gettext(app.locale, "Done"), true)
-                            })
-                            .inner
-                            .clicked();
-                        if done {
-                            if !checks.liked {
-                                app.actions.push(Action::ToggleSaved(now.uri.clone()));
-                            }
-                            let changes = checks.changes(app, item);
-                            app.actions.extend(changes);
-                        }
-                        ui.data_mut(|data| {
-                            data.insert_temp(query_id, query);
-                            data.insert_temp(checks_id, checks);
-                        });
-                        // Done or New playlist closes it.
-                        if done || app.actions.len() > before {
-                            ui.close();
-                        }
-                    });
-                if shown.is_none() {
-                    forget(ui);
                 }
             }
         }

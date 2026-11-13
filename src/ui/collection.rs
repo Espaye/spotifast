@@ -1047,6 +1047,7 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 added_by: added_by.as_deref(),
                 show_added_by: table.show_added_by,
                 show_plays: table.show_plays,
+                show_saved_heart: false,
                 compact: false,
                 thin,
                 shift,

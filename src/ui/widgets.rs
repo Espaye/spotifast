@@ -801,7 +801,7 @@ fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
     }
 }
 
-/// The heart's choices while its menu is open: whether the playing song
+/// The heart's choices while its menu is open: whether the song
 /// stays in Liked Songs and which playlists should hold it. Nothing changes
 /// until Done.
 #[derive(Clone)]
@@ -827,7 +827,7 @@ pub(crate) enum Mark {
 }
 
 impl PlaylistChecks {
-    /// A liked song, with a check on each playlist known to hold it.
+    /// A song, with a check on Liked Songs and each playlist known to hold it.
     pub(crate) fn new(app: &App, item: &PlayableItem) -> Self {
         let mut holding = std::collections::BTreeSet::new();
         let mut unread = std::collections::BTreeSet::new();
@@ -844,7 +844,7 @@ impl PlaylistChecks {
         }
         Self {
             uri: item.uri().to_string(),
-            liked: true,
+            liked: app.is_saved(item.uri()) == Some(true),
             chosen: holding.clone(),
             holding,
             unread,
@@ -888,6 +888,154 @@ impl PlaylistChecks {
             add,
             remove,
         })
+    }
+}
+
+/// Membership from a playlist already loaded. Keep it across page eviction,
+/// and replace it when a new generation or row revision is available.
+#[derive(Clone)]
+struct PlaylistHeartSongs {
+    source: (u64, u64),
+    songs: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Default)]
+struct PlaylistMembership {
+    frame: Option<u64>,
+    account: Option<String>,
+    playlists: std::collections::HashMap<String, PlaylistHeartSongs>,
+}
+
+/// A green heart means Liked Songs or a known song in an editable playlist.
+/// Spotify has no library-wide song-membership lookup; unread playlists stay
+/// unknown, as in the checklist itself. No requests are made for this colour.
+pub(crate) fn saved_to_library(app: &App, ctx: &egui::Context, uri: &str) -> bool {
+    if app.is_saved(uri) == Some(true) {
+        return true;
+    }
+    let frame = ctx.cumulative_frame_nr();
+    ctx.data_mut(|data| {
+        let cache = data.get_temp_mut_or_default::<PlaylistMembership>(egui::Id::new(
+            "playlist-heart-membership",
+        ));
+        if cache.frame != Some(frame) {
+            cache.frame = Some(frame);
+            let account = app.user_id().map(str::to_owned);
+            if cache.account != account {
+                cache.playlists.clear();
+                cache.account = account;
+            }
+            let editable = app.editable_playlists();
+            cache
+                .playlists
+                .retain(|id, _| editable.iter().any(|(editable, _)| editable == id));
+            for (id, _) in editable {
+                let Some(page) = app.playlist_pages.get(&id) else {
+                    continue;
+                };
+                // A revisited page can be waiting for its disk/network read.
+                // Keep prior knowledge until it has rows to replace it with.
+                if !page.items.loaded_once
+                    && page.pending_writes == 0
+                    && page.local_additions.is_empty()
+                {
+                    continue;
+                }
+                let source = (page.generation, page.items.revision);
+                if cache
+                    .playlists
+                    .get(&id)
+                    .is_some_and(|known| known.source == source)
+                {
+                    continue;
+                }
+                let songs = page
+                    .items
+                    .items
+                    .iter()
+                    .filter_map(PlaylistItem::playable)
+                    .map(|item| item.uri().to_string())
+                    .chain(page.local_additions.iter().cloned())
+                    .collect();
+                cache
+                    .playlists
+                    .insert(id, PlaylistHeartSongs { source, songs });
+            }
+        }
+        cache
+            .playlists
+            .values()
+            .any(|playlist| playlist.songs.contains(uri))
+    })
+}
+
+pub(crate) fn forget_playlist_checklist(ui: &mut Ui, popup_id: egui::Id) {
+    ui.data_mut(|data| {
+        data.remove::<String>(popup_id.with("query"));
+        data.remove::<PlaylistChecks>(popup_id.with("checks"));
+    });
+}
+
+/// Share the player bar's checklist with row hearts. Clicking outside drops
+/// edits; Done applies Liked Songs and playlist changes through actions.
+pub(crate) fn playlist_checklist(
+    ui: &mut Ui,
+    app: &mut App,
+    response: &egui::Response,
+    popup_id: egui::Id,
+    item: &PlayableItem,
+) {
+    let palette = app.palette;
+    let query_id = popup_id.with("query");
+    let checks_id = popup_id.with("checks");
+    let shown = egui::Popup::menu(response)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(menu_frame(&palette))
+        .show(|ui| {
+            let stored = ui.data(|data| data.get_temp::<String>(query_id));
+            let fresh = stored.is_none();
+            let mut query = stored.unwrap_or_default();
+            let mut checks = ui
+                .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
+                .filter(|checks| checks.uri == item.uri())
+                .unwrap_or_else(|| PlaylistChecks::new(app, item));
+            let before = app.actions.len();
+            let field = playlist_picker(
+                ui,
+                app,
+                std::slice::from_ref(item),
+                &mut query,
+                Some(&mut checks),
+            );
+            if fresh {
+                field.request_focus();
+            }
+            menu_separator(ui, &palette);
+            let done = ui
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    theme::pill_button(ui, &palette, &gettext(app.locale, "Done"), true)
+                })
+                .inner
+                .clicked();
+            if done {
+                if checks.liked != (app.is_saved(item.uri()) == Some(true)) {
+                    app.actions
+                        .push(Action::ToggleSaved(item.uri().to_string()));
+                }
+                let changes = checks.changes(app, item);
+                app.actions.extend(changes);
+            }
+            ui.data_mut(|data| {
+                data.insert_temp(query_id, query);
+                data.insert_temp(checks_id, checks);
+            });
+            if done || app.actions.len() > before {
+                ui.close();
+            }
+        });
+    if shown.is_none() {
+        forget_playlist_checklist(ui, popup_id);
     }
 }
 
@@ -1598,6 +1746,8 @@ pub struct TrackRow<'a> {
     /// Spotify's play count for the song, on album pages and an artist's
     /// popular songs once the counts arrived.
     pub show_plays: bool,
+    /// Keep saved hearts visible without hover in an artist's Popular list.
+    pub show_saved_heart: bool,
     pub compact: bool,
     /// One line for the name and the artists in a shorter row without the
     /// cover: the compact track list. `compact` stays the queue's narrow row.
@@ -2235,37 +2385,38 @@ fn track_row_contents(
         x += cols.plays;
     }
 
-    // Heart.
+    // Heart. Keep its button alive while the pointer moves into the popup.
     if cols.heart > 0.0 {
-        let saved = app.is_saved(row.item.uri());
         let heart_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.heart, row_height));
         if row.item.is_track() {
+            let saved = saved_to_library(app, ui.ctx(), row.item.uri());
+            let popup_id = ui.id().with(("row-heart", row.index, row.item.uri()));
             let mut child = ui.new_child(
                 UiBuilder::new()
                     .max_rect(heart_rect)
                     .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             );
             if !hovered
-                && saved != Some(true)
+                && !(row.show_saved_heart && saved)
+                && !egui::Popup::is_id_open(ui.ctx(), popup_id)
                 && !child.memory(|memory| memory.has_focus(child.next_auto_id()))
             {
                 child.set_opacity(0.0);
             }
-            // A liked heart stays green under the pointer.
-            let (icon, color, hover) = if saved == Some(true) {
+            let (icon, color, hover) = if saved {
                 (Icon::HeartFilled, palette.accent, palette.accent_hover)
             } else {
                 (Icon::Heart, palette.secondary, palette.text)
             };
-            let tooltip = if saved == Some(true) {
-                gettext(app.locale, "Remove from Liked Songs")
-            } else {
-                gettext(app.locale, "Save to Liked Songs")
-            };
-            if theme::icon_button(&mut child, icon, 16.0, color, hover, &tooltip).clicked() {
-                app.actions
-                    .push(Action::ToggleSaved(row.item.uri().to_string()));
-            }
+            let response = theme::icon_button(
+                &mut child,
+                icon,
+                16.0,
+                color,
+                hover,
+                &gettext(app.locale, "Add to playlist"),
+            );
+            playlist_checklist(ui, app, &response, popup_id, row.item);
         }
         x += cols.heart;
     }
@@ -4674,6 +4825,7 @@ mod tests {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays: false,
+                                    show_saved_heart: false,
                                     compact: false,
                                     thin: false,
                                     shift: 0.0,

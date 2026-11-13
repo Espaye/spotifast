@@ -4688,6 +4688,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -4796,6 +4797,7 @@ mod tests {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: false,
                                 },
                             );
                         });
@@ -4919,6 +4921,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -5853,7 +5856,7 @@ mod tests {
             },
         );
         let items = vec![item.clone()];
-        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unknown, "never read");
         let mut query = String::new();
         let mut draw = |app: &mut App, events| {
@@ -5921,7 +5924,7 @@ mod tests {
                 ..PlaylistPage::default()
             },
         );
-        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unchecked, "all rows read");
         app.backend.shutdown();
     }
@@ -6419,6 +6422,7 @@ mod tests {
                         picked_songs: &[],
                         picked_positions: &[],
                         position: None,
+                        show_saved_heart: false,
                     },
                 );
             }

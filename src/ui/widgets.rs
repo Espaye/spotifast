@@ -801,14 +801,16 @@ fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
     }
 }
 
-/// The heart's choices while its menu is open: whether the playing song
-/// stays in Liked Songs and which playlists should hold it. Nothing changes
-/// until Done.
+/// The heart's choices while its menu is open: whether the song is in
+/// Liked Songs and which playlists should hold it. Nothing changes until
+/// Done.
 #[derive(Clone)]
 pub(crate) struct PlaylistChecks {
     /// The song the menu opened for.
     pub uri: String,
     pub liked: bool,
+    /// Whether the song was in Liked Songs when the menu opened.
+    liked_before: bool,
     /// The playlists known to hold the song when the menu opened.
     holding: std::collections::BTreeSet<String>,
     /// The playlists not read far enough to tell. Done never takes the song
@@ -827,28 +829,45 @@ pub(crate) enum Mark {
 }
 
 impl PlaylistChecks {
-    /// A liked song, with a check on each playlist known to hold it.
-    pub(crate) fn new(app: &App, item: &PlayableItem) -> Self {
+    /// A check on Liked Songs when the song is liked, and on each playlist
+    /// known to hold it. `containing` is the playlist the heart's row sits
+    /// in, which holds the song whatever the index has read.
+    pub(crate) fn new(app: &App, item: &PlayableItem, containing: Option<&str>) -> Self {
         let mut holding = std::collections::BTreeSet::new();
         let mut unread = std::collections::BTreeSet::new();
         for (id, _) in app.editable_playlists() {
-            match app.local_playlist_duplicates(&id, std::slice::from_ref(item)) {
-                Some(found) if found.is_empty() => {}
-                Some(_) => {
+            let held = if containing == Some(id.as_str()) {
+                Some(true)
+            } else {
+                app.playlist_holds(&id, item.uri()).or_else(|| {
+                    app.local_playlist_duplicates(&id, std::slice::from_ref(item))
+                        .map(|found| !found.is_empty())
+                })
+            };
+            match held {
+                Some(true) => {
                     holding.insert(id);
                 }
+                Some(false) => {}
                 None => {
                     unread.insert(id);
                 }
             }
         }
+        let liked = app.is_saved(item.uri()) == Some(true);
         Self {
             uri: item.uri().to_string(),
-            liked: true,
+            liked,
+            liked_before: liked,
             chosen: holding.clone(),
             holding,
             unread,
         }
+    }
+
+    /// Whether any check differs from when the menu opened.
+    pub(crate) fn changed(&self) -> bool {
+        self.liked != self.liked_before || self.chosen != self.holding
     }
 
     pub(crate) fn mark(&self, id: &str) -> Mark {
@@ -889,6 +908,112 @@ impl PlaylistChecks {
             remove,
         })
     }
+}
+
+const HEART_MENU_OPEN: &str = "heart-menu-open";
+const HEART_MENU_WHEEL: &str = "heart-menu-wheel";
+
+/// Takes the wheel from every list while a heart's menu is open, so the
+/// page under the menu stays put; the menu hands it to its own list. Runs
+/// once a frame, before anything is drawn.
+pub(crate) fn hold_wheel_for_heart_menu(ctx: &egui::Context) {
+    let open = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(HEART_MENU_OPEN)))
+        .is_some_and(|id| egui::Popup::is_id_open(ctx, id));
+    let wheel = open.then(|| {
+        ctx.input_mut(|input| std::mem::replace(&mut input.smooth_scroll_delta, Vec2::ZERO))
+    });
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(HEART_MENU_WHEEL), wheel));
+}
+
+/// A heart's menu for `item`, opened by the heart's `response`: a
+/// checklist of Liked Songs and the account's playlists, as Spotify's
+/// phone app has. Checks change nothing until Done, and a click outside
+/// drops them; the button reads Cancel until something is checked or
+/// unchecked. `containing` is the playlist the heart's row sits in.
+/// Returns whether the menu is open.
+pub(crate) fn heart_menu(
+    ui: &mut Ui,
+    app: &mut App,
+    response: &egui::Response,
+    popup_id: egui::Id,
+    item: &PlayableItem,
+    containing: Option<&str>,
+) -> bool {
+    let palette = app.palette;
+    let query_id = popup_id.with("query");
+    let checks_id = popup_id.with("checks");
+    let shown = egui::Popup::menu(response)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(menu_frame(&palette))
+        .show(|ui| {
+            ui.data_mut(|data| data.insert_temp(egui::Id::new(HEART_MENU_OPEN), popup_id));
+            let wheel = ui
+                .data(|data| data.get_temp::<Option<Vec2>>(egui::Id::new(HEART_MENU_WHEEL)))
+                .flatten();
+            if let Some(wheel) = wheel {
+                ui.input_mut(|input| input.smooth_scroll_delta = wheel);
+            }
+            let stored = ui.data(|data| data.get_temp::<String>(query_id));
+            let fresh = stored.is_none();
+            let mut query = stored.unwrap_or_default();
+            let mut checks = ui
+                .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
+                .filter(|checks| checks.uri == item.uri())
+                .unwrap_or_else(|| PlaylistChecks::new(app, item, containing));
+            let before = app.actions.len();
+            let field = playlist_picker(
+                ui,
+                app,
+                std::slice::from_ref(item),
+                &mut query,
+                Some(&mut checks),
+            );
+            if fresh {
+                field.request_focus();
+            }
+            menu_separator(ui, &palette);
+            let changed = checks.changed();
+            let label = if changed {
+                gettext(app.locale, "Done")
+            } else {
+                gettext(app.locale, "Cancel")
+            };
+            let done = ui
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    theme::pill_button(ui, &palette, &label, changed)
+                })
+                .inner
+                .clicked();
+            if done && changed {
+                if checks.liked != checks.liked_before {
+                    app.actions.push(Action::SetSavedMany {
+                        uris: vec![checks.uri.clone()],
+                        saved: checks.liked,
+                    });
+                }
+                let changes = checks.changes(app, item);
+                app.actions.extend(changes);
+            }
+            ui.data_mut(|data| {
+                data.insert_temp(query_id, query);
+                data.insert_temp(checks_id, checks);
+            });
+            // Done, Cancel or New playlist closes it.
+            if done || app.actions.len() > before {
+                ui.close();
+            }
+            // What the menu's list left of the wheel stays out of the page.
+            ui.input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
+        });
+    if shown.is_none() {
+        ui.data_mut(|data| {
+            data.remove::<String>(query_id);
+            data.remove::<PlaylistChecks>(checks_id);
+        });
+    }
+    shown.is_some()
 }
 
 /// Shared by single-item and selection menus. Filtering is local and keeps
@@ -1616,6 +1741,10 @@ pub struct TrackRow<'a> {
     pub picked_positions: &'a [u32],
     /// This row's position in its playlist, whatever the view's order.
     pub position: Option<u32>,
+    /// Whether a song in Liked Songs or one of the account's playlists
+    /// shows its green heart without the pointer: an artist's popular
+    /// songs. Other lists show the heart only under the pointer.
+    pub show_saved_heart: bool,
 }
 
 /// Draw each credited artist separately so its Spotify id remains clickable.
@@ -2235,37 +2364,51 @@ fn track_row_contents(
         x += cols.plays;
     }
 
-    // Heart.
+    // Heart: green when the song is in Liked Songs or any of the
+    // account's playlists, and a click opens the checklist of them.
     if cols.heart > 0.0 {
-        let saved = app.is_saved(row.item.uri());
         let heart_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.heart, row_height));
         if row.item.is_track() {
+            let saved = app.saved_anywhere(row.item.uri());
+            let popup_id = ui.id().with(("row-heart", row.index));
             let mut child = ui.new_child(
                 UiBuilder::new()
                     .max_rect(heart_rect)
                     .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             );
             if !hovered
-                && saved != Some(true)
+                && !(saved && row.show_saved_heart)
+                && !egui::Popup::is_id_open(ui.ctx(), popup_id)
                 && !child.memory(|memory| memory.has_focus(child.next_auto_id()))
             {
                 child.set_opacity(0.0);
             }
-            // A liked heart stays green under the pointer.
-            let (icon, color, hover) = if saved == Some(true) {
+            // A green heart stays green under the pointer.
+            let (icon, color, hover) = if saved {
                 (Icon::HeartFilled, palette.accent, palette.accent_hover)
             } else {
                 (Icon::Heart, palette.secondary, palette.text)
             };
-            let tooltip = if saved == Some(true) {
-                gettext(app.locale, "Remove from Liked Songs")
-            } else {
-                gettext(app.locale, "Save to Liked Songs")
+            let response = theme::icon_button(
+                &mut child,
+                icon,
+                16.0,
+                color,
+                hover,
+                &gettext(app.locale, "Add to playlist"),
+            );
+            let containing = match row.context {
+                RowContext::Context {
+                    editable_playlist: Some((id, _)),
+                    ..
+                }
+                | RowContext::View {
+                    editable_playlist: Some((id, _)),
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
             };
-            if theme::icon_button(&mut child, icon, 16.0, color, hover, &tooltip).clicked() {
-                app.actions
-                    .push(Action::ToggleSaved(row.item.uri().to_string()));
-            }
+            heart_menu(ui, app, &response, popup_id, row.item, containing);
         }
         x += cols.heart;
     }
@@ -4681,6 +4824,7 @@ mod tests {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: false,
                                 },
                             );
                             rect = response.rect;

@@ -13,20 +13,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  format:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --all
-      - run: git diff --binary > formatting.patch
-      - uses: actions/upload-artifact@v7
-        with:
-          name: row-hearts-evidence-formatting
-          path: formatting.patch
   captures:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -62,10 +48,55 @@ jobs:
           source = path.read_text()
           start = source.index('fn image(seed: u32) -> Vec<Image> {')
           end = source.index('\nconst ARTISTS:', start)
-          source = source[:start] + 'fn image(_seed: u32) -> Vec<Image> { Vec::new() }\n' + source[end:]
+          replacement = 'fn image(_seed: u32) -> Vec<Image> { vec![Image { url: concat!("file://", env!("CARGO_MANIFEST_DIR"), "/packaging/icons/spotifast.svg").into(), width: Some(640), height: Some(640) }] }\n'
+          source = source[:start] + replacement + source[end:]
+          path.write_text(source)
+          path = Path('src/entrypoint.rs')
+          source = path.read_text()
+          needle = '    fn events(&mut self) -> Vec<egui::Event> {\n'
+          assert source.count(needle) == 1
+          source = source.replace(needle, needle + '        if !self.click && self.from == self.to { return vec![egui::Event::PointerMoved(self.to)]; }\n')
           path.write_text(source)
           PY
-      - run: mbx build --locked --features demo
+      - name: Locate the row heart in the actual layout
+        shell: bash
+        run: |
+          cat > examples/heart-point.rs <<'RS'
+          use spotifast::{app::{App, AppOptions}, backend::Waker, paths::AppDirs, settings::Settings, model::Page};
+          fn main() {
+              let args: Vec<_> = std::env::args().collect();
+              let size: Vec<f32> = args[2].split('x').map(|value| value.parse().unwrap()).collect();
+              let ctx = egui::Context::default();
+              ctx.enable_accesskit();
+              let root = std::path::PathBuf::from(std::env::var("RUNNER_TEMP").unwrap()).join("heart-point-state");
+              let waker = Waker::default();
+              let mut app = App::new(&waker, AppDirs { config: root.join("config"), state: root.join("state"), cache: root.join("cache") }, Settings::default(), AppOptions { media_controls: false, restore_sign_in: false, tray: false, autostart: false });
+              app.attach(&ctx);
+              spotifast::demo::populate(&mut app);
+              app.open(if args[1].starts_with("artist:") { Page::Artist("art0".into()) } else { Page::Playlist("pl1".into()) });
+              let mut tree = None;
+              for _ in 0..4 {
+                  let mut output = ctx.run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(size[0], size[1]))), ..Default::default() }, |ui| app.frame_ui(ui));
+                  output.textures_delta.clear();
+                  tree = output.platform_output.accesskit_update;
+              }
+              let tree = tree.unwrap();
+              let bounds = tree.nodes.iter().filter_map(|(_, node)| {
+                  let rect = node.bounds()?;
+                  (node.role() == egui::accesskit::Role::Button && matches!(node.label(), Some("Add to playlist" | "Save to Liked Songs" | "Remove from Liked Songs")) && rect.x0 > size[0] as f64 * 0.6 && rect.y0 > 200.0 && rect.y1 < size[1] as f64 - 84.0).then_some(rect)
+              }).min_by(|a, b| a.y0.total_cmp(&b.y0)).expect("visible row heart");
+              println!("{},{}", (bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+              app.backend.shutdown();
+          }
+          RS
+      - run: mbx build --locked --features demo --bin spotifast --example heart-point
+      - uses: actions/upload-artifact@v7
+        with:
+          name: row-heart-capture-tools-${{ matrix.revision }}
+          path: |
+            target/debug/spotifast
+            target/debug/examples/heart-point
+          retention-days: 2
       - name: Capture matching pages and themes
         shell: bash
         run: |
@@ -74,21 +105,28 @@ jobs:
           for size in 800x600 1280x800; do
             for theme in dark light; do
               for page in playlist:pl1 artist:art0; do
-                state=$(mktemp -d "$RUNNER_TEMP/heart-state.XXXXXX")
-                extra=()
-                if [ "$theme" = light ]; then extra=(--demo-show light); fi
-                XDG_CONFIG_HOME="$state/config" XDG_DATA_HOME="$state/data" \
-                XDG_STATE_HOME="$state/state" XDG_CACHE_HOME="$state/cache" \
-                  timeout 90 xvfb-run -a -s '-screen 0 1920x1200x24' \
-                  target/debug/spotifast --demo-page "$page" --demo-size "$size" \
-                  --demo-shot "$PWD/shots/${page/:/-}-$size-$theme.png" \
-                  --demo-shot-delay 1000 "${extra[@]}"
-                rm -rf "$state"
+                point=$(target/debug/examples/heart-point "$page" "$size")
+                for mode in resting hover menu; do
+                  state=$(mktemp -d "$RUNNER_TEMP/heart-state.XXXXXX")
+                  extra=()
+                  if [ "$theme" = light ]; then extra+=(--demo-show light); fi
+                  if [ "$mode" = hover ]; then extra+=(--demo-drag "$point:$point"); fi
+                  if [ "$mode" = menu ]; then extra+=(--demo-click "$point"); fi
+                  XDG_CONFIG_HOME="$state/config" XDG_DATA_HOME="$state/data" \
+                  XDG_STATE_HOME="$state/state" XDG_CACHE_HOME="$state/cache" \
+                    timeout 90 xvfb-run -a -s '-screen 0 1920x1200x24' \
+                    target/debug/spotifast --demo-page "$page" --demo-size "$size" \
+                    --demo-shot "$PWD/shots/${page/:/-}-$size-$theme-$mode.png" \
+                    --demo-shot-delay 1800 "${extra[@]}"
+                  rm -rf "$state"
+                done
               done
             done
           done
       - uses: actions/upload-artifact@v7
+        if: always()
         with:
           name: row-hearts-${{ matrix.revision }}
           path: shots/
+          retention-days: 2
           if-no-files-found: error

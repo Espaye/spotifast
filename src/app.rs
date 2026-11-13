@@ -16106,7 +16106,7 @@ mod tests {
         }
         for (role, label) in [
             (Role::Link, None),
-            (Role::Button, Some("Save to Liked Songs")),
+            (Role::Button, Some("Add to playlist")),
             (Role::Button, Some("More")),
         ] {
             let ctx = egui::Context::default();

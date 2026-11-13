@@ -926,7 +926,9 @@ pub(crate) fn saved_to_library(app: &App, ctx: &egui::Context, uri: &str) -> boo
                 cache.account = account;
             }
             let editable = app.editable_playlists();
-            cache.playlists.retain(|id, _| editable.iter().any(|(editable, _)| editable == id));
+            cache
+                .playlists
+                .retain(|id, _| editable.iter().any(|(editable, _)| editable == id));
             for (id, _) in editable {
                 let Some(page) = app.playlist_pages.get(&id) else {
                     continue;
@@ -940,18 +942,30 @@ pub(crate) fn saved_to_library(app: &App, ctx: &egui::Context, uri: &str) -> boo
                     continue;
                 }
                 let source = (page.generation, page.items.revision);
-                if cache.playlists.get(&id).is_some_and(|known| known.source == source) {
+                if cache
+                    .playlists
+                    .get(&id)
+                    .is_some_and(|known| known.source == source)
+                {
                     continue;
                 }
-                let songs = page.items.items.iter()
+                let songs = page
+                    .items
+                    .items
+                    .iter()
                     .filter_map(PlaylistItem::playable)
                     .map(|item| item.uri().to_string())
                     .chain(page.local_additions.iter().cloned())
                     .collect();
-                cache.playlists.insert(id, PlaylistHeartSongs { source, songs });
+                cache
+                    .playlists
+                    .insert(id, PlaylistHeartSongs { source, songs });
             }
         }
-        cache.playlists.values().any(|playlist| playlist.songs.contains(uri))
+        cache
+            .playlists
+            .values()
+            .any(|playlist| playlist.songs.contains(uri))
     })
 }
 

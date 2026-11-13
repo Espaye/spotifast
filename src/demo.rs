@@ -2789,11 +2789,15 @@ mod tests {
                 let tree = accessible_frame(ctx, app, vec![]);
                 let translated = gettext(locale, label);
                 let button = if label == "Add to playlist" {
-                    tree.nodes.iter().find(|(_, node)| {
-                        node.label() == Some(translated.as_ref())
-                            && node.role() == Role::Button
-                            && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
-                    }).expect("player bar heart").0
+                    tree.nodes
+                        .iter()
+                        .find(|(_, node)| {
+                            node.label() == Some(translated.as_ref())
+                                && node.role() == Role::Button
+                                && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
+                        })
+                        .expect("player bar heart")
+                        .0
                 } else {
                     accessible_node(&tree, &translated, Role::Button)
                 };
@@ -6022,8 +6026,47 @@ mod tests {
             }
             assert_eq!(app.is_saved(item.uri()), Some(true));
             assert!(liked(&click(&mut app, "Add to playlist", Role::Button)));
+            click(&mut app, "Sunday morning", Role::CheckBox);
+            assert!(
+                app.actions.is_empty(),
+                "playlist choices also wait for Done"
+            );
+            click(&mut app, "Done", Role::Button);
+            assert!(
+                matches!(app.actions.as_slice(), [Action::UpdatePlaylists { item: changed, add, remove }]
+                if changed.uri() == item.uri()
+                    && add == &[("pl2".into(), "Sunday morning".into())]
+                    && remove.is_empty())
+            );
             app.backend.shutdown();
         }
+    }
+
+    #[test]
+    fn a_player_bar_heart_without_playlist_membership_still_likes_at_once() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+        let (ctx, mut app) = accessible_app("empty-player-heart");
+        accessible_frame(&ctx, &mut app, vec![]);
+        let uri = app.now_playing().unwrap().uri;
+        app.apply(Action::ToggleSaved(uri.clone()), &ctx);
+        app.library.playlists = Loadable::Loaded(vec![]);
+        assert_eq!(app.is_saved(&uri), Some(false));
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let heart = accessible_node(&tree, "Save to Liked Songs", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(heart, AccessibleAction::Click, None)],
+        );
+        assert_eq!(app.is_saved(&uri), Some(true));
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Filter playlists"))
+        );
+        app.backend.shutdown();
     }
 
     #[test]
@@ -6066,7 +6109,10 @@ mod tests {
         page.local_additions.clear();
         page.pending_writes = 1;
         page.items.revision += 1;
-        assert!(!query(&app), "removing an optimistic addition updates an unread playlist");
+        assert!(
+            !query(&app),
+            "removing an optimistic addition updates an unread playlist"
+        );
         let page = app.playlist_pages.get_mut("pl1").unwrap();
         page.local_additions.insert(uri.clone());
         page.items.revision += 1;
@@ -6207,10 +6253,15 @@ mod tests {
         let click = |app: &mut App, label: &str, role: Role| {
             let tree = accessible_frame(&ctx, app, vec![]);
             let node = if label == "Add to playlist" {
-                tree.nodes.iter().find(|(_, node)| {
-                    node.label() == Some(label) && node.role() == role
-                        && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
-                }).expect("player bar heart").0
+                tree.nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.label() == Some(label)
+                            && node.role() == role
+                            && node.bounds().is_some_and(|bounds| bounds.y0 > 700.0)
+                    })
+                    .expect("player bar heart")
+                    .0
             } else {
                 accessible_node(&tree, label, role)
             };

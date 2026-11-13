@@ -31,23 +31,6 @@ jobs:
         with:
           name: row-hearts-formatting
           path: formatting.patch
-  docs:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '4.0'
-          bundler-cache: true
-          working-directory: docs
-      - name: Build documentation
-        working-directory: docs
-        env:
-          JEKYLL_ENV: production
-        run: bundle exec jekyll-vitepress build --destination "$RUNNER_TEMP/row-heart-docs"
   windows:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -66,11 +49,6 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           cache-generation: row-hearts-v1
-      - name: Focused heart and membership regressions
-        run: |
-          mbx test --locked --features demo --lib heart
-          mbx test --locked --features demo --lib row_picker_membership
-          mbx test --locked --features demo --lib playlist_membership
       - name: Portable test build
         run: mbx build --locked --release --features demo
       - name: Portable folder

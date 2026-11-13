@@ -5887,7 +5887,8 @@ mod tests {
             },
         );
         output.textures_delta.clear();
-        app.actions.retain(|action| !matches!(action, Action::CheckPlaylistMembership));
+        app.actions
+            .retain(|action| !matches!(action, Action::CheckPlaylistMembership));
         output
     }
 
@@ -6069,46 +6070,124 @@ mod tests {
     }
 
     #[test]
+    fn heart_checklist_background_answers_preserve_drafts_without_creating_edits() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+        let (ctx, mut app) = accessible_app("heart-membership-draft");
+        app.playlist_pages.clear();
+        let item = PlayableItem::Track(track(1));
+        let draw = |app: &mut App, events| heart_row_frame(&ctx, app, &item, false, 900.0, events).platform_output.accesskit_update.unwrap();
+        let click = |app: &mut App, label, role| {
+            let tree = draw(app, vec![]);
+            let id = accessible_node(&tree, label, role);
+            draw(app, vec![accessible_action(id, AccessibleAction::Click, None)]);
+            draw(app, vec![])
+        };
+        draw(&mut app, vec![]);
+        app.actions.clear();
+        let tree = click(&mut app, "Add to playlist", Role::Button);
+        accessible_node(&tree, "Cancel", Role::Button);
+        click(&mut app, "Liked Songs", Role::CheckBox);
+        app.playlist_pages.insert("pl2".into(), PlaylistPage {
+            items: PagedList { items: vec![PlaylistItem { item: Some(item.clone()), ..Default::default() }], loaded_once: true, next_offset: None, ..Default::default() }, ..Default::default()
+        });
+        let tree = draw(&mut app, vec![]);
+        for label in ["Liked Songs", "Sunday morning"] {
+            let id = accessible_node(&tree, label, Role::CheckBox);
+            assert_eq!(tree.nodes.iter().find(|(node, _)| *node == id).unwrap().1.toggled(), Some(egui::accesskit::Toggled::True));
+        }
+        accessible_node(&tree, "Done", Role::Button);
+        let tree = click(&mut app, "Liked Songs", Role::CheckBox);
+        accessible_node(&tree, "Cancel", Role::Button);
+        click(&mut app, "Cancel", Role::Button);
+        assert!(app.actions.is_empty(), "background membership is not an edit");
+        app.backend.shutdown();
+    }
+
+    #[test]
     fn heart_picker_scroll_never_moves_the_underlying_page() {
         for bottom in [false, true] {
-            let (ctx, mut app) = accessible_app(if bottom { "bar-picker-scroll" } else { "row-picker-scroll" });
+            let (ctx, mut app) = accessible_app(if bottom {
+                "bar-picker-scroll"
+            } else {
+                "row-picker-scroll"
+            });
             let owner = app.user_id().unwrap().to_string();
-            let playlists = (0..30).map(|i| Playlist {
-                id: format!("scroll{i}"), uri: format!("spotify:playlist:scroll{i}"), name: format!("Playlist {i:02}"),
-                owner: crate::api::models::Owner { id: Some(owner.clone()), ..Default::default() }, ..Default::default()
-            }).collect();
+            let playlists = (0..30)
+                .map(|i| Playlist {
+                    id: format!("scroll{i}"),
+                    uri: format!("spotify:playlist:scroll{i}"),
+                    name: format!("Playlist {i:02}"),
+                    owner: crate::api::models::Owner {
+                        id: Some(owner.clone()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .collect();
             app.library.playlists = Loadable::Loaded(playlists);
             let popup = egui::Id::new("scroll-picker-test");
             let item = PlayableItem::Track(track(0));
             let draw = |app: &mut App, events| {
                 let mut offset = 0.0;
-                let mut output = ctx.run_ui(egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 800.0))),
-                    events, time: Some(ctx.cumulative_frame_nr() as f64), ..Default::default()
-                }, |ui| {
-                    crate::ui::widgets::isolate_playlist_picker_scroll(&ctx);
-                    let button = ui.button("Heart");
-                    if bottom { crate::ui::widgets::playlist_checklist(ui, app, &button, popup, &item); }
-                    let area = egui::ScrollArea::vertical().id_salt("page-under-picker").max_height(650.0).show(ui, |ui| {
-                        ui.set_min_height(2000.0);
-                        if !bottom { crate::ui::widgets::playlist_checklist(ui, app, &button, popup, &item); }
-                    });
-                    offset = area.state.offset.y;
-                });
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1000.0, 800.0),
+                        )),
+                        events,
+                        time: Some(ctx.cumulative_frame_nr() as f64),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        crate::ui::widgets::isolate_playlist_picker_scroll(&ctx);
+                        let button = ui.button("Heart");
+                        if bottom {
+                            crate::ui::widgets::playlist_checklist(ui, app, &button, popup, &item);
+                        }
+                        let area = egui::ScrollArea::vertical()
+                            .id_salt("page-under-picker")
+                            .max_height(650.0)
+                            .show(ui, |ui| {
+                                ui.set_min_height(2000.0);
+                                if !bottom {
+                                    crate::ui::widgets::playlist_checklist(
+                                        ui, app, &button, popup, &item,
+                                    );
+                                }
+                            });
+                        offset = area.state.offset.y;
+                    },
+                );
                 output.textures_delta.clear();
                 (offset, output)
             };
             draw(&mut app, vec![]);
             egui::Popup::open_id(&ctx, popup);
-            for _ in 0..3 { draw(&mut app, vec![]); }
+            for _ in 0..3 {
+                draw(&mut app, vec![]);
+            }
             let before = draw(&mut app, vec![]).0;
-            let wheel = |at| vec![egui::Event::PointerMoved(at), egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -800.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move
-            }];
+            let wheel = |at| {
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, -10_000.0),
+                        modifiers: egui::Modifiers::NONE,
+                        phase: egui::TouchPhase::Move,
+                    },
+                ]
+            };
             // Wheel outside the picker must never reach the page.
-            draw(&mut app, vec![egui::Event::PointerMoved(egui::pos2(900.0, 500.0))]);
+            draw(
+                &mut app,
+                vec![egui::Event::PointerMoved(egui::pos2(900.0, 500.0))],
+            );
             assert_eq!(draw(&mut app, wheel(egui::pos2(900.0, 500.0))).0, before);
-            for _ in 0..4 { assert_eq!(draw(&mut app, vec![]).0, before); }
+            for _ in 0..4 {
+                assert_eq!(draw(&mut app, vec![]).0, before);
+            }
             // Inside the picker its own list still scrolls to its final rows.
             let rect = egui::AreaState::load(&ctx, popup).unwrap().rect();
             let at = egui::pos2(rect.center().x, rect.bottom() - 100.0);
@@ -6142,9 +6221,19 @@ mod tests {
         assert_eq!(PlaylistChecks::new(&app, &item).mark("pl1"), Mark::Checked);
         assert!(crate::ui::widgets::saved_to_library(&app, item.uri()));
         app.playlist_pages.insert("pl1".into(), page);
-        app.apply(Action::RemoveFromPlaylist { playlist_id: "pl1".into(), uris: vec![item.uri().to_string()], positions: vec![] }, &ctx);
+        app.apply(
+            Action::RemoveFromPlaylist {
+                playlist_id: "pl1".into(),
+                uris: vec![item.uri().to_string()],
+                positions: vec![],
+            },
+            &ctx,
+        );
         app.sync_playlist_membership();
-        assert_eq!(PlaylistChecks::new(&app, &item).mark("pl1"), Mark::Unchecked);
+        assert_eq!(
+            PlaylistChecks::new(&app, &item).mark("pl1"),
+            Mark::Unchecked
+        );
         app.backend.shutdown();
     }
 
@@ -6182,7 +6271,7 @@ mod tests {
         let query = |app: &mut App| {
             app.sync_playlist_membership();
             let mut saved = false;
-            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {
                 saved = crate::ui::widgets::saved_to_library(app, &uri);
             });
             output.textures_delta.clear();
@@ -6191,7 +6280,10 @@ mod tests {
         assert_eq!(app.is_saved(&uri), Some(false));
         assert!(query(&mut app), "membership does not require Liked Songs");
         let held = app.playlist_pages.remove("pl1").unwrap();
-        assert!(query(&mut app), "page eviction must not lose known membership");
+        assert!(
+            query(&mut app),
+            "page eviction must not lose known membership"
+        );
         app.playlist_pages.insert("pl1".into(), held);
         let page = app.playlist_pages.get_mut("pl1").unwrap();
         page.items
@@ -6210,22 +6302,27 @@ mod tests {
         assert!(!query(&mut app), "an unfollowed playlist no longer counts");
         app.library.playlists = library;
         assert!(query(&mut app));
+        app.apply(Action::RemoveFromPlaylist {
+            playlist_id: "pl1".into(), uris: vec![uri.clone()], positions: vec![],
+        }, &ctx);
         let page = app.playlist_pages.get_mut("pl1").unwrap();
         page.items.loaded_once = false;
         page.items.items.clear();
-        page.local_additions.clear();
-        page.pending_writes = 1;
         page.items.revision += 1;
         assert!(
             !query(&mut app),
             "removing an optimistic addition updates an unread playlist"
         );
-        let page = app.playlist_pages.get_mut("pl1").unwrap();
-        page.local_additions.insert(uri.clone());
-        page.items.revision += 1;
+        app.apply(Action::ConfirmAddToPlaylist {
+            playlist_id: "pl1".into(), playlist_name: "Evening".into(),
+            items: vec![PlayableItem::Track(track(1))], position: None,
+        }, &ctx);
         assert!(query(&mut app));
         app.user.as_mut().unwrap().id = "another-account".into();
-        assert!(!query(&mut app), "membership never leaks to another account");
+        assert!(
+            !query(&mut app),
+            "membership never leaks to another account"
+        );
         app.backend.shutdown();
     }
 

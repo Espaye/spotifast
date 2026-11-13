@@ -5217,7 +5217,9 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
             ..
         }
         | ApiResponse::PlaylistMembership {
-            id, result: Err(error), ..
+            id,
+            result: Err(error),
+            ..
         }
         | ApiResponse::PlaylistSample {
             id,
@@ -5723,9 +5725,15 @@ async fn handle(
             offset,
             generation,
         },
-        ApiRequest::PlaylistMembership { id, offset, generation } => ApiResponse::PlaylistMembership {
+        ApiRequest::PlaylistMembership {
+            id,
+            offset,
+            generation,
+        } => ApiResponse::PlaylistMembership {
             result: routed!(playlist_items(&id, offset, PLAYLIST_PAGE_SIZE)),
-            id, offset, generation,
+            id,
+            offset,
+            generation,
         },
         ApiRequest::PlaylistSample {
             id,
@@ -6404,8 +6412,18 @@ fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiRe
             generation: *generation,
             result,
         },
-        (ApiRequest::PlaylistMembership { id, offset, generation }, SessionAnswer::Rows(result)) => ApiResponse::PlaylistMembership {
-            id: id.clone(), offset: *offset, generation: *generation, result,
+        (
+            ApiRequest::PlaylistMembership {
+                id,
+                offset,
+                generation,
+            },
+            SessionAnswer::Rows(result),
+        ) => ApiResponse::PlaylistMembership {
+            id: id.clone(),
+            offset: *offset,
+            generation: *generation,
+            result,
         },
         (ApiRequest::PlaylistSample { id, generation, .. }, SessionAnswer::Rows(result)) => {
             ApiResponse::PlaylistSample {
@@ -9895,6 +9913,10 @@ mod session_tests {
     /// the app drops an answer whose generation is not the page's.
     #[test]
     fn a_session_answer_carries_the_requests_identity() {
+        let membership = ApiRequest::PlaylistMembership { id: "pl1".into(), offset: 150, generation: 7 };
+        assert!(membership.background());
+        assert_eq!(session_read(&membership), Some(SessionRead::Rows { id: "pl1", offset: 150 }));
+        assert!(matches!(session_response(&membership, SessionAnswer::Rows(Ok(Page::default()))), Some(ApiResponse::PlaylistMembership { id, offset: 150, generation: 7, result: Ok(_) }) if id == "pl1"));
         let rows = || SessionAnswer::Rows(Ok(Page::default()));
         let header = || SessionAnswer::Header(Box::new(Ok(Playlist::default())));
         let items = ApiRequest::PlaylistItems {

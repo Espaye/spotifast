@@ -9111,7 +9111,12 @@ impl App {
                     }
                 }
             }
-            ApiResponse::PlaylistMembership { id, offset, generation, result } => {
+            ApiResponse::PlaylistMembership {
+                id,
+                offset,
+                generation,
+                result,
+            } => {
                 self.receive_playlist_membership(&id, offset, generation, result);
             }
             ApiResponse::PlaylistDuplicatesChecked {
@@ -9191,6 +9196,7 @@ impl App {
                             page.snapshot_rechecks = 0;
                             page.snapshot_recheck_at = None;
                         }
+                        self.playlist_membership.forget(&id);
                         self.load_playlist_items_at(&id, 0);
                         if let Some(page) = self.playlist_pages.get(&id) {
                             self.backend.api(ApiRequest::Playlist {

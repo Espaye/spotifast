@@ -833,7 +833,10 @@ impl PlaylistChecks {
         let mut holding = std::collections::BTreeSet::new();
         let mut unread = std::collections::BTreeSet::new();
         for (id, _) in app.editable_playlists() {
-            match app.playlist_contains_song(&id, item.uri()).or_else(|| app.local_playlist_duplicates(&id, std::slice::from_ref(item)).map(|found| !found.is_empty())) {
+            match app.playlist_contains_song(&id, item.uri()).or_else(|| {
+                app.local_playlist_duplicates(&id, std::slice::from_ref(item))
+                    .map(|found| !found.is_empty())
+            }) {
                 Some(false) => {}
                 Some(true) => {
                     holding.insert(id);
@@ -862,8 +865,11 @@ impl PlaylistChecks {
         let latest = Self::new(app, item);
         for (id, _) in app.editable_playlists() {
             if self.chosen.contains(&id) == self.holding.contains(&id) {
-                if latest.holding.contains(&id) { self.chosen.insert(id); }
-                else { self.chosen.remove(&id); }
+                if latest.holding.contains(&id) {
+                    self.chosen.insert(id);
+                } else {
+                    self.chosen.remove(&id);
+                }
             }
         }
         self.holding = latest.holding;
@@ -913,7 +919,10 @@ impl PlaylistChecks {
 /// The picker and every heart use the app's same membership answers.
 pub(crate) fn saved_to_library(app: &App, uri: &str) -> bool {
     app.is_saved(uri) == Some(true)
-        || app.editable_playlists().iter().any(|(id, _)| app.playlist_contains_song(id, uri) == Some(true))
+        || app
+            .editable_playlists()
+            .iter()
+            .any(|(id, _)| app.playlist_contains_song(id, uri) == Some(true))
 }
 
 const PICKER_SCROLL: &str = "playlist-picker-scroll";
@@ -921,14 +930,16 @@ const PICKER_OPEN: &str = "playlist-picker-open";
 
 /// Hold wheel input before any page or panel draws. Only the picker gets it.
 pub(crate) fn isolate_playlist_picker_scroll(ctx: &egui::Context) {
-    let open = ctx.data(|data| data.get_temp::<egui::Id>(egui::Id::new(PICKER_OPEN)))
+    let open = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(PICKER_OPEN)))
         .is_some_and(|id| egui::Popup::is_id_open(ctx, id));
-    let scroll = open.then(|| ctx.input_mut(|input| {
-        let scroll = (input.raw_scroll_delta, input.smooth_scroll_delta);
-        input.raw_scroll_delta = Vec2::ZERO;
-        input.smooth_scroll_delta = Vec2::ZERO;
-        scroll
-    }));
+    let scroll = open.then(|| {
+        ctx.input_mut(|input| {
+            let scroll = input.smooth_scroll_delta;
+            input.smooth_scroll_delta = Vec2::ZERO;
+            scroll
+        })
+    });
     ctx.data_mut(|data| data.insert_temp(egui::Id::new(PICKER_SCROLL), scroll));
 }
 
@@ -958,9 +969,13 @@ pub(crate) fn playlist_checklist(
         .show(|ui| {
             ui.data_mut(|data| data.insert_temp(egui::Id::new(PICKER_OPEN), popup_id));
             app.actions.push(Action::CheckPlaylistMembership);
-            let scroll = ui.data(|data| data.get_temp::<Option<(Vec2, Vec2)>>(egui::Id::new(PICKER_SCROLL))).flatten();
-            if let Some((raw, smooth)) = scroll {
-                ui.input_mut(|input| { input.raw_scroll_delta = raw; input.smooth_scroll_delta = smooth; });
+            let scroll = ui
+                .data(|data| data.get_temp::<Option<Vec2>>(egui::Id::new(PICKER_SCROLL)))
+                .flatten();
+            if let Some(smooth) = scroll {
+                ui.input_mut(|input| {
+                    input.smooth_scroll_delta = smooth;
+                });
             }
             let stored = ui.data(|data| data.get_temp::<String>(query_id));
             let fresh = stored.is_none();
@@ -985,7 +1000,12 @@ pub(crate) fn playlist_checklist(
             let changed = checks.changed();
             let done = ui
                 .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    theme::pill_button(ui, &palette, &gettext(app.locale, if changed { "Done" } else { "Cancel" }), true)
+                    theme::pill_button(
+                        ui,
+                        &palette,
+                        &gettext(app.locale, if changed { "Done" } else { "Cancel" }),
+                        true,
+                    )
                 })
                 .inner
                 .clicked();
@@ -1005,7 +1025,9 @@ pub(crate) fn playlist_checklist(
                 ui.close();
             }
             // The enclosing page scroll area may finish after the popup.
-            ui.input_mut(|input| { input.raw_scroll_delta = Vec2::ZERO; input.smooth_scroll_delta = Vec2::ZERO; });
+            ui.input_mut(|input| {
+                    input.smooth_scroll_delta = Vec2::ZERO;
+            });
         });
     if shown.is_none() {
         forget_playlist_checklist(ui, popup_id);

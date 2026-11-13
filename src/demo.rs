@@ -5854,6 +5854,7 @@ mod tests {
                     egui::vec2(width, 700.0),
                 )),
                 events,
+                time: Some(ctx.cumulative_frame_nr() as f64),
                 ..Default::default()
             },
             |ui| {
@@ -5955,6 +5956,22 @@ mod tests {
                                     }
                                 ),
                                 "keyboard focus reveals the heart too"
+                            );
+                            ctx.memory_mut(|memory| {
+                                if let Some(id) = memory.focused() {
+                                    memory.surrender_focus(id);
+                                }
+                            });
+                            draw(pointer_click(
+                                egui::pos2(300.0, centre.y),
+                                egui::PointerButton::Primary,
+                            ));
+                            draw(vec![egui::Event::PointerGone]);
+                            let output = draw(vec![egui::Event::PointerGone]);
+                            assert_eq!(
+                                tinted(&output, palette.accent),
+                                popular && saved,
+                                "clicking the row must not keep its heart visible after the pointer leaves"
                             );
                             ctx.memory_mut(|memory| {
                                 if let Some(id) = memory.focused() {

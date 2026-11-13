@@ -2389,6 +2389,7 @@ fn track_row_contents(
     if cols.heart > 0.0 {
         let heart_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.heart, row_height));
         if row.item.is_track() {
+            let heart_hovered = ui.is_enabled() && ui.rect_contains_pointer(rect);
             let saved = saved_to_library(app, ui.ctx(), row.item.uri());
             let popup_id = ui.id().with(("row-heart", row.index, row.item.uri()));
             let mut child = ui.new_child(
@@ -2396,7 +2397,7 @@ fn track_row_contents(
                     .max_rect(heart_rect)
                     .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             );
-            if !hovered
+            if !heart_hovered
                 && !(row.show_saved_heart && saved)
                 && !egui::Popup::is_id_open(ui.ctx(), popup_id)
                 && !child.memory(|memory| memory.has_focus(child.next_auto_id()))

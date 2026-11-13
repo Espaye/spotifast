@@ -592,9 +592,10 @@ pub struct App {
     pub queue_tab: QueueTab,
     pub search: SearchState,
     pub playlist_pages: HashMap<String, PlaylistPage>,
+    pub(crate) playlist_membership: crate::playlist_membership::Membership,
     /// One checkpoint snapshot at a time, including pages evicted while it writes.
     playlist_cache_write_in_flight: bool,
-    load_generation: u64,
+    pub(crate) load_generation: u64,
     pub album_pages: HashMap<String, AlbumPage>,
     pub artist_pages: HashMap<String, ArtistPage>,
     /// Never reset on page eviction or account reset, so old replies cannot match.
@@ -1357,6 +1358,7 @@ impl App {
                 .unwrap_or_default(),
             search: SearchState::default(),
             playlist_pages: HashMap::new(),
+            playlist_membership: Default::default(),
             playlist_cache_write_in_flight: false,
             load_generation: 0,
             album_pages: HashMap::new(),
@@ -3717,6 +3719,7 @@ impl App {
 
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
+        self.playlist_membership = Default::default();
         self.pending_remote_volume = None;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
@@ -9108,6 +9111,9 @@ impl App {
                     }
                 }
             }
+            ApiResponse::PlaylistMembership { id, offset, generation, result } => {
+                self.receive_playlist_membership(&id, offset, generation, result);
+            }
             ApiResponse::PlaylistDuplicatesChecked {
                 playlist_id,
                 playlist_name,
@@ -12018,6 +12024,7 @@ impl App {
             .items
             .items
             .iter()
+            .chain(page.items.windows.values().flatten())
             .filter_map(PlaylistItem::playable)
             .map(PlayableItem::uri)
             .chain(page.local_additions.iter().map(String::as_str))
@@ -12177,6 +12184,7 @@ impl App {
     }
 
     fn prepare_playlist_mutation(&mut self, id: &str) {
+        self.playlist_membership.invalidate(id);
         let Some(page) = self.playlist_pages.get_mut(id) else {
             return;
         };
@@ -12258,6 +12266,7 @@ impl App {
         }
 
         self.prepare_playlist_mutation(&playlist_id);
+        self.playlist_membership.add(&playlist_id, &items);
         let added = items.len().try_into().unwrap_or(u32::MAX);
         let added_by = self.user_id().map(|id| UserRef {
             id: Some(id.to_string()),
@@ -12999,6 +13008,7 @@ impl App {
                 self.dialog = self.duplicate_prompts.pop_front();
                 self.add_to_playlist_now(playlist_id, playlist_name, items, position);
             }
+            Action::CheckPlaylistMembership => self.check_playlist_membership(),
             Action::UpdatePlaylists { item, add, remove } => {
                 let item = *item;
                 let uris = vec![item.uri().to_string()];
@@ -13029,6 +13039,7 @@ impl App {
                     .and_then(|page| page.playlist.get())
                     .and_then(|playlist| playlist.snapshot_id.clone());
                 self.prepare_playlist_mutation(&playlist_id);
+                self.playlist_membership.remove(&playlist_id, &uris);
                 if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
                     page.local_additions
                         .retain(|uri| !uris.iter().any(|removed| removed == uri));
@@ -14847,6 +14858,7 @@ impl App {
         self.pixels_per_point = ctx.pixels_per_point();
         self.refresh_frame_now();
         self.apply_theme(ctx);
+        self.sync_playlist_membership();
         let autoscroll_on = crate::autoscroll::enabled(self.settings.middle_click_autoscroll);
         self.autoscroll.begin(ctx, autoscroll_on);
         if self.autoscroll.active() {
@@ -14855,6 +14867,7 @@ impl App {
         } else {
             self.scrolling.apply(ctx);
         }
+        crate::ui::widgets::isolate_playlist_picker_scroll(ctx);
         if self.lyrics_fullscreen_restoring.is_some()
             && self.lyrics_fullscreen_restoring == ctx.input(|input| input.viewport().fullscreen)
             && (!self.lyrics_restore_maximized

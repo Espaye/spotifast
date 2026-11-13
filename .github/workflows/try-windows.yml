@@ -66,6 +66,11 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           cache-generation: row-hearts-v1
+      - name: Focused heart and membership regressions
+        run: |
+          mbx test --locked --features demo --lib heart
+          mbx test --locked --features demo --lib row_picker_membership
+          mbx test --locked --features demo --lib playlist_membership
       - name: Portable test build
         run: mbx build --locked --release --features demo
       - name: Portable folder

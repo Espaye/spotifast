@@ -809,6 +809,7 @@ pub(crate) struct PlaylistChecks {
     /// The song the menu opened for.
     pub uri: String,
     pub liked: bool,
+    initial_liked: bool,
     /// The playlists known to hold the song when the menu opened.
     holding: std::collections::BTreeSet<String>,
     /// The playlists not read far enough to tell. Done never takes the song
@@ -832,9 +833,9 @@ impl PlaylistChecks {
         let mut holding = std::collections::BTreeSet::new();
         let mut unread = std::collections::BTreeSet::new();
         for (id, _) in app.editable_playlists() {
-            match app.local_playlist_duplicates(&id, std::slice::from_ref(item)) {
-                Some(found) if found.is_empty() => {}
-                Some(_) => {
+            match app.playlist_contains_song(&id, item.uri()).or_else(|| app.local_playlist_duplicates(&id, std::slice::from_ref(item)).map(|found| !found.is_empty())) {
+                Some(false) => {}
+                Some(true) => {
                     holding.insert(id);
                 }
                 None => {
@@ -845,10 +846,28 @@ impl PlaylistChecks {
         Self {
             uri: item.uri().to_string(),
             liked: app.is_saved(item.uri()) == Some(true),
+            initial_liked: app.is_saved(item.uri()) == Some(true),
             chosen: holding.clone(),
             holding,
             unread,
         }
+    }
+
+    fn changed(&self) -> bool {
+        self.liked != self.initial_liked || self.chosen != self.holding
+    }
+
+    /// Incorporate background answers without discarding the user's draft.
+    fn refresh(&mut self, app: &App, item: &PlayableItem) {
+        let latest = Self::new(app, item);
+        for (id, _) in app.editable_playlists() {
+            if self.chosen.contains(&id) == self.holding.contains(&id) {
+                if latest.holding.contains(&id) { self.chosen.insert(id); }
+                else { self.chosen.remove(&id); }
+            }
+        }
+        self.holding = latest.holding;
+        self.unread = latest.unread;
     }
 
     pub(crate) fn mark(&self, id: &str) -> Mark {
@@ -891,82 +910,26 @@ impl PlaylistChecks {
     }
 }
 
-/// Membership from a playlist already loaded. Keep it across page eviction,
-/// and replace it when a new generation or row revision is available.
-#[derive(Clone)]
-struct PlaylistHeartSongs {
-    source: (u64, u64),
-    songs: std::collections::HashSet<String>,
+/// The picker and every heart use the app's same membership answers.
+pub(crate) fn saved_to_library(app: &App, uri: &str) -> bool {
+    app.is_saved(uri) == Some(true)
+        || app.editable_playlists().iter().any(|(id, _)| app.playlist_contains_song(id, uri) == Some(true))
 }
 
-#[derive(Clone, Default)]
-struct PlaylistMembership {
-    frame: Option<u64>,
-    account: Option<String>,
-    playlists: std::collections::HashMap<String, PlaylistHeartSongs>,
-}
+const PICKER_SCROLL: &str = "playlist-picker-scroll";
+const PICKER_OPEN: &str = "playlist-picker-open";
 
-/// A green heart means Liked Songs or a known song in an editable playlist.
-/// Spotify has no library-wide song-membership lookup; unread playlists stay
-/// unknown, as in the checklist itself. No requests are made for this colour.
-pub(crate) fn saved_to_library(app: &App, ctx: &egui::Context, uri: &str) -> bool {
-    if app.is_saved(uri) == Some(true) {
-        return true;
-    }
-    let frame = ctx.cumulative_frame_nr();
-    ctx.data_mut(|data| {
-        let cache = data.get_temp_mut_or_default::<PlaylistMembership>(egui::Id::new(
-            "playlist-heart-membership",
-        ));
-        if cache.frame != Some(frame) {
-            cache.frame = Some(frame);
-            let account = app.user_id().map(str::to_owned);
-            if cache.account != account {
-                cache.playlists.clear();
-                cache.account = account;
-            }
-            let editable = app.editable_playlists();
-            cache
-                .playlists
-                .retain(|id, _| editable.iter().any(|(editable, _)| editable == id));
-            for (id, _) in editable {
-                let Some(page) = app.playlist_pages.get(&id) else {
-                    continue;
-                };
-                // A revisited page can be waiting for its disk/network read.
-                // Keep prior knowledge until it has rows to replace it with.
-                if !page.items.loaded_once
-                    && page.pending_writes == 0
-                    && page.local_additions.is_empty()
-                {
-                    continue;
-                }
-                let source = (page.generation, page.items.revision);
-                if cache
-                    .playlists
-                    .get(&id)
-                    .is_some_and(|known| known.source == source)
-                {
-                    continue;
-                }
-                let songs = page
-                    .items
-                    .items
-                    .iter()
-                    .filter_map(PlaylistItem::playable)
-                    .map(|item| item.uri().to_string())
-                    .chain(page.local_additions.iter().cloned())
-                    .collect();
-                cache
-                    .playlists
-                    .insert(id, PlaylistHeartSongs { source, songs });
-            }
-        }
-        cache
-            .playlists
-            .values()
-            .any(|playlist| playlist.songs.contains(uri))
-    })
+/// Hold wheel input before any page or panel draws. Only the picker gets it.
+pub(crate) fn isolate_playlist_picker_scroll(ctx: &egui::Context) {
+    let open = ctx.data(|data| data.get_temp::<egui::Id>(egui::Id::new(PICKER_OPEN)))
+        .is_some_and(|id| egui::Popup::is_id_open(ctx, id));
+    let scroll = open.then(|| ctx.input_mut(|input| {
+        let scroll = (input.raw_scroll_delta, input.smooth_scroll_delta);
+        input.raw_scroll_delta = Vec2::ZERO;
+        input.smooth_scroll_delta = Vec2::ZERO;
+        scroll
+    }));
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(PICKER_SCROLL), scroll));
 }
 
 pub(crate) fn forget_playlist_checklist(ui: &mut Ui, popup_id: egui::Id) {
@@ -993,6 +956,12 @@ pub(crate) fn playlist_checklist(
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .frame(menu_frame(&palette))
         .show(|ui| {
+            ui.data_mut(|data| data.insert_temp(egui::Id::new(PICKER_OPEN), popup_id));
+            app.actions.push(Action::CheckPlaylistMembership);
+            let scroll = ui.data(|data| data.get_temp::<Option<(Vec2, Vec2)>>(egui::Id::new(PICKER_SCROLL))).flatten();
+            if let Some((raw, smooth)) = scroll {
+                ui.input_mut(|input| { input.raw_scroll_delta = raw; input.smooth_scroll_delta = smooth; });
+            }
             let stored = ui.data(|data| data.get_temp::<String>(query_id));
             let fresh = stored.is_none();
             let mut query = stored.unwrap_or_default();
@@ -1000,6 +969,7 @@ pub(crate) fn playlist_checklist(
                 .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
                 .filter(|checks| checks.uri == item.uri())
                 .unwrap_or_else(|| PlaylistChecks::new(app, item));
+            checks.refresh(app, item);
             let before = app.actions.len();
             let field = playlist_picker(
                 ui,
@@ -1012,13 +982,14 @@ pub(crate) fn playlist_checklist(
                 field.request_focus();
             }
             menu_separator(ui, &palette);
+            let changed = checks.changed();
             let done = ui
                 .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    theme::pill_button(ui, &palette, &gettext(app.locale, "Done"), true)
+                    theme::pill_button(ui, &palette, &gettext(app.locale, if changed { "Done" } else { "Cancel" }), true)
                 })
                 .inner
                 .clicked();
-            if done {
+            if done && changed {
                 if checks.liked != (app.is_saved(item.uri()) == Some(true)) {
                     app.actions
                         .push(Action::ToggleSaved(item.uri().to_string()));
@@ -1033,6 +1004,8 @@ pub(crate) fn playlist_checklist(
             if done || app.actions.len() > before {
                 ui.close();
             }
+            // The enclosing page scroll area may finish after the popup.
+            ui.input_mut(|input| { input.raw_scroll_delta = Vec2::ZERO; input.smooth_scroll_delta = Vec2::ZERO; });
         });
     if shown.is_none() {
         forget_playlist_checklist(ui, popup_id);
@@ -2390,7 +2363,7 @@ fn track_row_contents(
         let heart_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.heart, row_height));
         if row.item.is_track() {
             let heart_hovered = ui.is_enabled() && ui.rect_contains_pointer(rect);
-            let saved = saved_to_library(app, ui.ctx(), row.item.uri());
+            let saved = saved_to_library(app, row.item.uri());
             let popup_id = ui.id().with(("row-heart", row.index, row.item.uri()));
             let mut child = ui.new_child(
                 UiBuilder::new()

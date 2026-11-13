@@ -222,6 +222,11 @@ pub enum ApiRequest {
     },
     /// A slice of a playlist read only for who added its songs; the rows
     /// on screen stay untouched.
+    PlaylistMembership {
+        id: String,
+        offset: u32,
+        generation: u64,
+    },
     PlaylistSample {
         id: String,
         offset: u32,
@@ -411,6 +416,7 @@ impl ApiRequest {
                 | Self::MyPlaylists { .. }
                 | Self::PlaylistSample { .. }
                 | Self::Contains { .. }
+                | Self::PlaylistMembership { .. }
         )
     }
 }
@@ -483,6 +489,12 @@ pub enum ApiResponse {
         result: ApiResult<Playlist>,
     },
     PlaylistItems {
+        id: String,
+        offset: u32,
+        generation: u64,
+        result: ApiResult<Page<PlaylistItem>>,
+    },
+    PlaylistMembership {
         id: String,
         offset: u32,
         generation: u64,
@@ -5130,6 +5142,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::PlaySearch { .. } => Operation::CatalogSearch,
         ApiRequest::Playlist { id, .. } => Operation::PlaylistMetadata(api.playlist_access(id)),
         ApiRequest::PlaylistItems { id, .. }
+        | ApiRequest::PlaylistMembership { id, .. }
         | ApiRequest::PlaylistSample { id, .. }
         | ApiRequest::CheckPlaylistDuplicates {
             playlist_id: id, ..
@@ -5202,6 +5215,9 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
             id,
             result: Err(error),
             ..
+        }
+        | ApiResponse::PlaylistMembership {
+            id, result: Err(error), ..
         }
         | ApiResponse::PlaylistSample {
             id,
@@ -5706,6 +5722,10 @@ async fn handle(
             id,
             offset,
             generation,
+        },
+        ApiRequest::PlaylistMembership { id, offset, generation } => ApiResponse::PlaylistMembership {
+            result: routed!(playlist_items(&id, offset, PLAYLIST_PAGE_SIZE)),
+            id, offset, generation,
         },
         ApiRequest::PlaylistSample {
             id,
@@ -6323,7 +6343,8 @@ fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
         ApiRequest::RelatedArtists { id } => SessionRead::RelatedArtists { id },
         ApiRequest::ArtistTopTracks { id, .. } => SessionRead::ArtistTop { id },
         ApiRequest::Playlist { id, .. } => SessionRead::Header { id },
-        ApiRequest::PlaylistItems { id, offset, .. } => SessionRead::Rows {
+        ApiRequest::PlaylistItems { id, offset, .. }
+        | ApiRequest::PlaylistMembership { id, offset, .. } => SessionRead::Rows {
             id,
             offset: *offset,
         },
@@ -6382,6 +6403,9 @@ fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiRe
             offset: *offset,
             generation: *generation,
             result,
+        },
+        (ApiRequest::PlaylistMembership { id, offset, generation }, SessionAnswer::Rows(result)) => ApiResponse::PlaylistMembership {
+            id: id.clone(), offset: *offset, generation: *generation, result,
         },
         (ApiRequest::PlaylistSample { id, generation, .. }, SessionAnswer::Rows(result)) => {
             ApiResponse::PlaylistSample {

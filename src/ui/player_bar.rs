@@ -598,7 +598,7 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     }
 
     if !now.is_episode {
-        let saved = super::widgets::saved_to_library(app, ui.ctx(), &now.uri);
+        let saved = super::widgets::saved_to_library(app, &now.uri);
         // A saved heart stays green under the pointer, like shuffle.
         let (icon, color, hover, tooltip) = if saved {
             (

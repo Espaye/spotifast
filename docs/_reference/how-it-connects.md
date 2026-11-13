@@ -820,6 +820,18 @@ it never automatically repeats a mutation. Requests have a 20-second deadline.
 Sign-out cancels work, stale session/page generations are ignored, and a new
 link or history navigation cannot be overwritten by an older response.
 
+## Playlist heart membership
+
+Artist profiles and open heart checklists fill missing membership by reading
+editable playlists through the existing playlist-items routes. At most two
+background pages are in flight across these reads. Already loaded rows, including
+cached scroll windows, answer immediately. The session-local URI index survives
+page eviction and is shared by all hearts and both checklist entry points.
+Completed reads are reused until the playlist snapshot changes; sign-out clears
+the index. Reads issued before a local edit cannot overwrite it. A failed read
+leaves membership unknown and does not start an automatic retry loop. This adds
+playlist reads but no permissions, credentials or disk cache format.
+
 ## Removing one copy of a repeated song
 
 Removing a song from a playlist uses the Web API's `DELETE

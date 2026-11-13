@@ -17,6 +17,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
     if !app.artist_pages.contains_key(id) {
         app.ensure_loaded(Page::Artist(id.to_string()));
     }
+    app.actions.push(Action::CheckPlaylistMembership);
     let Some(page) = app.artist_pages.remove(id) else {
         return;
     };

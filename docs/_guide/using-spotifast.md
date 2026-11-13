@@ -197,14 +197,19 @@ see it enlarged, at the largest size Spotify has. Click anywhere or press
 
 Hover over a song row to reveal its heart. Click it to choose **Liked Songs**
 and playlists in the same checklist as the player bar, then choose **Done**
-to apply the changes. Clicking outside the menu discards your choices.
+to apply the changes. With no pending changes the button says **Cancel**.
+Clicking outside the menu discards your choices. While it is open, scrolling
+controls only the picker, leaving the page and other panels in place.
 Saved hearts remain visible in an artist's **Popular** list and in the player
 bar; other lists show them on hover or keyboard focus.
 
-A green heart means the song is in Liked Songs or an editable playlist whose
-loaded songs include it. Membership in playlists Spotifast has not loaded is
-unknown. Heart colours do not fetch every playlist's contents. The player
-bar's empty heart still saves a song directly to Liked Songs on the first click.
+A green heart means the song is in Liked Songs or an editable playlist.
+Opening an artist profile or a heart checklist reads missing playlist membership
+in the background, using the same answers for row hearts and the player bar.
+Checks and colours update as results arrive. Unread or failed playlists remain
+unknown. These answers are cached for the signed-in session and refreshed when
+a playlist changes. The player bar's empty heart still saves a song directly
+to Liked Songs on the first click.
 
 ## Links in playlist descriptions
 

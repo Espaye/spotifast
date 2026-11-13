@@ -1864,6 +1864,7 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
     if !app.playlist_pages.contains_key(id) {
         app.ensure_loaded(Page::Playlist(id.to_string()));
     }
+    app.sync_playlist_membership();
     let Some(mut page) = app.playlist_pages.remove(id) else {
         return;
     };

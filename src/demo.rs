@@ -5854,6 +5854,7 @@ mod tests {
                     egui::vec2(width, 700.0),
                 )),
                 events,
+                time: Some(ctx.cumulative_frame_nr() as f64),
                 ..Default::default()
             },
             |ui| {
@@ -5961,6 +5962,16 @@ mod tests {
                                     memory.surrender_focus(id);
                                 }
                             });
+                            draw(pointer_click(egui::pos2(300.0, centre.y), egui::PointerButton::Primary));
+                            draw(vec![egui::Event::PointerGone]);
+                            let output = draw(vec![egui::Event::PointerGone]);
+                            assert_eq!(tinted(&output, palette.accent), popular && saved,
+                                "clicking the row must not keep its heart visible after the pointer leaves");
+                            ctx.memory_mut(|memory| {
+                                if let Some(id) = memory.focused() {
+                                    memory.surrender_focus(id);
+                                }
+                            });
                         }
                     }
                     app.backend.shutdown();
@@ -6027,12 +6038,17 @@ mod tests {
             assert_eq!(app.is_saved(item.uri()), Some(true));
             assert!(liked(&click(&mut app, "Add to playlist", Role::Button)));
             click(&mut app, "Sunday morning", Role::CheckBox);
-            assert!(app.actions.is_empty(), "playlist choices also wait for Done");
+            assert!(
+                app.actions.is_empty(),
+                "playlist choices also wait for Done"
+            );
             click(&mut app, "Done", Role::Button);
-            assert!(matches!(app.actions.as_slice(), [Action::UpdatePlaylists { item: changed, add, remove }]
+            assert!(
+                matches!(app.actions.as_slice(), [Action::UpdatePlaylists { item: changed, add, remove }]
                 if changed.uri() == item.uri()
                     && add == &[("pl2".into(), "Sunday morning".into())]
-                    && remove.is_empty()));
+                    && remove.is_empty())
+            );
             app.backend.shutdown();
         }
     }
@@ -6048,11 +6064,19 @@ mod tests {
         assert_eq!(app.is_saved(&uri), Some(false));
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         let heart = accessible_node(&tree, "Save to Liked Songs", Role::Button);
-        accessible_frame(&ctx, &mut app,
-            vec![accessible_action(heart, AccessibleAction::Click, None)]);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(heart, AccessibleAction::Click, None)],
+        );
         assert_eq!(app.is_saved(&uri), Some(true));
         let tree = accessible_frame(&ctx, &mut app, vec![]);
-        assert!(!tree.nodes.iter().any(|(_, node)| node.label() == Some("Filter playlists")));
+        assert!(
+            !tree
+                .nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Filter playlists"))
+        );
         app.backend.shutdown();
     }
 

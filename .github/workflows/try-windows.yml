@@ -1,6 +1,7 @@
 name: Try build (Windows x64)
 
-# Fork-only test builds. Keep this workflow out of the product commit.
+# Fork-only test builds. The canonical CI workflow runs the test suite.
+# Keep this workflow out of the product commit.
 on:
   push:
     branches: ["ci/try-row-hearts"]
@@ -65,8 +66,6 @@ jobs:
       - uses: jdx/mr-boxington-action@v1
         with:
           cache-generation: row-hearts-v1
-      - name: Regression tests
-        run: mbx test --locked --lib --all-features
       - name: Portable test build
         run: mbx build --locked --release --features demo
       - name: Portable folder

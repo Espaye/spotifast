@@ -1106,8 +1106,8 @@ pub(crate) fn playlist_picker(
 ) -> egui::Response {
     let palette = app.palette;
     let locale = app.locale;
-    ui.set_min_width(220.0);
-    ui.set_max_width(300.0);
+    ui.set_min_width(260.0);
+    ui.set_max_width(340.0);
     let width = ui.available_width();
     let field_id = ui.make_persistent_id("playlist-filter");
     let highlight_id = ui.make_persistent_id("playlist-highlight");
@@ -1204,12 +1204,17 @@ pub(crate) fn playlist_picker(
             ui.close();
         }
     }
-    if let Some(checks) = checks.as_deref_mut() {
+    // Liked Songs leads the list, pinned as in the library, while the
+    // filter matches it like any playlist.
+    let liked_name = gettext(locale, "Liked Songs");
+    let liked_shown = checks.is_some() && liked_name.to_lowercase().contains(&needle);
+    if liked_shown && let Some(checks) = checks.as_deref_mut() {
         let (_, clicked) = picker_row(
             ui,
             &palette,
             |ui, rect| super::sidebar::liked_cover(ui, rect, 4.0),
-            &gettext(locale, "Liked Songs"),
+            &liked_name,
+            true,
             false,
             Some(if checks.liked {
                 Mark::Checked
@@ -1221,7 +1226,7 @@ pub(crate) fn playlist_picker(
             checks.liked = !checks.liked;
         }
     }
-    if matches.is_empty() {
+    if matches.is_empty() && (needle.is_empty() || !liked_shown) {
         theme::subtle(
             ui,
             &palette,
@@ -1235,7 +1240,7 @@ pub(crate) fn playlist_picker(
     // The popup lays out within last frame's size, so a list a filter has
     // shrunk would stay that short once the filter is cleared. Asking for
     // the full height lets it grow back; it still shrinks to fit its rows.
-    let list_height = 320.0;
+    let list_height = 360.0;
     let art = app.backend.art().clone();
     // Every row's cover, read in one pass over the library.
     let covers: std::collections::HashMap<String, String> = app
@@ -1272,6 +1277,7 @@ pub(crate) fn playlist_picker(
                             paint_cover(ui, &palette, image, rect, 4.0, Icon::Music, Some(&art))
                         },
                         name,
+                        false,
                         chosen,
                         checks.as_deref().map(|checks| checks.mark(id)),
                     );
@@ -1296,47 +1302,60 @@ pub(crate) fn playlist_picker(
     field
 }
 
-/// A playlist in the picker, with its cover. A row with a `mark` shows a
-/// check that a click turns on or off, leaving the menu open; otherwise a
-/// click closes the menu.
+/// The pin beside a pinned row's name, as the library list shows it.
+const PICKER_PIN: f32 = 13.0;
+
+/// A playlist in the picker, with its cover. A `pinned` row shows the
+/// library's pin beside its name. A row with a `mark` shows a check that a
+/// click turns on or off, leaving the menu open; otherwise a click closes
+/// the menu.
 fn picker_row(
     ui: &mut Ui,
     palette: &Palette,
     cover: impl FnOnce(&Ui, Rect),
     label: &str,
+    pinned: bool,
     highlighted: bool,
     mark: Option<Mark>,
 ) -> (egui::Response, bool) {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
     if ui.is_rect_visible(rect) {
         if response.hovered() || highlighted {
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
         }
         let cover_rect =
-            Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(28.0));
+            Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), Vec2::splat(40.0));
         cover(ui, cover_rect);
-        let x = cover_rect.right() + 10.0;
+        let x = cover_rect.right() + 12.0;
         let right = rect.right() - if mark.is_some() { 36.0 } else { 10.0 };
+        let pin_room = if pinned { PICKER_PIN + 6.0 } else { 0.0 };
         let galley = crate::bidi::layout(
             ui.painter(),
             label,
-            theme::regular(13.5),
+            theme::regular(15.0),
             palette.text,
-            (right - x).max(0.0),
+            (right - x - pin_room).max(0.0),
             1,
             Some(crate::bidi::ELLIPSIS),
         );
         let text_rect = Rect::from_min_max(
             pos2(x, rect.center().y - galley.size().y / 2.0),
-            pos2(right, rect.center().y + galley.size().y / 2.0),
+            pos2(right - pin_room, rect.center().y + galley.size().y / 2.0),
         );
-        ui.painter().galley(
-            crate::bidi::galley_pos(text_rect, &galley),
-            galley,
-            palette.text,
-        );
+        let text_pos = crate::bidi::galley_pos(text_rect, &galley);
+        let text_right = text_pos.x + galley.rect.right();
+        ui.painter().galley(text_pos, galley, palette.text);
+        if pinned {
+            Icon::Pin.image(palette.secondary, PICKER_PIN).paint_at(
+                ui,
+                Rect::from_center_size(
+                    pos2(text_right + 6.0 + PICKER_PIN / 2.0, rect.center().y),
+                    Vec2::splat(PICKER_PIN),
+                ),
+            );
+        }
         if let Some(mark) = mark {
             let center = pos2(rect.right() - 20.0, rect.center().y);
             match mark {

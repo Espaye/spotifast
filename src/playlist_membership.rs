@@ -159,13 +159,6 @@ impl Membership {
         self.anywhere.contains_key(uri)
     }
 
-    /// Whether every playlist in `ids` has been read, or could not be.
-    pub(crate) fn settled<'a>(&self, mut ids: impl Iterator<Item = &'a str>) -> bool {
-        ids.all(|id| {
-            self.lists.get(id).is_some_and(|list| list.complete) || self.failed.contains_key(id)
-        })
-    }
-
     /// An edit of the playlist `id` is on its way: reads wait for it.
     pub(crate) fn edit_started(&mut self, id: &str) {
         *self.writing.entry(id.to_string()).or_insert(0) += 1;

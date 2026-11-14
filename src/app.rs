@@ -7886,18 +7886,6 @@ impl App {
                 .is_some_and(|read| read.has_counts)
     }
 
-    /// Whether the play counts for `uri` are in, or their read is answered
-    /// or cannot be asked now: a page waiting for them can show.
-    pub fn play_counts_settled(&self, uri: &str) -> bool {
-        !self.local_ready
-            || !self.network_reachable
-            || self.has_play_counts(uri)
-            || self
-                .play_count_reads
-                .get(uri)
-                .is_some_and(|read| !matches!(read, PlayCountRead::Asked))
-    }
-
     fn receive_play_counts(
         &mut self,
         uri: String,
@@ -14552,23 +14540,6 @@ impl App {
     /// index has not read it.
     pub fn playlist_holds(&self, id: &str, uri: &str) -> Option<bool> {
         self.membership.holds(id, uri)
-    }
-
-    /// Whether the index has read every playlist the account may edit, or
-    /// given up on it for now.
-    pub fn playlist_membership_settled(&self) -> bool {
-        if !self.local_ready || !self.network_reachable || self.user_id().is_none() {
-            return true;
-        }
-        let Some(playlists) = self.library.playlists.get() else {
-            return false;
-        };
-        self.membership.settled(
-            playlists
-                .iter()
-                .filter(|playlist| self.can_edit_playlist(playlist))
-                .map(|playlist| playlist.id.as_str()),
-        )
     }
 
     /// The library's playlists that take songs, as id and name pairs.

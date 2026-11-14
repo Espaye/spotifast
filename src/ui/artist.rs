@@ -1,12 +1,11 @@
 //! The artist page.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::api::models::{Artist, PlayableItem, pick_image};
 use crate::app::App;
 use crate::i18n::{Locale, gettext, ngettext, pgettext};
-use crate::model::{Action, ArtistPage, DiscographyFilter, Loadable, Page, RowContext};
+use crate::model::{Action, DiscographyFilter, Loadable, Page, RowContext};
 use crate::theme::{self, Icon};
 use crate::util;
 
@@ -25,17 +24,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
         super::loading_preview(ui.ctx(), id, &page.artist, || app.known_artist(id).cloned());
     let palette = app.palette;
     let locale = app.locale;
-    let shown = revealed(app, ui.ctx(), id, &page);
     match &page.artist {
-        // The header stands while the rest gathers, so the page below it
-        // shows at once instead of filling in part by part.
-        Loadable::Loaded(artist) if !shown => {
-            artist_hero(app, ui, artist, preview.as_deref());
-            ui.add_enabled_ui(false, |ui| artist_actions(app, ui, artist));
-            app.actions
-                .push(Action::RequestPlayCounts(artist.uri.clone()));
-            widgets::skeleton_rows(ui, &palette, app.locale, 5);
-        }
         Loadable::Loaded(artist) => {
             artist_hero(app, ui, artist, preview.as_deref());
             artist_actions(app, ui, artist);
@@ -377,95 +366,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
         }
     }
     app.artist_pages.insert(id.to_string(), page);
-}
-
-/// How long an artist page waits for its parts before it shows what it has.
-const REVEAL_WAIT: f64 = 3.0;
-/// The discography and related artist cards whose covers the page waits
-/// for: about a window's first row of each.
-const CARDS_AWAITED: usize = 8;
-
-/// Whether the artist page shows its sections. It waits until every part
-/// it opens with is in (see `complete`), or a few seconds have passed;
-/// once shown, it stays shown until the page is left.
-fn revealed(app: &App, ctx: &egui::Context, id: &str, page: &ArtistPage) -> bool {
-    let key = egui::Id::new(("artist-reveal", id));
-    let frame = ctx.cumulative_frame_nr();
-    let now = ctx.input(|input| input.time);
-    // A gap in the frames means the page was left and opened again.
-    let (started, shown) = ctx
-        .data(|data| data.get_temp::<(u64, f64, bool)>(key))
-        .filter(|(last, _, _)| frame.saturating_sub(*last) <= 1)
-        .map_or((now, false), |(_, started, shown)| (started, shown));
-    let waited = now - started;
-    let shown = shown || waited >= REVEAL_WAIT || complete(app, ctx, page);
-    ctx.data_mut(|data| data.insert_temp(key, (frame, started, shown)));
-    if !shown {
-        ctx.request_repaint_after(Duration::from_secs_f64(REVEAL_WAIT - waited));
-    }
-    shown
-}
-
-/// Whether the artist page has what it opens with: the artist, follow
-/// state, popular songs with their plays and hearts, the discography,
-/// related artists, and the covers at the top of each. Covers not yet
-/// asked for are asked for here.
-fn complete(app: &App, ctx: &egui::Context, page: &ArtistPage) -> bool {
-    let Loadable::Loaded(artist) = &page.artist else {
-        return false;
-    };
-    if matches!(page.top_tracks, Loadable::Loading | Loadable::NotLoaded)
-        || matches!(page.related, Loadable::Loading | Loadable::NotLoaded)
-        || !page
-            .albums
-            .get(page.filter.groups())
-            .is_some_and(|list| list.loaded_once || list.error.is_some())
-        || app.is_saved(&artist.uri).is_none()
-        || !app.play_counts_settled(&artist.uri)
-    {
-        return false;
-    }
-    let popular = page.top_tracks.get().map_or(&[][..], Vec::as_slice);
-    if !popular.is_empty() && !app.playlist_membership_settled() {
-        return false;
-    }
-    let mut covers: Vec<String> = Vec::new();
-    covers.extend(pick_image(&artist.images, HeroArt::of(app).hero).map(str::to_string));
-    if !app.settings.tracklist_compact {
-        let row_art = app.art_px(40.0);
-        covers.extend(
-            popular
-                .iter()
-                .take(5)
-                .filter_map(|track| app.item_image(&PlayableItem::Track(track.clone()), row_art)),
-        );
-    }
-    let card_art = app.art_px(widgets::CARD_ART);
-    if let Some(list) = page.albums.get(page.filter.groups()) {
-        let mut seen = std::collections::HashSet::new();
-        covers.extend(
-            list.items
-                .iter()
-                .filter(|album| seen.insert(album.name.to_lowercase()))
-                .take(CARDS_AWAITED)
-                .filter_map(|album| pick_image(&album.images, card_art).map(str::to_string)),
-        );
-    }
-    if let Loadable::Loaded(related) = &page.related {
-        covers.extend(
-            related
-                .iter()
-                .take(CARDS_AWAITED)
-                .filter_map(|artist| pick_image(&artist.images, card_art).map(str::to_string)),
-        );
-    }
-    let art = app.backend.art();
-    let mut settled = true;
-    for url in &covers {
-        art.prefetch(ctx, url);
-        settled &= art.is_settled(url);
-    }
-    settled
 }
 
 fn upcoming_release(

@@ -1,2 +1,0 @@
-private playlist:pl1 800x600
-private playlist:pl1 1280x800

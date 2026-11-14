@@ -13,8 +13,8 @@ jobs:
         include:
           - name: before
             ref: b75af93ad5b157ab4205710be2f0ea7878587082
-          - name: header
-            ref: playlist-header
+          - name: after
+            ref: heart-checklist
     steps:
       - uses: actions/checkout@v4
         with:

@@ -645,6 +645,11 @@ msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "新增日期"
 
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "發行日期"
+
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
 msgid "PLAYS"
@@ -2772,6 +2777,18 @@ msgstr "公開播放清單"
 #: src/ui/collection.rs:2328
 msgid "Private Playlist"
 msgstr "私人播放清單"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "新增日期"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "發行日期"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "長度"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

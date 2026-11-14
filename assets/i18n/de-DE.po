@@ -652,6 +652,11 @@ msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "HINZUGEFÜGT AM"
 
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "ERSCHEINUNGSDATUM"
+
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
 msgid "PLAYS"
@@ -2910,6 +2915,18 @@ msgstr "Öffentliche Playlist"
 #: src/ui/collection.rs:2328
 msgid "Private Playlist"
 msgstr "Private Playlist"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Hinzugefügt am"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Erscheinungsdatum"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Dauer"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

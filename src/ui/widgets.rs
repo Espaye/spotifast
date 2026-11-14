@@ -1186,10 +1186,19 @@ pub(crate) fn playlist_picker(
     }
     menu_separator(ui, &palette);
     let needle = query.trim().to_lowercase();
-    let matches: Vec<_> = playlists
+    let mut matches: Vec<_> = playlists
         .iter()
         .filter(|(_, name)| name.to_lowercase().contains(&needle))
         .collect();
+    // The playlists that held the song when the menu opened come first, so
+    // its own are found at once. The order stays put while checks change.
+    let held = |id: &String| {
+        checks
+            .as_deref()
+            .is_some_and(|checks| checks.holding.contains(id))
+    };
+    matches.sort_by_key(|(id, _)| !held(id));
+    let held_count = matches.iter().take_while(|(id, _)| held(id)).count();
     highlighted = highlighted.filter(|index| *index < matches.len());
     ui.data_mut(|data| data.insert_temp(highlight_id, (frame, highlighted, query.clone())));
     if enter && let Some((id, name)) = highlighted.and_then(|index| matches.get(index)) {
@@ -1204,28 +1213,16 @@ pub(crate) fn playlist_picker(
             ui.close();
         }
     }
-    // Liked Songs leads the list, pinned as in the library, while the
-    // filter matches it like any playlist.
+    // Liked Songs, pinned as in the library, leads the other playlists; it
+    // leads the song's own too when the song is liked. The filter matches
+    // it like any playlist.
     let liked_name = gettext(locale, "Liked Songs");
     let liked_shown = checks.is_some() && liked_name.to_lowercase().contains(&needle);
-    if liked_shown && let Some(checks) = checks.as_deref_mut() {
-        let (_, clicked) = picker_row(
-            ui,
-            &palette,
-            |ui, rect| super::sidebar::liked_cover(ui, rect, 4.0),
-            &liked_name,
-            true,
-            false,
-            Some(if checks.liked {
-                Mark::Checked
-            } else {
-                Mark::Unchecked
-            }),
-        );
-        if clicked {
-            checks.liked = !checks.liked;
-        }
-    }
+    let liked_at = if checks.as_deref().is_some_and(|checks| checks.liked_before) {
+        0
+    } else {
+        held_count
+    };
     if matches.is_empty() && (needle.is_empty() || !liked_shown) {
         theme::subtle(
             ui,
@@ -1266,7 +1263,14 @@ pub(crate) fn playlist_picker(
         list,
         egui::Vec2b::new(false, true),
         |ui| {
+            let count = matches.len();
             for (index, (id, name)) in matches.into_iter().enumerate() {
+                if liked_shown
+                    && index == liked_at
+                    && let Some(checks) = checks.as_deref_mut()
+                {
+                    liked_picker_row(ui, &palette, &liked_name, checks);
+                }
                 ui.push_id(id, |ui| {
                     let chosen = highlighted == Some(index);
                     let image = covers.get(id).map(String::as_str);
@@ -1297,9 +1301,58 @@ pub(crate) fn playlist_picker(
                     }
                 });
             }
+            if liked_shown
+                && liked_at >= count
+                && let Some(checks) = checks.as_deref_mut()
+            {
+                liked_picker_row(ui, &palette, &liked_name, checks);
+            }
         },
     );
     field
+}
+
+/// Liked Songs in the picker's checklist, with the library's pin.
+fn liked_picker_row(ui: &mut Ui, palette: &Palette, name: &str, checks: &mut PlaylistChecks) {
+    ui.push_id("liked-songs", |ui| {
+        let (_, clicked) = picker_row(
+            ui,
+            palette,
+            |ui, rect| super::sidebar::liked_cover(ui, rect, 4.0),
+            name,
+            true,
+            false,
+            Some(if checks.liked {
+                Mark::Checked
+            } else {
+                Mark::Unchecked
+            }),
+        );
+        if clicked {
+            checks.liked = !checks.liked;
+        }
+    });
+}
+
+/// The check at the end of a checklist row, centred on `center`.
+fn paint_mark(ui: &Ui, palette: &Palette, center: egui::Pos2, mark: Mark) {
+    match mark {
+        Mark::Checked => {
+            ui.painter().circle_filled(center, 9.0, palette.accent);
+            Icon::Check
+                .image(palette.on_accent, 12.0)
+                .paint_at(ui, Rect::from_center_size(center, Vec2::splat(12.0)));
+        }
+        Mark::Unchecked => {
+            ui.painter()
+                .circle_stroke(center, 8.5, Stroke::new(1.5, palette.secondary));
+        }
+        Mark::Unknown => {
+            let faint = palette.secondary.gamma_multiply(0.4);
+            ui.painter()
+                .circle_stroke(center, 8.5, Stroke::new(1.5, faint));
+        }
+    }
 }
 
 /// The pin beside a pinned row's name, as the library list shows it.
@@ -1357,24 +1410,7 @@ fn picker_row(
             );
         }
         if let Some(mark) = mark {
-            let center = pos2(rect.right() - 20.0, rect.center().y);
-            match mark {
-                Mark::Checked => {
-                    ui.painter().circle_filled(center, 9.0, palette.accent);
-                    Icon::Check
-                        .image(palette.on_accent, 12.0)
-                        .paint_at(ui, Rect::from_center_size(center, Vec2::splat(12.0)));
-                }
-                Mark::Unchecked => {
-                    ui.painter()
-                        .circle_stroke(center, 8.5, Stroke::new(1.5, palette.secondary));
-                }
-                Mark::Unknown => {
-                    let faint = palette.secondary.gamma_multiply(0.4);
-                    ui.painter()
-                        .circle_stroke(center, 8.5, Stroke::new(1.5, faint));
-                }
-            }
+            paint_mark(ui, palette, pos2(rect.right() - 20.0, rect.center().y), mark);
         }
     }
     response.widget_info(|| match mark {

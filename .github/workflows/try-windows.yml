@@ -1,0 +1,49 @@
+name: Try build (Windows x64)
+
+# Fork-only Windows test build for the owner. Never part of an upstream pull
+# request. Every round force-pushes ci/try as: upstream main, the product
+# change, then this file. A fork ruleset protects ci/try, so a successful run
+# saves its compiled target and the next run recompiles only what changed.
+on:
+  push:
+    branches: ["ci/try"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: try
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CMAKE_GENERATOR: Ninja
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: vcpkg install glew:x64-windows-static
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - uses: jdx/mr-boxington-action@v1
+        with:
+          cache-generation: try-v1
+          save-on-protected-branch: true
+      - name: Portable test build
+        run: mbx build --locked --release --features demo
+      - name: Portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/spotifast.exe, packaging/spotifast-portable.txt dist/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spotifast-try-windows-x64
+          path: dist/
+          if-no-files-found: error

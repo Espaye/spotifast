@@ -17,7 +17,7 @@ shot() {
     "${show[@]}" "$@" || { echo "FAILED $name $size $theme"; failed=1; }
 }
 failed=0
-for size in 800x600 1280x800; do
+for size in ${PAGES_SIZES-800x600 1280x800}; do
   for theme in dark light; do
     shot home home $size $theme
     shot playlist playlist:pl0 $size $theme

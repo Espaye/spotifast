@@ -114,7 +114,8 @@ pub fn is_relative_date(iso: &str, now: jiff::Timestamp) -> bool {
     (0..RELATIVE_DATE_LIMIT_SECONDS).contains(&seconds)
 }
 
-/// `5 minutes ago` for recent ISO-8601 timestamps, otherwise the usual date.
+/// `Just now` or `5 minutes ago` for recent ISO-8601 timestamps, otherwise
+/// the usual date.
 ///
 /// Dates are shown relatively for their first 30 days, matching the playlist
 /// table's compact, time-aware presentation. `now` is an argument so callers
@@ -128,17 +129,13 @@ pub fn format_relative_date(locale: Locale, iso: &str, now: jiff::Timestamp) -> 
         return format_date(locale, iso);
     }
 
-    let (count, text) = if seconds < 60 {
-        let count = seconds;
-        let text = ngettext(
-            locale,
-            // Translators: How long ago a song was added. Keep {count}.
-            "{count} second ago",
-            "{count} seconds ago",
-            count as u32,
-        );
-        (count, text)
-    } else if seconds < 60 * 60 {
+    // A count of seconds would tick up on screen until the minute: under a
+    // minute it all happened just now.
+    if seconds < 60 {
+        // Translators: When a song was added or played, less than a minute ago.
+        return gettext(locale, "Just now").into_owned();
+    }
+    let (count, text) = if seconds < 60 * 60 {
         let count = seconds / 60;
         let text = ngettext(
             locale,
@@ -535,7 +532,15 @@ mod tests {
         let now: jiff::Timestamp = "2026-08-31T12:00:00Z".parse().unwrap();
         assert_eq!(
             format_relative_date(Locale::English, "2026-08-31T11:59:30Z", now),
-            "30 seconds ago"
+            "Just now"
+        );
+        assert_eq!(
+            format_relative_date(Locale::English, "2026-08-31T12:00:00Z", now),
+            "Just now"
+        );
+        assert_eq!(
+            format_relative_date(Locale::English, "2026-08-31T11:59:01Z", now),
+            "Just now"
         );
         assert_eq!(
             format_relative_date(Locale::English, "2026-08-31T11:59:00Z", now),

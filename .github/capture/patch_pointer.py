@@ -27,8 +27,8 @@ swap(
 )
 # Release where the press was, so it counts as a click.
 swap(
-    "        let pos = if frame <= Self::REST {\n",
-    "        let pos = if frame <= Self::REST + 1 {\n",
+    "        let pos = if frame <= rest {\n",
+    "        let pos = if frame <= rest + 1 {\n",
 )
 swap(
     "                button: egui::PointerButton::Primary,\n",

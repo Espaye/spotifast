@@ -1,4 +1,2 @@
-heart home 800x600 178,556
-heart home 1280x800 178,756
-menu playlist:pl0 800x600 450,418 600,129
-menu playlist:pl0 1280x800 450,466 600,177
+private playlist:pl1 800x600
+private playlist:pl1 1280x800

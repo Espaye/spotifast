@@ -12,9 +12,11 @@ jobs:
       matrix:
         include:
           - name: before
-            ref: 9bc5b21bc30fb2897fa637e9f76f06da43d09296
-          - name: after
-            ref: playlist-picker-checks-next
+            ref: b75af93ad5b157ab4205710be2f0ea7878587082
+          - name: bars
+            ref: bar-buttons
+          - name: header
+            ref: playlist-header
     steps:
       - uses: actions/checkout@v4
         with:

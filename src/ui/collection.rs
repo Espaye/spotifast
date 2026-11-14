@@ -492,12 +492,16 @@ pub fn actions_row(
                             app.actions.push(Action::SaveRadio(seed.clone()));
                         }
                     } else {
-                        widgets::context_menu_items(
+                        // A playlist's own page also chooses its columns.
+                        let columns = (util::uri_kind(uri) == Some("playlist"))
+                            .then_some(app.settings.track_columns);
+                        widgets::context_menu_items_with_columns(
                             ui,
                             app,
                             uri,
                             actions.name,
                             actions.owned_playlist.as_ref(),
+                            columns,
                         );
                     }
                     if let Some((page, loading)) = &actions.reload {
@@ -1628,33 +1632,15 @@ fn view_indices(
 }
 
 /// The menu a secondary click on a playlist's headings opens: a checklist
-/// of the columns its song list can show.
+/// of the columns its song list can show. It stays open for more changes
+/// until a click outside it.
 fn column_menu(app: &mut App, heading: &egui::Response, columns: TrackColumns) {
     let palette = app.palette;
-    let locale = app.locale;
     egui::Popup::context_menu(heading)
         .id(egui::Id::new("track-columns-menu"))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .frame(widgets::menu_frame(&palette))
-        .show(|ui| {
-            let choices = [
-                (gettext(locale, "Album"), columns.album),
-                (gettext(locale, "Date added"), columns.added),
-                (gettext(locale, "Release date"), columns.released),
-                (gettext(locale, "Duration"), columns.duration),
-            ];
-            for (choice, (label, shown)) in choices.into_iter().enumerate() {
-                if widgets::menu_item(ui, &palette, shown.then_some(Icon::Check), &label) {
-                    let mut toggled = columns;
-                    match choice {
-                        0 => toggled.album = !shown,
-                        1 => toggled.added = !shown,
-                        2 => toggled.released = !shown,
-                        _ => toggled.duration = !shown,
-                    }
-                    app.actions.push(Action::SetTrackColumns(toggled));
-                }
-            }
-        });
+        .show(|ui| widgets::track_column_checks(ui, app, columns));
 }
 
 /// The release date of a song's album, as Spotify sent it with the song.

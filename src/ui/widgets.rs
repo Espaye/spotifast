@@ -1355,6 +1355,81 @@ fn paint_mark(ui: &Ui, palette: &Palette, center: egui::Pos2, mark: Mark) {
     }
 }
 
+/// A menu entry with the checklist's check at its end. A click turns it on
+/// or off and leaves the menu open for the next, when the menu closes only
+/// on a click outside it.
+pub(crate) fn menu_check_item(ui: &mut Ui, palette: &Palette, label: &str, checked: bool) -> bool {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
+        }
+        let x = rect.left() + 10.0;
+        let right = rect.right() - 38.0;
+        let galley = crate::bidi::layout(
+            ui.painter(),
+            label,
+            theme::regular(13.5),
+            palette.text,
+            (right - x).max(0.0),
+            1,
+            Some(crate::bidi::ELLIPSIS),
+        );
+        let text_rect = Rect::from_min_max(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            pos2(right, rect.center().y + galley.size().y / 2.0),
+        );
+        ui.painter().galley(
+            crate::bidi::galley_pos(text_rect, &galley),
+            galley,
+            palette.text,
+        );
+        paint_mark(
+            ui,
+            palette,
+            pos2(rect.right() - 20.0, rect.center().y),
+            if checked { Mark::Checked } else { Mark::Unchecked },
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), checked, label)
+    });
+    theme::focus_ring(ui, &response);
+    response.clicked()
+}
+
+/// The columns a playlist's song list can show, each a check that stays
+/// in a menu that closes only on a click outside it.
+pub(crate) fn track_column_checks(
+    ui: &mut Ui,
+    app: &mut App,
+    columns: crate::settings::TrackColumns,
+) {
+    let palette = app.palette;
+    let locale = app.locale;
+    ui.set_min_width(200.0);
+    let choices = [
+        (gettext(locale, "Album"), columns.album),
+        (gettext(locale, "Date added"), columns.added),
+        (gettext(locale, "Release date"), columns.released),
+        (gettext(locale, "Duration"), columns.duration),
+    ];
+    for (choice, (label, shown)) in choices.into_iter().enumerate() {
+        if menu_check_item(ui, &palette, &label, shown) {
+            let mut toggled = columns;
+            match choice {
+                0 => toggled.album = !shown,
+                1 => toggled.added = !shown,
+                2 => toggled.released = !shown,
+                _ => toggled.duration = !shown,
+            }
+            app.actions.push(Action::SetTrackColumns(toggled));
+        }
+    }
+}
+
 /// The pin beside a pinned row's name, as the library list shows it.
 const PICKER_PIN: f32 = 13.0;
 
@@ -1735,6 +1810,19 @@ pub fn context_menu_items(
     name: &str,
     owned_playlist: Option<&Playlist>,
 ) {
+    context_menu_items_with_columns(ui, app, uri, name, owned_playlist, None);
+}
+
+/// [`context_menu_items`] with a submenu choosing the song list's
+/// `columns`, for the More menu on a playlist's own page.
+pub fn context_menu_items_with_columns(
+    ui: &mut Ui,
+    app: &mut App,
+    uri: &str,
+    name: &str,
+    owned_playlist: Option<&Playlist>,
+    columns: Option<crate::settings::TrackColumns>,
+) {
     let palette = app.palette;
     let locale = app.locale;
     ui.set_min_width(200.0);
@@ -1780,33 +1868,45 @@ pub fn context_menu_items(
     if owned_playlist.is_none() && menu_item(ui, &palette, Some(icon), &text) {
         app.actions.push(Action::ToggleSaved(uri.to_string()));
     }
-    if let Some(playlist) = owned_playlist {
-        if menu_item(
+    if let Some(playlist) = owned_playlist
+        && menu_item(
             ui,
             &palette,
             Some(Icon::Pencil),
             &gettext(locale, "Edit details"),
-        ) {
-            app.actions.push(Action::ShowDialog(Dialog::EditPlaylist {
-                cover: Default::default(),
+        )
+    {
+        app.actions.push(Action::ShowDialog(Dialog::EditPlaylist {
+            cover: Default::default(),
+            id: playlist.id.clone(),
+            name: playlist.name.clone(),
+            description: playlist
+                .description
+                .clone()
+                .map(|d| util::strip_html(&d))
+                .unwrap_or_default(),
+            public: playlist.public,
+        }));
+    }
+    if let Some(columns) = columns {
+        submenu(
+            ui,
+            &palette,
+            Some(Icon::LayoutList),
+            &gettext(locale, "Columns"),
+            Some(egui::PopupCloseBehavior::CloseOnClickOutside),
+            |ui| track_column_checks(ui, app, columns),
+        );
+    }
+    if let Some(playlist) = owned_playlist
+        && menu_item(ui, &palette, Some(Icon::Trash), &gettext(locale, "Delete"))
+    {
+        app.actions
+            .push(Action::ShowDialog(Dialog::ConfirmDeletePlaylist {
                 id: playlist.id.clone(),
                 name: playlist.name.clone(),
-                description: playlist
-                    .description
-                    .clone()
-                    .map(|d| util::strip_html(&d))
-                    .unwrap_or_default(),
-                public: playlist.public,
+                owned: true,
             }));
-        }
-        if menu_item(ui, &palette, Some(Icon::Trash), &gettext(locale, "Delete")) {
-            app.actions
-                .push(Action::ShowDialog(Dialog::ConfirmDeletePlaylist {
-                    id: playlist.id.clone(),
-                    name: playlist.name.clone(),
-                    owned: true,
-                }));
-        }
     }
     menu_separator(ui, &palette);
     let radio = match kind {
@@ -1962,66 +2062,109 @@ struct OptionalColumns {
 /// next and the narrowest lists still keep the title readable.
 const OPTIONAL_COLUMN_STEPS: [f32; 4] = [560.0, 760.0, 920.0, 1080.0];
 
+/// How the title and the optional columns share a row's free width, as
+/// Spotify's own lists share it: six parts for the title, four for the
+/// album, three for each date or name. Whichever columns are shown, the
+/// gaps between them stay even.
+const TITLE_SHARE: f32 = 6.0;
+const ALBUM_SHARE: f32 = 4.0;
+const DETAIL_SHARE: f32 = 3.0;
+
+/// `width` is the whole row's; `free` what is left for the title and the
+/// optional columns once the fixed ones (number, cover, plays, heart,
+/// duration, More) have theirs.
 fn optional_columns(
     width: f32,
+    free: f32,
     album: bool,
     added: bool,
     added_by: bool,
     released: bool,
 ) -> OptionalColumns {
     let mut shown = 0;
-    let mut take = |wanted: bool, column_width: f32| {
-        let fits = OPTIONAL_COLUMN_STEPS
-            .get(shown)
-            .is_some_and(|step| width > *step);
-        if wanted && fits {
+    let mut fits = |wanted: bool| {
+        let fits = wanted
+            && OPTIONAL_COLUMN_STEPS
+                .get(shown)
+                .is_some_and(|step| width > *step);
+        if fits {
             shown += 1;
-            column_width
+        }
+        fits
+    };
+    let album = fits(album);
+    let added = fits(added);
+    let added_by = fits(added_by);
+    let released = fits(released);
+    let shares = TITLE_SHARE
+        + [
+            (album, ALBUM_SHARE),
+            (added, DETAIL_SHARE),
+            (added_by, DETAIL_SHARE),
+            (released, DETAIL_SHARE),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, share)| share)
+        .sum::<f32>();
+    let part = free.max(0.0) / shares;
+    let size = |on: bool, share: f32, min: f32, max: f32| {
+        if on {
+            (part * share).clamp(min, max)
         } else {
             0.0
         }
     };
     OptionalColumns {
-        album: take(album, (width * 0.28).clamp(140.0, 360.0)),
-        added: take(added, 120.0),
-        added_by: take(added_by, 130.0),
-        released: take(released, 120.0),
+        album: size(album, ALBUM_SHARE, 140.0, 360.0),
+        added: size(added, DETAIL_SHARE, 120.0, 180.0),
+        added_by: size(added_by, DETAIL_SHARE, 130.0, 200.0),
+        released: size(released, DETAIL_SHARE, 120.0, 180.0),
     }
 }
 
 fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
+    let number = if row.compact { 0.0 } else { 44.0 };
+    let cover = if row.show_cover {
+        if row.compact { 44.0 } else { 52.0 }
+    } else {
+        0.0
+    };
+    let plays = if row.show_plays && !row.compact && plays_fit(width) {
+        PLAYS_WIDTH
+    } else {
+        0.0
+    };
+    let heart = if row.compact { 0.0 } else { 36.0 };
+    let duration = if !row.show_duration {
+        0.0
+    } else if row.compact {
+        44.0
+    } else {
+        56.0
+    };
+    let more = if row.compact { 0.0 } else { 36.0 };
+    // The same sum the header takes, so the two line up.
+    let free = width - number - cover - plays - heart - duration - more - 8.0;
     let optional = optional_columns(
         width,
+        free,
         row.show_album,
         row.added_at.is_some(),
         row.show_added_by,
         row.show_released,
     );
     Columns {
-        number: if row.compact { 0.0 } else { 44.0 },
-        cover: if row.show_cover {
-            if row.compact { 44.0 } else { 52.0 }
-        } else {
-            0.0
-        },
+        number,
+        cover,
         album: optional.album,
         added_by: optional.added_by,
         added: optional.added,
         released: optional.released,
-        plays: if row.show_plays && !row.compact && plays_fit(width) {
-            PLAYS_WIDTH
-        } else {
-            0.0
-        },
-        heart: if row.compact { 0.0 } else { 36.0 },
-        duration: if !row.show_duration {
-            0.0
-        } else if row.compact {
-            44.0
-        } else {
-            56.0
-        },
-        more: if row.compact { 0.0 } else { 36.0 },
+        plays,
+        heart,
+        duration,
+        more,
     }
 }
 
@@ -3040,7 +3183,6 @@ pub fn table_header(
         &pgettext(locale, "column heading", "TITLE"),
         SortColumn::Title,
     );
-    let optional = optional_columns(width, show_album, show_added, show_added_by, show_released);
     let plays_width = if show_plays && plays_fit(width) {
         PLAYS_WIDTH
     } else {
@@ -3048,6 +3190,15 @@ pub fn table_header(
     };
     let duration_width = if show_duration { 56.0 } else { 0.0 };
     let right_fixed = 36.0 + duration_width + 36.0 + 8.0;
+    let cover_width = if show_cover { 52.0 } else { 0.0 };
+    let optional = optional_columns(
+        width,
+        width - 44.0 - cover_width - plays_width - right_fixed,
+        show_album,
+        show_added,
+        show_added_by,
+        show_released,
+    );
     let mut cx = rect.right()
         - right_fixed
         - plays_width

@@ -657,6 +657,8 @@ through Spotifast, which Spotify does not record.
 
 Since 0.8.0, choosing any Recent row starts that song on its own,
 and the player bar shows the selection immediately while playback starts.
+With Autoplay on, music Spotify suggests follows it, on this computer and on
+any other device, so playback does not stop after the one song.
 
 The song playing now leads the list as soon as it starts, as it does in the
 queue. It stays in the history once it has played for about 30 seconds, or

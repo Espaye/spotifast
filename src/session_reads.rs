@@ -1909,9 +1909,7 @@ fn playable(kind: ExtensionKind, bytes: &[u8]) -> Option<PlayableItem> {
     match kind {
         ExtensionKind::TRACK_V4 => {
             let message = librespot_protocol::metadata::Track::parse_from_bytes(bytes).ok()?;
-            Some(PlayableItem::Track(track(
-                SessionTrack::try_from(&message).ok()?,
-            )))
+            track_of(&message).map(PlayableItem::Track)
         }
         ExtensionKind::EPISODE_V4 => {
             let message = librespot_protocol::metadata::Episode::parse_from_bytes(bytes).ok()?;
@@ -1927,6 +1925,27 @@ fn playable(kind: ExtensionKind, bytes: &[u8]) -> Option<PlayableItem> {
         }
         _ => None,
     }
+}
+
+fn track_of(message: &librespot_protocol::metadata::Track) -> Option<Track> {
+    let mut track = track(SessionTrack::try_from(message).ok()?);
+    // The typed album fills a missing month or day in with the first, so
+    // the date comes from the message, as precise as Spotify knows it.
+    if let Some(album) = &mut track.album {
+        album.release_date = message.album.date.as_ref().and_then(release_date);
+    }
+    Some(track)
+}
+
+/// A release date as the Web API writes it: a year alone stays a year, and
+/// a month without a day stays a month.
+fn release_date(date: &librespot_protocol::metadata::Date) -> Option<String> {
+    let year = date.year.filter(|year| *year > 0)?;
+    Some(match (date.month, date.day) {
+        (Some(month), Some(day)) => format!("{year:04}-{month:02}-{day:02}"),
+        (Some(month), None) => format!("{year:04}-{month:02}"),
+        _ => format!("{year:04}"),
+    })
 }
 
 fn track(track: SessionTrack) -> Track {
@@ -2689,6 +2708,29 @@ mod tests {
             "the cover is on the image host at its stated size"
         );
         assert_eq!(album.images[1].width, None, "a size Spotify left out");
+    }
+
+    /// A song read through the session carries its album's release date, as
+    /// precise as Spotify knows it, as one read through the Web API does.
+    #[test]
+    fn a_tracks_album_keeps_its_release_date() {
+        let dated = |year, month, day| {
+            let mut message = librespot_protocol::metadata::Track::new();
+            message.set_gid(GID.to_vec());
+            let album = message.album.mut_or_insert_default();
+            album.set_gid(vec![0x03; 16]);
+            let date = album.date.mut_or_insert_default();
+            date.year = year;
+            date.month = month;
+            date.day = day;
+            let track = super::track_of(&message).unwrap();
+            track.album.unwrap().release_date
+        };
+
+        assert_eq!(dated(Some(1987), Some(3), Some(9)).unwrap(), "1987-03-09");
+        assert_eq!(dated(Some(1987), Some(3), None).unwrap(), "1987-03");
+        assert_eq!(dated(Some(1987), None, None).unwrap(), "1987");
+        assert_eq!(dated(None, None, None), None, "an undated album");
     }
 
     /// An episode brings its show and its date along.

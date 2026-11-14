@@ -1364,7 +1364,8 @@ pub(crate) fn menu_check_item(ui: &mut Ui, palette: &Palette, label: &str, check
 }
 
 /// The columns a playlist's song list can show, each a check that stays
-/// in a menu that closes only on a click outside it.
+/// in a menu that closes only on a click outside it. The menu is only as
+/// wide as its longest name and the check beside it.
 pub(crate) fn track_column_checks(
     ui: &mut Ui,
     app: &mut App,
@@ -1372,13 +1373,26 @@ pub(crate) fn track_column_checks(
 ) {
     let palette = app.palette;
     let locale = app.locale;
-    ui.set_min_width(200.0);
     let choices = [
         (gettext(locale, "Album"), columns.album),
         (gettext(locale, "Date added"), columns.added),
         (gettext(locale, "Release date"), columns.released),
         (gettext(locale, "Duration"), columns.duration),
     ];
+    let longest = choices
+        .iter()
+        .map(|(label, _)| {
+            ui.painter()
+                .layout_no_wrap(label.to_string(), theme::regular(13.5), palette.text)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    // `menu_check_item`'s margin before the name and the room it keeps for
+    // the check, with a little space between the two.
+    let width = (10.0 + longest.ceil() + 8.0 + 38.0).min(300.0);
+    ui.set_min_width(width);
+    ui.set_max_width(width);
     for (choice, (label, shown)) in choices.into_iter().enumerate() {
         if menu_check_item(ui, &palette, &label, shown) {
             let mut toggled = columns;

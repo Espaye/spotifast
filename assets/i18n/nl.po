@@ -223,7 +223,7 @@ msgid "{name}, folder, expanded"
 msgstr "{name}, map, uitgevouwen"
 
 #: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+msgid "Click to change the visualiser"
 msgstr "Klik om de visualisatie te wisselen"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:131 src/ui/lyrics.rs:805
@@ -651,6 +651,11 @@ msgstr "TOEGEVOEGD DOOR"
 msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "DATUM TOEGEVOEGD"
+
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "RELEASEDATUM"
 
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
@@ -1711,11 +1716,11 @@ msgid "Custom title bar"
 msgstr "Aangepaste titelbalk"
 
 #: src/ui/settings.rs:1242
-msgid "Player bar visualizer"
+msgid "Player bar visualiser"
 msgstr "Visualisatie in de spelerbalk"
 
 #: src/ui/settings.rs:1243
-msgid "Click player bar to change visualizer"
+msgid "Click player bar to change visualiser"
 msgstr "Klik op de afspeelbalk om de visualisatie te wijzigen"
 
 #: src/ui/settings.rs:1252
@@ -1805,7 +1810,7 @@ msgstr ""
 "hier speelt."
 
 #: src/ui/settings.rs:1348
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "Sta toe dat klikken op lege ruimte in de afspeelbalk de visualisatie wisselt."
 
@@ -1815,7 +1820,7 @@ msgstr "Framerate"
 
 #: src/ui/settings.rs:1354
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "Hoe vaak de visualisaties van de spelerbalk en de minispeler tekenen. Lagere "
@@ -2884,6 +2889,22 @@ msgstr "Gezamenlijke playlist"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "Openbare playlist"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "Privéplaylist"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Datum toegevoegd"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Releasedatum"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Duur"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

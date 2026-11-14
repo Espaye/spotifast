@@ -4,12 +4,12 @@ use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, Vec2, 
 
 use crate::app::{App, NowPlaying};
 use crate::i18n::gettext;
-use crate::model::{Action, DragTrack, Page};
+use crate::model::{Action, DragTrack, Page, RowContext};
 use crate::player::RepeatMode;
 use crate::theme::{self, Icon};
 use crate::util;
 
-use super::widgets::{PlaylistChecks, SliderEvent, thin_slider};
+use super::widgets::{SliderEvent, thin_slider};
 
 /// How much of the playing art's tint the bar's fill carries.
 const TINT_STRENGTH: f32 = 0.12;
@@ -43,6 +43,9 @@ pub(crate) fn end_tint_session(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<u64>(egui::Id::new(TINT_SESSION_ID)));
 }
 
+/// The bar's side margins, inside its fill.
+const SIDE_MARGIN: i8 = 16;
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let fill = eased_fill(ui.ctx(), palette.panel, app.now_playing_tint());
@@ -53,71 +56,103 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .frame(
             Frame::new()
                 .fill(fill)
-                .inner_margin(Margin::symmetric(16, 0)),
+                .inner_margin(Margin::symmetric(SIDE_MARGIN, 0)),
         )
-        .show(ui, |ui| {
-            let rect = ui.max_rect();
-            let now = app.now_playing();
-            // The whole bar, margins included, behind everything else.
-            let behind = rect.expand2(vec2(16.0, 0.0));
-            if visualizer(app, ui, behind, now.as_ref()) {
-                theme::visualiser_frame(ui.ctx(), app.visualiser_fps());
-            }
-            // Its empty space is the visualizer's control, as Winamp's
-            // visualizer was: a click moves to the next mode. The controls
-            // drawn after it take their own clicks.
-            if app.settings.player_bar_vis_click && app.visualizers_available() {
-                let empty = ui.interact(
-                    behind,
-                    ui.id().with("player-bar-visualizer"),
-                    Sense::click(),
-                );
-                // An open tooltip stays while the pointer is inside its widget's
-                // rect, and this one spans the bar: offer it only while the empty
-                // space itself is hovered, not the controls over it.
-                let empty = if empty.hovered() {
-                    empty.on_hover_text_at_pointer(gettext(
-                        app.locale,
-                        "Click to change the visualizer",
-                    ))
-                } else {
-                    empty
-                };
-                if empty.clicked() {
-                    app.actions.push(Action::CyclePlayerBarVis);
-                }
-            }
-            ui.painter().hline(
-                rect.x_range(),
-                rect.top() + 0.5,
-                egui::Stroke::new(1.0, palette.outline),
-            );
-            let width = rect.width();
-            let side = (width * 0.3).clamp(200.0, 420.0);
-            let cy = rect.center().y;
-            let left = Rect::from_min_max(rect.min, pos2(rect.left() + side, rect.bottom()));
-            let center = Rect::from_min_max(
-                pos2(rect.left() + side, rect.top()),
-                pos2(rect.right() - side, rect.bottom()),
-            );
+        .show(ui, |ui| contents(app, ui));
+}
 
-            // egui's cross-axis centring is unreliable across nested layouts of
-            // mixed heights, so each region is placed in an explicit band that
-            // is sized to its content and centred on the bar's midline.
-            now_playing_block(app, ui, left, now.as_ref());
+/// The bar over the bottom of full screen lyrics, lowered by `hidden` of
+/// its height (0 shows it whole, 1 puts it just below the window). It
+/// takes no room from the view under it, so the lyrics never move while
+/// it comes and goes. Drawn after the view, it is on top of it.
+pub fn overlay(app: &mut App, ui: &mut egui::Ui, hidden: f32) {
+    let viewport = ui.ctx().viewport_rect();
+    if hidden >= 1.0 {
+        return;
+    }
+    let height = theme::PLAYER_BAR_HEIGHT;
+    let top = viewport.bottom() - height * (1.0 - hidden.clamp(0.0, 1.0));
+    let outer = Rect::from_min_size(pos2(viewport.left(), top), vec2(viewport.width(), height));
+    let fill = eased_fill(ui.ctx(), app.palette.panel, app.now_playing_tint());
+    let mut bar = ui.new_child(
+        UiBuilder::new()
+            .id_salt("player-bar-overlay")
+            .max_rect(outer.shrink2(vec2(f32::from(SIDE_MARGIN), 0.0))),
+    );
+    bar.set_clip_rect(outer.intersect(viewport));
+    bar.painter().rect_filled(outer, 0.0, fill);
+    contents(app, &mut bar);
+}
 
-            transport(app, ui, now.as_ref(), center);
+/// Everything in the bar, laid out across `ui`'s rect.
+fn contents(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let rect = ui.max_rect();
+    let now = app.now_playing();
+    // The whole bar, margins included, behind everything else.
+    let behind = rect.expand2(vec2(16.0, 0.0));
+    if visualizer(app, ui, behind, now.as_ref()) {
+        theme::visualiser_frame(ui.ctx(), app.visualiser_fps());
+    }
+    // Its empty space is the visualizer's control, as Winamp's
+    // visualizer was: a click moves to the next mode. The controls
+    // drawn after it take their own clicks.
+    if app.settings.player_bar_vis_click && app.visualizers_available() {
+        let empty = ui.interact(behind, ui.id().with("player-bar-visualizer"), Sense::click());
+        // An open tooltip stays while the pointer is inside its widget's
+        // rect, and this one spans the bar: offer it only while the empty
+        // space itself is hovered, not the controls over it, and only
+        // while a visualiser is showing. A click still turns it on.
+        // Music on a speaker or another device never reaches it, so it
+        // says so rather than offering a change that shows nothing.
+        let showing = app.settings.player_bar_vis != crate::settings::PlayerBarVis::Off;
+        let elsewhere = now.as_ref().is_some_and(|now| !now.local)
+            && !(app.soloist_audio && app.targets_own_soloist());
+        let empty = if showing && empty.hovered() {
+            empty.on_hover_text_at_pointer(if elsewhere {
+                gettext(
+                    app.locale,
+                    "The visualiser shows only music playing on this computer",
+                )
+            } else {
+                gettext(app.locale, "Click to change the visualiser")
+            })
+        } else {
+            empty
+        };
+        if empty.clicked() {
+            app.actions.push(Action::CyclePlayerBarVis);
+        }
+    }
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        egui::Stroke::new(1.0, palette.outline),
+    );
+    let width = rect.width();
+    let side = (width * 0.3).clamp(200.0, 420.0);
+    let cy = rect.center().y;
+    let left = Rect::from_min_max(rect.min, pos2(rect.left() + side, rect.bottom()));
+    let center = Rect::from_min_max(
+        pos2(rect.left() + side, rect.top()),
+        pos2(rect.right() - side, rect.bottom()),
+    );
 
-            let right_band =
-                Rect::from_min_size(pos2(rect.right() - side, cy - 15.0), vec2(side, 30.0));
-            let mut right_ui = ui.new_child(
-                UiBuilder::new()
-                    .max_rect(right_band)
-                    .layout(Layout::right_to_left(Align::Center)),
-            );
-            let transport_right = center.center().x + transport_width() / 2.0;
-            extras(app, &mut right_ui, now.as_ref(), transport_right);
-        });
+    // egui's cross-axis centring is unreliable across nested layouts of
+    // mixed heights, so each region is placed in an explicit band that
+    // is sized to its content and centred on the bar's midline.
+    now_playing_block(app, ui, left, now.as_ref());
+
+    transport(app, ui, now.as_ref(), center);
+
+    let right_band = Rect::from_min_size(pos2(rect.right() - side, cy - 15.0), vec2(side, 30.0));
+    let mut right_ui = ui.new_child(
+        UiBuilder::new()
+            .max_rect(right_band)
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    let transport_right = center.center().x + transport_width() / 2.0;
+    extras(app, &mut right_ui, now.as_ref(), transport_right);
 }
 
 /// Draws the chosen spectrum or waveform of the song playing on this
@@ -598,22 +633,14 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
     }
 
     if !now.is_episode {
-        let saved = app.is_saved(&now.uri).unwrap_or(false);
-        // A liked heart stays green under the pointer, like shuffle.
-        let (icon, color, hover, tooltip) = if saved {
-            (
-                Icon::HeartFilled,
-                palette.accent,
-                palette.accent_hover,
-                gettext(app.locale, "Add to playlist"),
-            )
+        // Green when the song is in Liked Songs or any of the account's
+        // playlists; a click opens the checklist of them, never likes the
+        // song at once.
+        let saved = app.saved_anywhere(&now.uri);
+        let (icon, color, hover) = if saved {
+            (Icon::HeartFilled, palette.accent, palette.accent_hover)
         } else {
-            (
-                Icon::Heart,
-                palette.secondary,
-                palette.text,
-                gettext(app.locale, "Save to Liked Songs"),
-            )
+            (Icon::Heart, palette.secondary, palette.text)
         };
         // Sit the heart just past the actual text, not at the region's far
         // edge, so it stays visually attached to the title.
@@ -624,79 +651,38 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
                 .max_rect(heart_rect)
                 .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
-        let response = theme::icon_button(&mut heart_ui, icon, 17.0, color, hover, &tooltip);
+        let response = theme::icon_button(
+            &mut heart_ui,
+            icon,
+            17.0,
+            color,
+            hover,
+            &gettext(app.locale, "Add to playlist"),
+        );
         let popup_id = egui::Id::new(LIKED_POPUP_ID);
-        let query_id = popup_id.with("query");
-        let checks_id = popup_id.with("checks");
-        // What the menu holds while open, dropped once it closes.
-        let forget = |ui: &mut egui::Ui| {
-            ui.data_mut(|data| {
-                data.remove::<String>(query_id);
-                data.remove::<PlaylistChecks>(checks_id);
-            });
-        };
-        // A liked song's heart opens a checklist of Liked Songs and the
-        // playlists, as Spotify's phone app does: checks change nothing
-        // until Done, and a click outside drops them. The first click on a
-        // song not yet liked still likes it at once (#792).
-        match song.as_ref().filter(|_| saved) {
+        match song.as_ref() {
+            Some(item) => {
+                // A song played from one of the account's playlists is in
+                // it, unless the index knows better: a song queued by hand
+                // plays inside the playlist's context too.
+                let containing = match app.editable_context_playlist() {
+                    Some(RowContext::Context {
+                        editable_playlist: Some((id, _)),
+                        ..
+                    }) if app.playlist_holds(&id, item.uri()) != Some(false) => Some(id),
+                    _ => None,
+                };
+                super::widgets::heart_menu(
+                    ui,
+                    app,
+                    &response,
+                    popup_id,
+                    item,
+                    containing.as_deref(),
+                );
+            }
             None => {
                 egui::Popup::close_id(ui.ctx(), popup_id);
-                forget(ui);
-                if response.clicked() {
-                    app.actions.push(Action::ToggleSaved(now.uri.clone()));
-                }
-            }
-            Some(item) => {
-                let shown = egui::Popup::menu(&response)
-                    .id(popup_id)
-                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                    .frame(super::widgets::menu_frame(&palette))
-                    .show(|ui| {
-                        let stored = ui.data(|data| data.get_temp::<String>(query_id));
-                        let fresh = stored.is_none();
-                        let mut query = stored.unwrap_or_default();
-                        let mut checks = ui
-                            .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
-                            .filter(|checks| checks.uri == item.uri())
-                            .unwrap_or_else(|| PlaylistChecks::new(app, item));
-                        let before = app.actions.len();
-                        let field = super::widgets::playlist_picker(
-                            ui,
-                            app,
-                            std::slice::from_ref(item),
-                            &mut query,
-                            Some(&mut checks),
-                        );
-                        if fresh {
-                            field.request_focus();
-                        }
-                        super::widgets::menu_separator(ui, &palette);
-                        let done = ui
-                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                theme::pill_button(ui, &palette, &gettext(app.locale, "Done"), true)
-                            })
-                            .inner
-                            .clicked();
-                        if done {
-                            if !checks.liked {
-                                app.actions.push(Action::ToggleSaved(now.uri.clone()));
-                            }
-                            let changes = checks.changes(app, item);
-                            app.actions.extend(changes);
-                        }
-                        ui.data_mut(|data| {
-                            data.insert_temp(query_id, query);
-                            data.insert_temp(checks_id, checks);
-                        });
-                        // Done or New playlist closes it.
-                        if done || app.actions.len() > before {
-                            ui.close();
-                        }
-                    });
-                if shown.is_none() {
-                    forget(ui);
-                }
             }
         }
     }
@@ -965,7 +951,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     // change it.
     let adjustable = !app.soloist_waiting() && now.is_none_or(|now| now.can_set_volume);
     // The bar's last control, right of the volume, like Spotify's. It gives
-    // way before anything else, once Listening activity has; **F** stays.
+    // way before anything else; **F** stays.
     let room = ui.max_rect().right() - transport_right;
     if full_screen_button_fits(room) {
         let inside = app.lyrics_fullscreen.is_some();
@@ -1088,7 +1074,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     }
     if theme::icon_button(
         ui,
-        Icon::Mic,
+        Icon::MicVocal,
         18.0,
         if app.show_lyrics_panel {
             palette.accent
@@ -1101,26 +1087,6 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     .clicked()
     {
         app.actions.push(Action::ToggleLyricsPanel);
-    }
-    // The Listening activity button is the first to go in a narrow window,
-    // so it never crowds the transport.
-    let left = ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD);
-    if left - transport_right >= TRANSPORT_GAP
-        && theme::icon_button(
-            ui,
-            Icon::Users,
-            18.0,
-            if app.show_friends_panel {
-                palette.accent
-            } else {
-                palette.secondary
-            },
-            palette.text,
-            &gettext(app.locale, "Listening activity"),
-        )
-        .clicked()
-    {
-        app.actions.push(Action::ToggleFriendsPanel);
     }
 }
 

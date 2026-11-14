@@ -132,6 +132,41 @@ impl PendingRemoteVolume {
     }
 }
 
+/// A volume set here that the device then reported. A speaker may report
+/// its level one step from what was set: a Sonos turned to 1% reports 0%
+/// a moment later while it still plays. A report that close keeps the
+/// chosen volume on screen, so the slider does not slip and the icon does
+/// not read muted.
+struct SettledRemoteVolume {
+    percent: u8,
+    device_id: Option<String>,
+}
+
+impl SettledRemoteVolume {
+    /// Whether `device` may be the one the volume was set on, as
+    /// `PendingRemoteVolume::may_be_on` decides.
+    fn may_be_on(&self, device: &Device) -> bool {
+        device.id.is_none() || device.id == self.device_id
+    }
+
+    /// The chosen volume, while `device` reports one this close to it.
+    fn shown_for(&self, device: Option<&Device>) -> Option<u8> {
+        let device = device.filter(|device| self.may_be_on(device))?;
+        let reported = device.volume_percent?;
+        (reported.abs_diff(self.percent) <= 1).then_some(self.percent)
+    }
+
+    /// Whether `device` reports another device or a volume set elsewhere.
+    fn contradicted_by(&self, device: Option<&Device>) -> bool {
+        device.is_some_and(|device| {
+            !self.may_be_on(device)
+                || device
+                    .volume_percent
+                    .is_some_and(|reported| reported.abs_diff(self.percent) > 1)
+        })
+    }
+}
+
 /// A volume Spotify pushed for the remote device.
 struct PushedVolume {
     percent: u8,
@@ -592,6 +627,10 @@ pub struct App {
     pub queue_tab: QueueTab,
     pub search: SearchState,
     pub playlist_pages: HashMap<String, PlaylistPage>,
+    /// Which of the account's own playlists hold each song, for the hearts.
+    membership: crate::playlist_membership::Membership,
+    /// When the index last looked for playlists to read.
+    membership_checked_at: Option<Instant>,
     /// One checkpoint snapshot at a time, including pages evicted while it writes.
     playlist_cache_write_in_flight: bool,
     load_generation: u64,
@@ -760,6 +799,7 @@ pub struct App {
     pub shared_grant: bool,
     pending_remote_position: Option<(u32, Instant)>,
     pending_remote_volume: Option<PendingRemoteVolume>,
+    settled_remote_volume: Option<SettledRemoteVolume>,
     soloist_volume_preview: Option<Instant>,
     remote_volume_request: u64,
     /// A volume Spotify pushed for the remote device. A poll already on
@@ -1357,6 +1397,8 @@ impl App {
                 .unwrap_or_default(),
             search: SearchState::default(),
             playlist_pages: HashMap::new(),
+            membership: Default::default(),
+            membership_checked_at: None,
             playlist_cache_write_in_flight: false,
             load_generation: 0,
             album_pages: HashMap::new(),
@@ -1452,6 +1494,7 @@ impl App {
             shared_grant: false,
             pending_remote_position: None,
             pending_remote_volume: None,
+            settled_remote_volume: None,
             soloist_volume_preview: None,
             remote_volume_request: 0,
             pushed_remote_volume: None,
@@ -2479,8 +2522,11 @@ impl App {
         } else {
             match &self.pending_remote_volume {
                 Some(pending) if pending.may_be_on(device) => pending.percent,
-                _ => device
-                    .and_then(|device| device.volume_percent)
+                _ => self
+                    .settled_remote_volume
+                    .as_ref()
+                    .and_then(|settled| settled.shown_for(device))
+                    .or_else(|| device.and_then(|device| device.volume_percent))
                     .unwrap_or(50),
             }
         };
@@ -3060,7 +3106,9 @@ impl App {
                 Event::Lyrics { uri, result } => {
                     if self.lyrics_uri.as_deref() == Some(uri.as_str()) {
                         self.lyrics = match result {
-                            Ok(found) => Loadable::Loaded(found),
+                            Ok(found) => Loadable::Loaded(
+                                found.map(crate::lyrics::Lyrics::without_closing_notes),
+                            ),
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
                     }
@@ -3718,6 +3766,7 @@ impl App {
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
         self.pending_remote_volume = None;
+        self.settled_remote_volume = None;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
         self.pending_album_queues.clear();
@@ -3727,6 +3776,8 @@ impl App {
         self.uploaded_covers.clear();
         // Questions about the signed-out account's playlists go with it.
         self.duplicate_prompts.clear();
+        self.membership = Default::default();
+        self.membership_checked_at = None;
         if matches!(self.dialog, Some(Dialog::ConfirmPlaylistDuplicates { .. })) {
             self.dialog = None;
         }
@@ -9017,6 +9068,8 @@ impl App {
                         if let Some(Dialog::CreatePlaylist { add_uris, .. }) = self.dialog.take()
                             && !add_uris.is_empty()
                         {
+                            self.membership
+                                .add(&playlist.id, add_uris.iter().map(String::as_str));
                             self.backend.api(ApiRequest::AddToPlaylist {
                                 playlist_id: playlist.id.clone(),
                                 playlist_name: playlist.name.clone(),
@@ -9108,6 +9161,12 @@ impl App {
                     }
                 }
             }
+            ApiResponse::PlaylistUris { id, result } => {
+                self.membership
+                    .receive(&id, result.map_err(|error| error.to_string()));
+                // The next read may start at once.
+                self.membership_checked_at = None;
+            }
             ApiResponse::PlaylistDuplicatesChecked {
                 playlist_id,
                 playlist_name,
@@ -9143,6 +9202,10 @@ impl App {
                 self.playlist_busy = false;
                 if let Some(page) = self.playlist_pages.get_mut(&id) {
                     page.pending_writes = page.pending_writes.saturating_sub(1);
+                }
+                match &result {
+                    Ok(snapshot) => self.membership.edit_confirmed(&id, snapshot.clone()),
+                    Err(_) => self.membership.edit_failed(&id),
                 }
                 match result {
                     Ok(snapshot) => {
@@ -9210,7 +9273,19 @@ impl App {
                         gettext(self.locale, "Removed from Your Library")
                     });
                     self.load_playlists();
-                    if !followed && matches!(self.page(), Page::Playlist(current) if *current == id)
+                    // A deleted playlist has nothing left to show. One only
+                    // taken out of the library still plays and can be added
+                    // back from its page, so the page stays.
+                    let deleted = self
+                        .playlist_pages
+                        .get(&id)
+                        .and_then(|page| page.playlist.get())
+                        .is_some_and(|playlist| {
+                            self.user_id().is_some_and(|user| playlist.owned_by(user))
+                        });
+                    if !followed
+                        && deleted
+                        && matches!(self.page(), Page::Playlist(current) if *current == id)
                     {
                         self.open(Page::Home);
                     }
@@ -9823,6 +9898,7 @@ impl App {
                         self.pending_remote_position = None;
                         if matches!(action, RemoteAction::Volume { .. }) {
                             self.pending_remote_volume = None;
+                            self.settled_remote_volume = None;
                         }
                         if matches!(
                             action,
@@ -9923,6 +9999,13 @@ impl App {
         }
         let percent = volume_to_percent(volume);
         device.volume_percent = Some(percent);
+        if self
+            .settled_remote_volume
+            .as_ref()
+            .is_some_and(|settled| settled.percent.abs_diff(percent) > 1)
+        {
+            self.settled_remote_volume = None;
+        }
         self.pushed_remote_volume = Some(PushedVolume {
             percent,
             device_id: device_id.to_owned(),
@@ -11248,6 +11331,7 @@ impl App {
             Target::Remote(_) if !settle && !self.previews_remote_volume() => {}
             Target::Remote(device_id) => {
                 self.soloist_volume_preview = Some(Instant::now());
+                self.settled_remote_volume = None;
                 self.remote_volume_request += 1;
                 self.pending_remote_volume = Some(PendingRemoteVolume {
                     percent,
@@ -11283,6 +11367,11 @@ impl App {
     }
 
     fn reconcile_remote_volume(&mut self, seq: u64, state: Option<&PlaybackState>) {
+        if self.settled_remote_volume.as_ref().is_some_and(|settled| {
+            settled.contradicted_by(state.and_then(|state| state.device.as_ref()))
+        }) {
+            self.settled_remote_volume = None;
+        }
         let Some(pending) = &mut self.pending_remote_volume else {
             return;
         };
@@ -11312,7 +11401,14 @@ impl App {
             }
             return;
         };
-        if reported == pending.percent || (pending.mismatches > 0 && !held) {
+        if reported.abs_diff(pending.percent) <= 1 {
+            // Confirmed, give or take the device's own rounding.
+            self.settled_remote_volume = Some(SettledRemoteVolume {
+                percent: pending.percent,
+                device_id: pending.device_id.clone(),
+            });
+            self.pending_remote_volume = None;
+        } else if pending.mismatches > 0 && !held {
             self.pending_remote_volume = None;
         } else {
             if pending.mismatches == 0 {
@@ -11466,6 +11562,13 @@ impl App {
             .is_some_and(|pending| pending.device_id.as_deref() != Some(device_id.as_str()))
         {
             self.pending_remote_volume = None;
+        }
+        if self
+            .settled_remote_volume
+            .as_ref()
+            .is_some_and(|settled| settled.device_id.as_deref() != Some(device_id.as_str()))
+        {
+            self.settled_remote_volume = None;
         }
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
             self.selected_device = None;
@@ -12145,6 +12248,8 @@ impl App {
     ) {
         rows.sort_by_key(|row| std::cmp::Reverse(row.position));
         rows.dedup_by_key(|row| row.position);
+        self.membership
+            .remove_rows(&playlist_id, rows.iter().map(|row| row.uri.as_str()));
         self.prepare_playlist_mutation(&playlist_id);
         if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
             for row in &rows {
@@ -12257,6 +12362,8 @@ impl App {
             }
         }
 
+        self.membership
+            .add(&playlist_id, items.iter().map(|item| item.uri()));
         self.prepare_playlist_mutation(&playlist_id);
         let added = items.len().try_into().unwrap_or(u32::MAX);
         let added_by = self.user_id().map(|id| UserRef {
@@ -13028,6 +13135,8 @@ impl App {
                     .get(&playlist_id)
                     .and_then(|page| page.playlist.get())
                     .and_then(|playlist| playlist.snapshot_id.clone());
+                self.membership
+                    .remove_all(&playlist_id, uris.iter().map(String::as_str));
                 self.prepare_playlist_mutation(&playlist_id);
                 if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
                     page.local_additions
@@ -13067,6 +13176,7 @@ impl App {
                     .get(&playlist_id)
                     .and_then(|page| page.playlist.get())
                     .and_then(|playlist| playlist.snapshot_id.clone());
+                self.membership.edit_started(&playlist_id);
                 self.prepare_playlist_mutation(&playlist_id);
                 if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
                     let base = page.items.base_offset;
@@ -13562,6 +13672,10 @@ impl App {
             }
             Action::SetLibraryGrid(grid) => {
                 self.settings.sidebar_grid = grid;
+                self.mark_settings_dirty();
+            }
+            Action::SetTrackColumns(columns) => {
+                self.settings.track_columns = columns;
                 self.mark_settings_dirty();
             }
             Action::ToggleLibraryFolder(id) => {
@@ -14477,6 +14591,44 @@ impl App {
         })
     }
 
+    /// Reads the account's own playlists the hearts' index lacks or holds
+    /// at an older snapshot, a few at a time, while the session is up.
+    fn sync_playlist_membership(&mut self) {
+        if !self.local_ready || !self.network_reachable || self.user_id().is_none() {
+            return;
+        }
+        if self
+            .membership_checked_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(500))
+        {
+            return;
+        }
+        self.membership_checked_at = Some(Instant::now());
+        let Some(playlists) = self.library.playlists.get() else {
+            return;
+        };
+        let editable: Vec<(String, Option<String>)> = playlists
+            .iter()
+            .filter(|playlist| self.can_edit_playlist(playlist))
+            .map(|playlist| (playlist.id.clone(), playlist.snapshot_id.clone()))
+            .collect();
+        for id in self.membership.start_reads(&editable) {
+            self.backend.api(ApiRequest::PlaylistUris { id });
+        }
+    }
+
+    /// Whether `uri` is in Liked Songs or any of the account's own
+    /// playlists, which turns its heart green.
+    pub fn saved_anywhere(&self, uri: &str) -> bool {
+        self.is_saved(uri) == Some(true) || self.membership.holds_anywhere(uri)
+    }
+
+    /// Whether the account's playlist `id` holds `uri`; `None` while the
+    /// index has not read it.
+    pub fn playlist_holds(&self, id: &str, uri: &str) -> Option<bool> {
+        self.membership.holds(id, uri)
+    }
+
     /// The library's playlists that take songs, as id and name pairs.
     pub fn editable_playlists(&self) -> Vec<(String, String)> {
         if self.user_id().is_none() {
@@ -14523,6 +14675,7 @@ impl App {
             self.sync_milkdrop_pane();
         }
         self.apply_actions(ctx);
+        self.sync_playlist_membership();
         self.sync_media_controls(ctx);
         self.sync_window_title(ctx);
         self.remember_geometry(ctx);
@@ -14855,6 +15008,7 @@ impl App {
         } else {
             self.scrolling.apply(ctx);
         }
+        crate::ui::widgets::hold_wheel_for_heart_menu(ctx);
         if self.lyrics_fullscreen_restoring.is_some()
             && self.lyrics_fullscreen_restoring == ctx.input(|input| input.viewport().fullscreen)
             && (!self.lyrics_restore_maximized
@@ -14870,6 +15024,7 @@ impl App {
                 self.leave_lyrics_fullscreen(ctx);
             }
         }
+        crate::window::keep_shadow_out_of_fullscreen(ctx, fastframe_titlebar::enabled());
         // Switch to the main window when sign-in is required.
         let needs_sign_in = !(self.is_connected() && self.user.is_some())
             && !matches!(self.auth, AuthStatus::Connecting | AuthStatus::Starting)
@@ -24057,8 +24212,9 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// The Listening activity button sits in the player bar beside Lyrics,
-    /// and gives way in a narrow window before it crowds Repeat.
+    /// The Listening activity button sits in the top bar beside Settings,
+    /// out of the player bar, and the full screen button keeps clear of
+    /// Repeat as the window narrows.
     #[cfg(feature = "demo")]
     #[test]
     fn the_listening_activity_button_never_crowds_the_transport() {
@@ -24096,8 +24252,8 @@ mod tests {
             };
             let repeat = button("Repeat").expect("Repeat");
             let lyrics = button("Lyrics").expect("Lyrics");
-            // The full screen button is the last on the right, keeps clear
-            // of Repeat, and outlasts Listening activity as it narrows.
+            // The full screen button is the last on the right and keeps
+            // clear of Repeat.
             if let Some(full) = button("Full screen lyrics") {
                 button_at.get_or_insert(width);
                 assert!(full.x1 <= f64::from(width), "inside the bar at {width}");
@@ -24108,15 +24264,18 @@ mod tests {
             }
             if let Some(friends) = button("Listening activity") {
                 shown_at.get_or_insert(width);
-                assert!(friends.y0 > 700.0, "in the player bar at {width}");
-                assert!(friends.x1 <= lyrics.x0, "before Lyrics at {width}");
-                assert!(friends.x0 - repeat.x1 >= 10.0, "clear of Repeat at {width}");
+                let settings = button("Settings").expect("Settings");
+                assert!(friends.y1 < 100.0, "in the top bar at {width}");
+                assert!(friends.x1 <= settings.x0, "left of Settings at {width}");
+                if let Some(milkdrop) = button("MilkDrop") {
+                    assert!(milkdrop.x1 <= friends.x0, "right of MilkDrop at {width}");
+                }
             } else {
                 assert!(shown_at.is_none(), "it stays once shown, gone at {width}");
             }
         }
         assert!(button_at.is_some_and(|width| width > 760.0 && width <= 840.0));
-        assert!(shown_at.is_some_and(|width| Some(width) > button_at && width <= 920.0));
+        assert!(shown_at.is_some());
         app.backend.shutdown();
     }
 

@@ -258,6 +258,29 @@ impl SlowAppBanner {
     pub const MAX_DISMISSALS: u8 = 3;
 }
 
+/// The columns a playlist's song list shows, chosen from its column
+/// headings' menu. Each still waits for the width it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrackColumns {
+    pub album: bool,
+    pub added: bool,
+    /// The album's release date, where Spotify sent one with the song.
+    pub released: bool,
+    pub duration: bool,
+}
+
+impl Default for TrackColumns {
+    fn default() -> Self {
+        Self {
+            album: true,
+            added: true,
+            released: false,
+            duration: true,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -335,6 +358,8 @@ pub struct Settings {
     pub queue_width: f32,
     /// Use compact single-line rows without cover art in track lists.
     pub tracklist_compact: bool,
+    /// The optional columns of a playlist's song list.
+    pub track_columns: TrackColumns,
     /// Linux: middle-click a list to autoscroll it. Off by default, because
     /// Linux desktops usually paste the primary selection on middle click.
     /// Windows always autoscrolls and macOS never does.
@@ -520,6 +545,7 @@ impl Default for Settings {
             lyrics_width: 360.0,
             queue_width: 360.0,
             tracklist_compact: false,
+            track_columns: TrackColumns::default(),
             middle_click_autoscroll: false,
             search_history: Vec::new(),
             show_shortcut_hints: true,

@@ -223,7 +223,7 @@ msgid "{name}, folder, expanded"
 msgstr "{name}, Ordner, ausgeklappt"
 
 #: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+msgid "Click to change the visualiser"
 msgstr "Klicken, um den Visualizer zu wechseln"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:131 src/ui/lyrics.rs:805
@@ -651,6 +651,11 @@ msgstr "HINZUGEFÜGT VON"
 msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "HINZUGEFÜGT AM"
+
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "ERSCHEINUNGSDATUM"
 
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
@@ -1713,11 +1718,11 @@ msgid "Custom title bar"
 msgstr "Eigene Titelleiste"
 
 #: src/ui/settings.rs:1242
-msgid "Player bar visualizer"
+msgid "Player bar visualiser"
 msgstr "Visualizer in der Wiedergabeleiste"
 
 #: src/ui/settings.rs:1243
-msgid "Click player bar to change visualizer"
+msgid "Click player bar to change visualiser"
 msgstr "Klick auf die Wiedergabeleiste ändert die Visualisierung"
 
 #: src/ui/settings.rs:1252
@@ -1811,7 +1816,7 @@ msgstr ""
 "während er hier läuft."
 
 #: src/ui/settings.rs:1348
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "Klicks auf freie Bereiche der Wiedergabeleiste wechseln die Visualisierung."
 
@@ -1821,7 +1826,7 @@ msgstr "Bildrate"
 
 #: src/ui/settings.rs:1354
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "Wie oft die Visualisierungen der Wiedergabeleiste und des Mini-Players "
@@ -2906,6 +2911,22 @@ msgstr "Gemeinsame Playlist"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "Öffentliche Playlist"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "Private Playlist"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Hinzugefügt am"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Erscheinungsdatum"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Dauer"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

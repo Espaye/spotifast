@@ -1006,6 +1006,8 @@ pub enum SortColumn {
     AddedBy,
     /// Spotify's play count, where the list shows one.
     Plays,
+    /// The song's album's release date.
+    Released,
     /// The list's own order, for playing it reversed from the # heading.
     Index,
 }
@@ -1396,6 +1398,8 @@ pub enum Action {
         sort: crate::settings::LibrarySort,
     },
     SetLibraryGrid(bool),
+    /// The optional columns of playlists' song lists.
+    SetTrackColumns(crate::settings::TrackColumns),
     ToggleLibraryFolder(String),
     ArrangeLibrary {
         pinned: Vec<String>,

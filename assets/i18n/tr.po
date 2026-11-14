@@ -223,7 +223,7 @@ msgid "{name}, folder, expanded"
 msgstr "{name}, klasör, genişletilmiş"
 
 #: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+msgid "Click to change the visualiser"
 msgstr "Görselleştiriciyi değiştirmek için tıklayın"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:131 src/ui/lyrics.rs:805
@@ -650,6 +650,11 @@ msgstr "EKLEYEN"
 msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "EKLENME TARİHİ"
+
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "ÇIKIŞ TARİHİ"
 
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
@@ -1700,11 +1705,11 @@ msgid "Custom title bar"
 msgstr "Özel başlık çubuğu"
 
 #: src/ui/settings.rs:1242
-msgid "Player bar visualizer"
+msgid "Player bar visualiser"
 msgstr "Çalar çubuğu görselleştiricisi"
 
 #: src/ui/settings.rs:1243
-msgid "Click player bar to change visualizer"
+msgid "Click player bar to change visualiser"
 msgstr "Görselleştiriciyi değiştirmek için oynatma çubuğuna tıkla"
 
 #: src/ui/settings.rs:1252
@@ -1793,7 +1798,7 @@ msgstr ""
 "dalga formunu gösterir."
 
 #: src/ui/settings.rs:1348
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "Oynatma çubuğundaki boş alana tıklayarak görselleştiriciyi değiştirmeye izin "
 "ver."
@@ -1804,7 +1809,7 @@ msgstr "Kare hızı"
 
 #: src/ui/settings.rs:1354
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "Çalar çubuğu ve mini çalar görselleştiricilerinin ne sıklıkla çizildiği. "
@@ -2883,6 +2888,22 @@ msgstr "Ortak çalma listesi"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "Herkese açık çalma listesi"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "Gizli çalma listesi"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Eklenme tarihi"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Çıkış tarihi"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Süre"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

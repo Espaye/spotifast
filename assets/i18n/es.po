@@ -223,7 +223,7 @@ msgid "{name}, folder, expanded"
 msgstr "{name}, carpeta, expandida"
 
 #: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+msgid "Click to change the visualiser"
 msgstr "Haz clic para cambiar el visualizador"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:131 src/ui/lyrics.rs:805
@@ -651,6 +651,11 @@ msgstr "AÑADIDA POR"
 msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "FECHA DE ADICIÓN"
+
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "FECHA DE LANZAMIENTO"
 
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
@@ -1706,11 +1711,11 @@ msgid "Custom title bar"
 msgstr "Barra de título personalizada"
 
 #: src/ui/settings.rs:1242
-msgid "Player bar visualizer"
+msgid "Player bar visualiser"
 msgstr "Visualizador en la barra de reproducción"
 
 #: src/ui/settings.rs:1243
-msgid "Click player bar to change visualizer"
+msgid "Click player bar to change visualiser"
 msgstr "Hacer clic en la barra de reproducción para cambiar el visualizador"
 
 #: src/ui/settings.rs:1252
@@ -1802,7 +1807,7 @@ msgstr ""
 "reproducción mientras suena aquí."
 
 #: src/ui/settings.rs:1348
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "Permitir que los clics en el espacio vacío de la barra de reproducción "
 "alternen el visualizador."
@@ -1813,7 +1818,7 @@ msgstr "Cuadros por segundo"
 
 #: src/ui/settings.rs:1354
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "Con qué frecuencia dibujan los visualizadores de la barra de reproducción y "
@@ -2890,6 +2895,22 @@ msgstr "Playlist colaborativa"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "Playlist pública"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "Playlist privada"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Fecha de adición"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Fecha de lanzamiento"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Duración"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"

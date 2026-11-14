@@ -4681,6 +4681,8 @@ mod tests {
                                 added_by: None,
                                 show_added_by: false,
                                 show_plays: false,
+                                show_released: false,
+                                show_duration: true,
                                 compact: false,
                                 thin: false,
                                 shift: 0.0,
@@ -4688,6 +4690,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -4789,6 +4792,8 @@ mod tests {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays: false,
+                                    show_released: false,
+                                    show_duration: true,
                                     compact: false,
                                     thin: false,
                                     shift: 0.0,
@@ -4796,6 +4801,7 @@ mod tests {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: false,
                                 },
                             );
                         });
@@ -4912,6 +4918,8 @@ mod tests {
                                 added_by: None,
                                 show_added_by: false,
                                 show_plays: false,
+                                show_released: false,
+                                show_duration: true,
                                 compact: false,
                                 thin: false,
                                 shift: 0.0,
@@ -4919,6 +4927,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -5853,7 +5862,7 @@ mod tests {
             },
         );
         let items = vec![item.clone()];
-        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unknown, "never read");
         let mut query = String::new();
         let mut draw = |app: &mut App, events| {
@@ -5921,7 +5930,7 @@ mod tests {
                 ..PlaylistPage::default()
             },
         );
-        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unchecked, "all rows read");
         app.backend.shutdown();
     }
@@ -6412,6 +6421,8 @@ mod tests {
                         added_by: None,
                         show_added_by: false,
                         show_plays: false,
+                        show_released: false,
+                        show_duration: true,
                         compact: false,
                         thin: true,
                         shift: 0.0,
@@ -6419,6 +6430,7 @@ mod tests {
                         picked_songs: &[],
                         picked_positions: &[],
                         position: None,
+                        show_saved_heart: false,
                     },
                 );
             }
@@ -6748,6 +6760,7 @@ mod tests {
     fn the_visualizer_tooltip_stays_off_the_player_bar_controls() {
         let (ctx, mut app) = accessible_app("player-bar-tooltip");
         ctx.global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        app.settings.player_bar_vis = crate::settings::PlayerBarVis::Spectrum;
         let mut time = 0.0;
         let mut draw = |app: &mut App, pos: egui::Pos2| {
             time += 1.0;
@@ -6780,7 +6793,7 @@ mod tests {
                 .for_each(|clipped| texts(&clipped.shape, &mut found));
             found
         };
-        let tip = "Click to change the visualizer";
+        let tip = "Click to change the visualiser";
 
         // #given the tooltip shown over the empty margin beside the cover
         let empty = egui::pos2(6.0, 796.0);
@@ -6797,6 +6810,14 @@ mod tests {
 
         // #then the tooltip is gone
         let shown = draw(&mut app, play);
+        assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
+
+        // #and with the visualiser off, the empty space offers no tooltip
+        app.settings.player_bar_vis = crate::settings::PlayerBarVis::Off;
+        for _ in 0..3 {
+            draw(&mut app, empty);
+        }
+        let shown = draw(&mut app, empty);
         assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
         app.backend.shutdown();
     }
@@ -9301,7 +9322,7 @@ mod tests {
                 "Audio cache",
                 "Equalizer",
                 "MilkDrop",
-                "Player bar visualizer",
+                "Player bar visualiser",
             ] {
                 let text = settings_text(&ctx, &mut app, title);
                 assert_eq!(
@@ -9358,7 +9379,7 @@ mod tests {
         let (ctx, mut app) = accessible_app("soloist-processing");
         app.settings.soloist_enabled = true;
         app.soloist_audio = true;
-        for title in ["Equalizer", "MilkDrop", "Player bar visualizer"] {
+        for title in ["Equalizer", "MilkDrop", "Player bar visualiser"] {
             let text = settings_text(&ctx, &mut app, title);
             // Windows can observe the owned process but cannot apply EQ to
             // its audible output. Keep the visualizers without promising EQ.

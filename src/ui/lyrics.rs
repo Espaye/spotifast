@@ -2,9 +2,9 @@
 
 use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, pos2, vec2};
 
-use crate::app::App;
+use crate::app::{App, NowPlaying};
 use crate::i18n::{gettext, pgettext};
-use crate::model::{Action, Loadable};
+use crate::model::{Action, Loadable, Page};
 use crate::theme::{self, Icon};
 
 use super::widgets;
@@ -30,6 +30,19 @@ fn show_sung_line(ui: &egui::Ui, line: Rect, animation: Option<egui::style::Scro
 }
 /// How long a line takes to light up or fade.
 const LIGHT_UP_SECONDS: f32 = 0.22;
+
+/// A music note's row, in multiples of the line's font size.
+const MUSIC_NOTE_HEIGHT: f32 = 1.2;
+
+/// A timed line with no words is the band playing on, which Spotify marks
+/// with a music note. It is the icon rather than a "\u{266a}" in the text,
+/// because the interface fonts may have no such glyph. Its size stays put
+/// while it lights up, so the icon is drawn at one size only.
+fn music_note(ui: &mut egui::Ui, size: f32, color: Color32, sense: Sense) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size * MUSIC_NOTE_HEIGHT), sense);
+    theme::paint_icon(ui, Icon::Music, rect, size * 0.9, color);
+    response
+}
 
 fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
@@ -130,7 +143,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         widgets::empty_state(
             ui,
             &palette,
-            Icon::Mic,
+            Icon::MicVocal,
             &gettext(app.locale, "Nothing playing"),
             &gettext(app.locale, "Play a song to see its lyrics."),
         );
@@ -187,7 +200,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
             widgets::empty_state(
                 ui,
                 &palette,
-                Icon::Mic,
+                Icon::MicVocal,
                 &gettext(app.locale, "No lyrics"),
                 &gettext(app.locale, "No lyrics found for this track."),
             );
@@ -242,18 +255,15 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     theme::regular(LINE_SIZE)
                 };
-                // A timed line with no words is the band playing on.
-                let text = if line.text.is_empty() && lyrics.synced {
-                    "\u{266a}"
-                } else {
-                    line.text.as_str()
-                };
+                let text = line.text.as_str();
                 let sense = if lyrics.synced {
                     Sense::click()
                 } else {
                     Sense::hover()
                 };
-                let response = if crate::bidi::is_rtl(text) {
+                let response = if text.is_empty() && lyrics.synced {
+                    music_note(ui, LINE_SIZE, color, sense)
+                } else if crate::bidi::is_rtl(text) {
                     let galley = crate::bidi::layout(
                         ui.painter(),
                         text,
@@ -314,43 +324,115 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     app.lyrics_line_shown = Some(active);
 }
 
-pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
+/// How long full screen lyrics keep their controls, the player bar and the
+/// scroll bar, after the last input.
+const CONTROLS_LINGER_SECONDS: f64 = 3.0;
+/// How long the player bar takes to slide away or back.
+const CONTROLS_SLIDE_SECONDS: f32 = 0.3;
+
+fn controls_id() -> egui::Id {
+    egui::Id::new("fullscreen-lyrics-last-input")
+}
+
+/// How much of full screen lyrics' controls shows: 1 while there has been
+/// input in the last three seconds, the pointer rests on the player bar, or
+/// a menu or popup is open; 0 once they have gone. In between they are
+/// sliding or fading.
+pub fn fullscreen_controls(app: &App, ctx: &egui::Context) -> f32 {
+    let now = ctx.input(|input| input.time);
+    let input = ctx.input(|input| {
+        input.pointer.delta() != egui::Vec2::ZERO
+            || input.pointer.any_down()
+            || input.pointer.any_released()
+            || input.smooth_scroll_delta != egui::Vec2::ZERO
+            || input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Key { .. } | egui::Event::Text(_)))
+    });
+    let viewport = ctx.viewport_rect();
+    let bar = Rect::from_min_max(
+        pos2(viewport.left(), viewport.bottom() - theme::PLAYER_BAR_HEIGHT),
+        viewport.max,
+    );
+    let over_bar = ctx
+        .input(|input| input.pointer.hover_pos())
+        .is_some_and(|pointer| bar.contains(pointer));
+    let previous = ctx.data(|data| data.get_temp::<f64>(controls_id()));
+    // The pointer holds the bar only once it is there to hold: resting where
+    // a hidden bar would be does not bring it back.
+    let was_shown = previous.is_none_or(|last| now - last < CONTROLS_LINGER_SECONDS);
+    let held = (was_shown && over_bar) || egui::Popup::is_any_open(ctx) || app.show_devices;
+    let last = match previous {
+        Some(last) if !input && !held => last,
+        _ => now,
+    };
+    ctx.data_mut(|data| data.insert_temp(controls_id(), last));
+    let left = CONTROLS_LINGER_SECONDS - (now - last);
+    let shown = left > 0.0;
+    if shown {
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+    }
+    ctx.animate_bool_with_time(
+        controls_id().with("shown"),
+        shown,
+        crate::motion::seconds(ctx, CONTROLS_SLIDE_SECONDS),
+    )
+}
+
+/// Forget the last input once full screen lyrics close, so they open with
+/// their controls showing.
+pub fn forget_fullscreen_controls(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<f64>(controls_id()));
+}
+
+/// Full screen lyrics over the whole window. The player bar comes and goes
+/// over the bottom of it, so the room the layout uses stops above the bar
+/// and never moves; `controls` is how much of the bar and the scroll bar
+/// shows (see [`fullscreen_controls`]).
+pub fn fullscreen(app: &mut App, ui: &mut egui::Ui, controls: f32) {
     egui::CentralPanel::default()
         .frame(Frame::new().fill(theme::Palette::dark().window))
         .show(ui, |ui| {
-            let rect = ui.max_rect();
+            // The whole window, edges included, is the view's own.
+            let rect = ui.ctx().viewport_rect().union(ui.max_rect());
             background(app, ui, rect);
+            let room = Rect::from_min_max(
+                rect.min,
+                pos2(rect.right(), rect.bottom() - theme::PLAYER_BAR_HEIGHT),
+            );
             // The empty space is the backdrop's switch, as the player bar's
             // is its visualizer's. Everything drawn after this takes its own
             // clicks, and a drag is no click.
             #[cfg(feature = "milkdrop")]
             if ui
-                .interact(rect, ui.id().with("lyrics-backdrop"), Sense::click())
+                .interact(room, ui.id().with("lyrics-backdrop"), Sense::click())
                 .clicked()
             {
                 app.actions.push(Action::ToggleLyricsMilkdrop);
             }
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
-            if app.now_playing().is_some() && rect.width() >= COVER_BESIDE_MIN_WIDTH {
-                with_cover(app, ui, rect, top);
+            if app.now_playing().is_some() && room.width() >= COVER_BESIDE_MIN_WIDTH {
+                with_cover(app, ui, room, top, controls);
                 return;
             }
-            let width = fullscreen_content_width(rect.width());
+            let width = fullscreen_content_width(room.width());
             let region = Rect::from_min_max(
-                pos2(rect.center().x - width / 2.0, rect.top() + top),
-                pos2(rect.center().x + width / 2.0, rect.bottom()),
+                pos2(room.center().x - width / 2.0, room.top() + top),
+                pos2(room.center().x + width / 2.0, room.bottom()),
             );
             let mut content = ui.new_child(UiBuilder::new().max_rect(region));
-            fullscreen_header(app, &mut content);
+            fullscreen_header(app, &mut content, controls);
             content.add_space(20.0);
             track_heading(app, &mut content);
             content.add_space(16.0);
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, room.right(), controls);
         });
 }
 
-/// The widest the lyrics get beside the cover, so lines stay easy to read.
-const LYRICS_BESIDE_WIDTH: f32 = 640.0;
+/// The widest the lyrics get beside the cover, so lines stay easy to read:
+/// at the largest size, about forty characters.
+const LYRICS_BESIDE_WIDTH: f32 = 960.0;
 
 /// The narrowest window that shows the cover beside the lyrics; narrower
 /// ones keep a single column with a small cover in the heading.
@@ -359,13 +441,13 @@ const COVER_BESIDE_MIN_WIDTH: f32 = 900.0;
 /// Full screen with the cover large: beside the lyrics when there are
 /// words to follow, and alone in the middle when there are none, a calm
 /// view of what is playing.
-fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
+fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32, controls: f32) {
     let outer = Rect::from_min_max(
         pos2(rect.left() + 48.0, rect.top() + top),
         pos2(rect.right() - 48.0, rect.bottom() - 40.0),
     );
     let mut header = ui.new_child(UiBuilder::new().max_rect(outer));
-    fullscreen_header(app, &mut header);
+    fullscreen_header(app, &mut header, controls);
     let below = Rect::from_min_max(
         pos2(outer.left(), header.min_rect().bottom() + 24.0),
         outer.max,
@@ -374,6 +456,10 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
     // stays in the middle, so a song that turns out to have none never
     // moves at all.
     let words = matches!(&app.lyrics, Loadable::Loaded(Some(lyrics)) if !lyrics.instrumental);
+    // The cover keeps to the middle of what shows: as the player bar slides
+    // away it glides down by half the bar, and back as the bar returns. The
+    // lyrics keep their place.
+    let glide = theme::PLAYER_BAR_HEIGHT * (1.0 - controls.clamp(0.0, 1.0)) / 2.0;
     // The queue docks right while its flag is on, in both arrangements.
     // Without it the room below is untouched, preserving the stock layout.
     let gap = 64.0;
@@ -403,7 +489,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
             let room = lyrics_end - below.left();
             let side = (room * 0.42).min(below.height() - 90.0).clamp(160.0, 520.0);
             let column = Rect::from_min_size(
-                pos2(below.left(), below.center().y - (side + 90.0) / 2.0),
+                pos2(below.left(), below.center().y + glide - (side + 90.0) / 2.0),
                 vec2(side, side + 90.0),
             );
             big_cover(app, ui, column, Align::Min);
@@ -417,7 +503,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
                 pos2(lyrics_x + lyrics_width, below.bottom()),
             );
             let mut content = ui.new_child(UiBuilder::new().max_rect(lyrics));
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, lyrics_end, controls);
         } else {
             // The cover and the lyrics are one group, centred in the window.
             let side = (below.width() * 0.38)
@@ -426,7 +512,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
             let lyrics_width = (below.width() - side - gap).min(LYRICS_BESIDE_WIDTH);
             let left = below.center().x - (side + gap + lyrics_width) / 2.0;
             let column = Rect::from_min_size(
-                pos2(left, below.center().y - (side + 90.0) / 2.0),
+                pos2(left, below.center().y + glide - (side + 90.0) / 2.0),
                 vec2(side, side + 90.0),
             );
             big_cover(app, ui, column, Align::Min);
@@ -435,7 +521,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
                 pos2(column.right() + gap + lyrics_width, below.bottom()),
             );
             let mut content = ui.new_child(UiBuilder::new().max_rect(lyrics));
-            fullscreen_contents(app, &mut content);
+            fullscreen_contents(app, &mut content, rect.right(), controls);
         }
     } else {
         let span = Rect::from_min_max(
@@ -448,10 +534,19 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
         let side = (span.height() - 140.0)
             .min(span.width() * 0.5)
             .clamp(min_side, 560.0);
-        let column = Rect::from_center_size(span.center(), vec2(side, side + 90.0));
+        let column = Rect::from_center_size(
+            span.center() + vec2(0.0, glide),
+            vec2(side, side + 90.0),
+        );
         big_cover(app, ui, column, Align::Center);
         // Why there are no words, quietly, under the song, or that they
-        // are still being fetched.
+        // are still being fetched. It fades with the player bar, leaving
+        // the song alone; a failure keeps its Try again in view.
+        let fade = if matches!(app.lyrics, Loadable::Failed(_)) {
+            1.0
+        } else {
+            controls.clamp(0.0, 1.0)
+        };
         let (heading, detail) = match &app.lyrics {
             Loadable::Loaded(Some(_)) => (
                 gettext(app.locale, "Instrumental"),
@@ -480,7 +575,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
             egui::Align2::CENTER_TOP,
             heading,
             theme::semibold(13.0),
-            Color32::from_gray(200),
+            Color32::from_gray(200).gamma_multiply(fade),
         );
         if matches!(app.lyrics, Loadable::Failed(_)) {
             let retry = Rect::from_center_size(
@@ -503,7 +598,7 @@ fn with_cover(app: &mut App, ui: &mut egui::Ui, rect: Rect, top: f32) {
             egui::Align2::CENTER_TOP,
             detail,
             theme::regular(13.0),
-            Color32::from_gray(170),
+            Color32::from_gray(170).gamma_multiply(fade),
         );
     }
 }
@@ -544,21 +639,77 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align) {
             .layout(Layout::top_down(align)),
     );
     text.spacing_mut().item_spacing.y = 4.0;
-    text.add(
-        egui::Label::new(
-            egui::RichText::new(&now.title)
-                .font(theme::semibold(22.0))
-                .color(Color32::WHITE),
-        )
-        .truncate(),
+    song_links(
+        app,
+        &mut text,
+        &now,
+        theme::semibold(22.0),
+        theme::regular(14.0),
+        Color32::from_gray(225),
     );
-    text.add(
-        egui::Label::new(
-            egui::RichText::new(&now.subtitle)
-                .font(theme::regular(14.0))
-                .color(Color32::from_gray(225)),
-        )
-        .truncate(),
+}
+
+/// The playing song's title and artists, as the player bar has them: the
+/// title opens its album (or the show), each artist their page. Opening a
+/// page leaves full screen.
+fn song_links(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    now: &NowPlaying,
+    title_font: egui::FontId,
+    artist_font: egui::FontId,
+    artist_colour: Color32,
+) {
+    let opens = now
+        .album_id
+        .clone()
+        .map(Page::Album)
+        .or_else(|| now.show_id.clone().map(Page::Show));
+    match opens {
+        Some(page) => {
+            if theme::link(ui, &now.title, title_font, Color32::WHITE).clicked() {
+                app.actions.push(Action::Open(page));
+            }
+        }
+        None => {
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&now.title)
+                        .font(title_font)
+                        .color(Color32::WHITE),
+                )
+                .truncate(),
+            );
+        }
+    }
+    // The row is only as wide as its words, so a centred column centres it.
+    let words = if now.artists.is_empty() {
+        now.subtitle.clone()
+    } else {
+        now.artists
+            .iter()
+            .map(|artist| artist.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let size = ui
+        .painter()
+        .layout_no_wrap(words, artist_font.clone(), artist_colour)
+        .size();
+    ui.allocate_ui_with_layout(
+        vec2((size.x + 1.0).min(ui.available_width()), size.y),
+        Layout::left_to_right(Align::Center),
+        |ui| {
+            if !now.artists.is_empty() {
+                widgets::artist_links(ui, app, &now.artists, artist_font, artist_colour);
+            } else if let Some(id) = &now.show_id {
+                if theme::link(ui, &now.subtitle, artist_font, artist_colour).clicked() {
+                    app.actions.push(Action::Open(Page::Show(id.clone())));
+                }
+            } else {
+                theme::text(ui, &now.subtitle, artist_font, artist_colour);
+            }
+        },
     );
 }
 
@@ -721,22 +872,27 @@ fn cover_uv(view: egui::Vec2, image: egui::Vec2) -> Rect {
     Rect::from_center_size(pos2(0.5, 0.5), size)
 }
 
-fn fullscreen_header(app: &mut App, ui: &mut egui::Ui) {
+/// The view's title and its buttons. The title and the button that leaves
+/// full screen fade with the player bar (`controls`, see
+/// [`fullscreen_controls`]), so only the words stay once the controls have
+/// gone.
+fn fullscreen_header(app: &mut App, ui: &mut egui::Ui, controls: f32) {
     let palette = theme::Palette::dark();
+    let faded = palette.text.gamma_multiply(controls.clamp(0.0, 1.0));
     ui.horizontal(|ui| {
         theme::text(
             ui,
             gettext(app.locale, "Lyrics"),
             theme::bold(18.0),
-            palette.text,
+            faded,
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if theme::icon_button(
                 ui,
                 Icon::Shrink,
                 18.0,
-                palette.text,
-                palette.text,
+                faded,
+                faded,
                 &gettext(app.locale, "Leave full screen (Esc)"),
             )
             .clicked()
@@ -777,34 +933,29 @@ fn track_heading(app: &mut App, ui: &mut egui::Ui) {
             let art = now.art_url.is_some() || now.art_small.is_some();
             cover_opens_immersive(app, ui, rect, art);
             ui.vertical(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&now.title)
-                            .font(theme::semibold(22.0))
-                            .color(Color32::WHITE),
-                    )
-                    .truncate(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(&now.subtitle)
-                            .font(theme::regular(13.0))
-                            .color(Color32::from_gray(235)),
-                    )
-                    .truncate(),
+                song_links(
+                    app,
+                    ui,
+                    &now,
+                    theme::semibold(22.0),
+                    theme::regular(13.0),
+                    Color32::from_gray(235),
                 );
             });
         });
     }
 }
 
-fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
+/// The words in `ui`'s column. Their scroll area runs on to `scroll_right`,
+/// so its bar sits at the window's edge, or the queue's, rather than in the
+/// space beside the words; it shows as much as the player bar does.
+fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, scroll_right: f32, controls: f32) {
     let palette = theme::Palette::dark();
     let Some(now) = app.now_playing() else {
         widgets::empty_state(
             ui,
             &palette,
-            Icon::Mic,
+            Icon::MicVocal,
             &gettext(app.locale, "Nothing playing"),
             &gettext(app.locale, "Play a song to see its lyrics."),
         );
@@ -831,17 +982,21 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
             }
             return;
         }
+        // Saying there are no words fades with the player bar, as the
+        // cover's note does.
         Loadable::Loaded(None) => {
+            ui.multiply_opacity(controls.clamp(0.0, 1.0));
             widgets::empty_state(
                 ui,
                 &palette,
-                Icon::Mic,
+                Icon::MicVocal,
                 &gettext(app.locale, "No lyrics"),
                 &gettext(app.locale, "No lyrics found for this track."),
             );
             return;
         }
         Loadable::Loaded(Some(lyrics)) if lyrics.instrumental => {
+            ui.multiply_opacity(controls.clamp(0.0, 1.0));
             widgets::empty_state(
                 ui,
                 &palette,
@@ -864,7 +1019,14 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     {
         app.actions.push(Action::LyricsLineShown(active));
     }
-    let viewport = ui.available_rect_before_wrap();
+    let column = ui.available_width();
+    let column_rect = ui.available_rect_before_wrap();
+    let viewport = Rect::from_min_max(
+        column_rect.min,
+        pos2(scroll_right.max(column_rect.right()), column_rect.bottom()),
+    );
+    let mut ui = ui.new_child(UiBuilder::new().max_rect(viewport));
+    let ui = &mut ui;
     let manual_scroll = ui.rect_contains_pointer(viewport)
         && ui.input(|input| {
             input.smooth_scroll_delta.y != 0.0
@@ -873,7 +1035,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     let following = app.lyrics_following && !manual_scroll;
     let follow = following && app.lyrics_line_shown != Some(active);
     let animation = crate::motion::scroll(ui.ctx(), 0.45);
-    let size = (ui.available_width() * 0.046).clamp(28.0, 42.0);
+    let size = (column * 0.046).clamp(28.0, 44.0);
     // The line being sung takes the theme's accent, though the view is
     // always dark, and grows; each line wraps
     // for its full size all along, so growing can't rewrap its words.
@@ -886,7 +1048,12 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
         } else {
             0.42
         });
-    ui.spacing_mut().scroll.fade.strength = 0.0;
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.fade.strength = 0.0;
+    // The bar shows with the player bar, still lighting up under the pointer.
+    scroll.dormant_handle_opacity = scroll.active_handle_opacity * controls;
+    scroll.active_handle_opacity *= controls;
+    scroll.interact_handle_opacity *= controls;
     egui::ScrollArea::vertical()
         .id_salt(("fullscreen-lyrics-scroll", &now.uri))
         .auto_shrink([false, false])
@@ -929,27 +1096,37 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     1.0
                 };
-                let wrap = ui.available_width() / SUNG_LINE_GROWTH * grown;
+                let wrap = column / SUNG_LINE_GROWTH * grown;
                 let font = theme::bold(size * grown);
-                // A timed line with no words is the band playing on.
-                let text = if line.text.is_empty() && lyrics.synced {
-                    "\u{266a}"
-                } else {
-                    line.text.as_str()
-                };
                 // Untimed words have nowhere to jump to, but a click on them
                 // is still on a line, so it must not reach the backdrop.
                 let sense = Sense::click();
-                let galley =
-                    crate::bidi::layout(ui.painter(), text, font, color, wrap, usize::MAX, None);
-                let center = ui.cursor().top() + galley.size().y * 0.5;
+                let note = line.text.is_empty() && lyrics.synced;
+                let galley = (!note).then(|| {
+                    crate::bidi::layout(
+                        ui.painter(),
+                        &line.text,
+                        font,
+                        color,
+                        wrap,
+                        usize::MAX,
+                        None,
+                    )
+                });
+                let height = galley
+                    .as_ref()
+                    .map_or(size * MUSIC_NOTE_HEIGHT, |galley| galley.size().y);
+                let center = ui.cursor().top() + height * 0.5;
                 let edge = ((center - viewport.top()).min(viewport.bottom() - center)
                     / (size * 2.0))
                     .clamp(0.0, 1.0);
                 let response = ui
                     .scope(|ui| {
                         ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge));
-                        ui.add(egui::Label::new(galley).sense(sense))
+                        match galley {
+                            Some(galley) => ui.add(egui::Label::new(galley).sense(sense)),
+                            None => music_note(ui, size, color, sense),
+                        }
                     })
                     .inner;
                 let rect = response.rect;

@@ -1,7 +1,7 @@
 """Capture-only demo data, applied the same way to the baseline and each
-candidate: a link in Discover Weekly's description, and monthly listeners
+candidate: a link in Discover Weekly's description, monthly listeners
 instead of followers for the demo artists, as the Web API gives none for a
-real account."""
+real account, and playlist headers as Spotify reports them."""
 import sys
 
 path = sys.argv[1]
@@ -31,4 +31,17 @@ swap(
     "        }),\n",
     "        followers: None,\n",
 )
+# Discover Weekly as the Web API reports a saved one: its per-listener id
+# and not public on the profile.
+swap(
+    "        playlist: Loadable::Loaded(playlists[0].clone()),\n",
+    "        playlist: Loadable::Loaded(Playlist {\n"
+    "            id: \"37i9dQZEVXcJZyENOWUFo7\".into(),\n"
+    "            public: Some(false),\n"
+    "            ..playlists[0].clone()\n"
+    "        }),\n",
+)
+# Late night focus as one's own private playlist, not made together.
+swap('    playlist_page.contributors.insert("kasia".into());\n', "")
+swap('    playlist_page.contributors.insert("sam".into());\n', "")
 open(path, "w", encoding="utf-8", newline="\n").write(text)

@@ -13,8 +13,6 @@ jobs:
         include:
           - name: before
             ref: b75af93ad5b157ab4205710be2f0ea7878587082
-          - name: bars
-            ref: bar-buttons
           - name: header
             ref: playlist-header
     steps:

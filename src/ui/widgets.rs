@@ -1047,9 +1047,13 @@ pub(crate) fn playlist_picker(
     // and Enter adds to it. The keys are taken before the field sees them.
     // Like the filter itself, the choice lasts while the menu is drawn.
     let frame = ui.ctx().cumulative_frame_nr();
-    let (mut highlighted, chosen_for) = ui
+    let last_drawn = ui
         .data(|data| data.get_temp::<(u64, Option<usize>, String)>(highlight_id))
-        .filter(|(last_frame, _, _)| frame.saturating_sub(*last_frame) <= 1)
+        .filter(|(last_frame, _, _)| frame.saturating_sub(*last_frame) <= 1);
+    // Not drawn last frame: the menu has just opened, so its list starts
+    // at the top, however far it was scrolled when it last closed.
+    let opened = last_drawn.is_none();
+    let (mut highlighted, chosen_for) = last_drawn
         .map(|(_, highlighted, query)| (highlighted, query))
         .unwrap_or_default();
     let mut moved = false;
@@ -1168,12 +1172,16 @@ pub(crate) fn playlist_picker(
             Some((playlist.id.clone(), image.to_string()))
         })
         .collect();
+    let mut list = egui::ScrollArea::vertical()
+        .id_salt("filtered-playlists")
+        .max_height(list_height)
+        .min_scrolled_height(list_height);
+    if opened {
+        list = list.vertical_scroll_offset(0.0);
+    }
     crate::autoscroll::show(
         ui,
-        egui::ScrollArea::vertical()
-            .id_salt("filtered-playlists")
-            .max_height(list_height)
-            .min_scrolled_height(list_height),
+        list,
         egui::Vec2b::new(false, true),
         |ui| {
             for (index, (id, name)) in matches.into_iter().enumerate() {

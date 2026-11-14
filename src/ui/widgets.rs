@@ -2920,7 +2920,7 @@ pub fn table_header(
         }
     };
     let mut number_clicked = false;
-    let mut number_response = None;
+    let number_response;
     let mut x = rect.left() + 8.0;
     {
         let number = Rect::from_center_size(pos2(x + 22.0, rect.center().y), vec2(30.0, 22.0));
@@ -2967,7 +2967,7 @@ pub fn table_header(
                 egui::Stroke::NONE,
             ));
         }
-        number_response = Some(response.clone());
+        number_response = response.clone();
         if response
             .on_hover_text(gettext(locale, "Original order, reversed"))
             .clicked()
@@ -3047,9 +3047,7 @@ pub fn table_header(
     if number_clicked {
         clicked = Some(SortColumn::Index);
     }
-    if let Some(number) = number_response {
-        menu_response = menu_response.union(number);
-    }
+    menu_response = menu_response.union(number_response);
     if show_duration {
         let clock = Rect::from_center_size(
             pos2(rect.right() - 36.0 - 56.0 / 2.0 - 6.0, rect.center().y),

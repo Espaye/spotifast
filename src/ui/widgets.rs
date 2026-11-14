@@ -1831,6 +1831,10 @@ pub struct TrackRow<'a> {
     /// Spotify's play count for the song, on album pages and an artist's
     /// popular songs once the counts arrived.
     pub show_plays: bool,
+    /// The album's release date, where the list's columns include it.
+    pub show_released: bool,
+    /// Whether the row ends with the song's length.
+    pub show_duration: bool,
     pub compact: bool,
     /// One line for the name and the artists in a shorter row without the
     /// cover: the compact track list. `compact` stays the queue's narrow row.
@@ -1896,6 +1900,7 @@ struct Columns {
     album: f32,
     added_by: f32,
     added: f32,
+    released: f32,
     plays: f32,
     heart: f32,
     duration: f32,
@@ -1910,10 +1915,56 @@ fn plays_fit(width: f32) -> bool {
     width > 560.0
 }
 
+/// The widths of the columns a list can leave out, shared by the rows and
+/// their header so the two always line up.
+struct OptionalColumns {
+    album: f32,
+    added: f32,
+    added_by: f32,
+    released: f32,
+}
+
+/// The widths a list needs before it shows one, two, three or four of its
+/// optional columns. Columns claim them in order (album, date added, added
+/// by, release date), so one that is switched off hands its place to the
+/// next and the narrowest lists still keep the title readable.
+const OPTIONAL_COLUMN_STEPS: [f32; 4] = [560.0, 760.0, 920.0, 1080.0];
+
+fn optional_columns(
+    width: f32,
+    album: bool,
+    added: bool,
+    added_by: bool,
+    released: bool,
+) -> OptionalColumns {
+    let mut shown = 0;
+    let mut take = |wanted: bool, column_width: f32| {
+        let fits = OPTIONAL_COLUMN_STEPS
+            .get(shown)
+            .is_some_and(|step| width > *step);
+        if wanted && fits {
+            shown += 1;
+            column_width
+        } else {
+            0.0
+        }
+    };
+    OptionalColumns {
+        album: take(album, (width * 0.28).clamp(140.0, 360.0)),
+        added: take(added, 120.0),
+        added_by: take(added_by, 130.0),
+        released: take(released, 120.0),
+    }
+}
+
 fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
-    let extra_wide = width > 920.0;
-    let wide = width > 760.0;
-    let medium = width > 560.0;
+    let optional = optional_columns(
+        width,
+        row.show_album,
+        row.added_at.is_some(),
+        row.show_added_by,
+        row.show_released,
+    );
     Columns {
         number: if row.compact { 0.0 } else { 44.0 },
         cover: if row.show_cover {
@@ -1921,28 +1972,23 @@ fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
         } else {
             0.0
         },
-        album: if row.show_album && medium {
-            (width * 0.28).clamp(140.0, 360.0)
-        } else {
-            0.0
-        },
-        added_by: if row.show_added_by && extra_wide {
-            130.0
-        } else {
-            0.0
-        },
-        added: if row.added_at.is_some() && wide {
-            120.0
-        } else {
-            0.0
-        },
+        album: optional.album,
+        added_by: optional.added_by,
+        added: optional.added,
+        released: optional.released,
         plays: if row.show_plays && !row.compact && plays_fit(width) {
             PLAYS_WIDTH
         } else {
             0.0
         },
         heart: if row.compact { 0.0 } else { 36.0 },
-        duration: if row.compact { 44.0 } else { 56.0 },
+        duration: if !row.show_duration {
+            0.0
+        } else if row.compact {
+            44.0
+        } else {
+            56.0
+        },
         more: if row.compact { 0.0 } else { 36.0 },
     }
 }
@@ -2188,8 +2234,13 @@ fn track_row_contents(
         x += cols.cover;
     }
     let right_fixed = cols.heart + cols.duration + cols.more + 8.0;
-    let text_right =
-        rect.right() - right_fixed - cols.plays - cols.added - cols.added_by - cols.album;
+    let text_right = rect.right()
+        - right_fixed
+        - cols.plays
+        - cols.released
+        - cols.added
+        - cols.added_by
+        - cols.album;
     let title_rect = Rect::from_min_max(
         pos2(x, rect.top()),
         pos2((text_right - 12.0).max(x), rect.bottom()),
@@ -2457,6 +2508,26 @@ fn track_row_contents(
         }
         x += cols.added;
     }
+    // Release date, of the song's album. Spotify leaves it out of some
+    // answers, and then the cell stays empty.
+    if cols.released > 0.0 {
+        if let PlayableItem::Track(track) = row.item
+            && let Some(released) = track
+                .album
+                .as_ref()
+                .and_then(|album| album.release_date.as_deref())
+        {
+            let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.released, row_height));
+            painter.text(
+                pos2(cell.left(), cell.center().y),
+                egui::Align2::LEFT_CENTER,
+                util::format_date(app.locale, released),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        }
+        x += cols.released;
+    }
     // Plays.
     if cols.plays > 0.0 {
         if let Some(plays) = app.play_counts.get(row.item.uri()) {
@@ -2522,15 +2593,18 @@ fn track_row_contents(
     }
 
     // Duration.
-    let duration_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
-    painter.text(
-        pos2(duration_rect.right() - 6.0, duration_rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        util::format_duration_ms(row.item.duration_ms()),
-        theme::regular(13.0),
-        palette.secondary,
-    );
-    x += cols.duration;
+    if cols.duration > 0.0 {
+        let duration_rect =
+            Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
+        painter.text(
+            pos2(duration_rect.right() - 6.0, duration_rect.center().y),
+            egui::Align2::RIGHT_CENTER,
+            util::format_duration_ms(row.item.duration_ms()),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+        x += cols.duration;
+    }
 
     // More.
     // The row's menu stays alive while it is open: when the button existed
@@ -2799,12 +2873,16 @@ pub fn table_header(
     show_added: bool,
     show_added_by: bool,
     show_plays: bool,
+    show_released: bool,
+    show_duration: bool,
     show_cover: bool,
     sort: Option<crate::model::TableSort>,
-) -> Option<crate::model::SortColumn> {
+) -> (Option<crate::model::SortColumn>, egui::Response) {
     use crate::model::SortColumn;
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    // A secondary click anywhere on the headings opens the caller's menu
+    // of columns, so the row and every heading answer it.
+    let (rect, mut menu_response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
     let font = theme::regular(12.0);
     let color = palette.secondary;
     let mut clicked = None;
@@ -2819,6 +2897,7 @@ pub fn table_header(
         let head =
             Rect::from_min_size(top_left, size + vec2(arrow_room, 0.0)).expand2(vec2(4.0, 8.0));
         let response = ui.interact(head, ui.id().with(("table-header", text)), Sense::click());
+        menu_response = menu_response.union(response.clone());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
@@ -2864,6 +2943,7 @@ pub fn table_header(
         }
     };
     let mut number_clicked = false;
+    let number_response;
     let mut x = rect.left() + 8.0;
     {
         let number = Rect::from_center_size(pos2(x + 22.0, rect.center().y), vec2(30.0, 22.0));
@@ -2910,6 +2990,7 @@ pub fn table_header(
                 egui::Stroke::NONE,
             ));
         }
+        number_response = Some(response.clone());
         if response
             .on_hover_text(gettext(locale, "Original order, reversed"))
             .clicked()
@@ -2927,54 +3008,56 @@ pub fn table_header(
         &pgettext(locale, "column heading", "TITLE"),
         SortColumn::Title,
     );
-    let medium = width > 560.0;
-    let wide = width > 760.0;
-    let album_width = if show_album && medium {
-        (width * 0.28).clamp(140.0, 360.0)
-    } else {
-        0.0
-    };
-    let added_width = if show_added && wide { 120.0 } else { 0.0 };
-    let extra_wide = width > 920.0;
-    let added_by_width = if show_added_by && extra_wide {
-        130.0
-    } else {
-        0.0
-    };
+    let optional = optional_columns(width, show_album, show_added, show_added_by, show_released);
     let plays_width = if show_plays && plays_fit(width) {
         PLAYS_WIDTH
     } else {
         0.0
     };
-    let right_fixed = 36.0 + 56.0 + 36.0 + 8.0;
-    let mut cx =
-        rect.right() - right_fixed - plays_width - added_width - added_by_width - album_width;
-    if album_width > 0.0 {
+    let duration_width = if show_duration { 56.0 } else { 0.0 };
+    let right_fixed = 36.0 + duration_width + 36.0 + 8.0;
+    let mut cx = rect.right()
+        - right_fixed
+        - plays_width
+        - optional.released
+        - optional.added
+        - optional.added_by
+        - optional.album;
+    if optional.album > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "ALBUM"),
             SortColumn::Album,
         );
-        cx += album_width;
+        cx += optional.album;
     }
-    if added_by_width > 0.0 {
+    if optional.added_by > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "ADDED BY"),
             SortColumn::AddedBy,
         );
-        cx += added_by_width;
+        cx += optional.added_by;
     }
-    if added_width > 0.0 {
+    if optional.added > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "DATE ADDED"),
             SortColumn::Added,
         );
-        cx += added_width;
+        cx += optional.added;
+    }
+    if optional.released > 0.0 {
+        heading(
+            ui,
+            cx,
+            &pgettext(locale, "column heading", "RELEASE DATE"),
+            SortColumn::Released,
+        );
+        cx += optional.released;
     }
     if plays_width > 0.0 {
         heading(
@@ -2987,54 +3070,60 @@ pub fn table_header(
     if number_clicked {
         clicked = Some(SortColumn::Index);
     }
-    let clock = Rect::from_center_size(
-        pos2(rect.right() - 36.0 - 56.0 / 2.0 - 6.0, rect.center().y),
-        Vec2::splat(15.0),
-    );
-    let duration_active = sort.is_some_and(|sort| sort.column == SortColumn::Duration);
-    let response = ui.interact(
-        clock.expand(8.0),
-        ui.id().with("table-header-duration"),
-        Sense::click(),
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Button,
-            ui.is_enabled(),
-            gettext(locale, "Sort by duration"),
-        )
-    });
-    theme::focus_ring(ui, &response);
-    let clock_color = if duration_active {
-        palette.accent
-    } else if response.hovered() {
-        palette.text
-    } else {
-        color
-    };
-    Icon::Clock.image(clock_color, 15.0).paint_at(ui, clock);
-    if let Some(sort) = sort.filter(|sort| sort.column == SortColumn::Duration) {
-        let center = pos2(clock.right() + 9.0, rect.center().y);
-        let (wing, tip) = if sort.ascending {
-            (2.8, -3.2)
-        } else {
-            (-2.8, 3.2)
-        };
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![
-                center + vec2(-4.0, wing),
-                center + vec2(4.0, wing),
-                center + vec2(0.0, tip),
-            ],
-            clock_color,
-            egui::Stroke::NONE,
-        ));
+    if let Some(number) = number_response {
+        menu_response = menu_response.union(number);
     }
-    if response
-        .on_hover_text(gettext(locale, "Sort by duration"))
-        .clicked()
-    {
-        clicked = Some(SortColumn::Duration);
+    if show_duration {
+        let clock = Rect::from_center_size(
+            pos2(rect.right() - 36.0 - 56.0 / 2.0 - 6.0, rect.center().y),
+            Vec2::splat(15.0),
+        );
+        let duration_active = sort.is_some_and(|sort| sort.column == SortColumn::Duration);
+        let response = ui.interact(
+            clock.expand(8.0),
+            ui.id().with("table-header-duration"),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                gettext(locale, "Sort by duration"),
+            )
+        });
+        theme::focus_ring(ui, &response);
+        let clock_color = if duration_active {
+            palette.accent
+        } else if response.hovered() {
+            palette.text
+        } else {
+            color
+        };
+        Icon::Clock.image(clock_color, 15.0).paint_at(ui, clock);
+        if let Some(sort) = sort.filter(|sort| sort.column == SortColumn::Duration) {
+            let center = pos2(clock.right() + 9.0, rect.center().y);
+            let (wing, tip) = if sort.ascending {
+                (2.8, -3.2)
+            } else {
+                (-2.8, 3.2)
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    center + vec2(-4.0, wing),
+                    center + vec2(4.0, wing),
+                    center + vec2(0.0, tip),
+                ],
+                clock_color,
+                egui::Stroke::NONE,
+            ));
+        }
+        menu_response = menu_response.union(response.clone());
+        if response
+            .on_hover_text(gettext(locale, "Sort by duration"))
+            .clicked()
+        {
+            clicked = Some(SortColumn::Duration);
+        }
     }
     ui.painter().hline(
         rect.x_range().shrink(8.0),
@@ -3042,7 +3131,7 @@ pub fn table_header(
         Stroke::new(1.0, palette.outline),
     );
     ui.add_space(6.0);
-    clicked
+    (clicked, menu_response)
 }
 
 /// Lays out text limited to `max_rows` lines, ending with an ellipsis.
@@ -4925,6 +5014,8 @@ mod tests {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays: false,
+                                    show_released: false,
+                                    show_duration: true,
                                     compact: false,
                                     thin: false,
                                     shift: 0.0,

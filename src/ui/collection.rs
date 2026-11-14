@@ -8,6 +8,7 @@ use egui::{Align, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::api::models::{Album, Image, PlayableItem, Playlist, pick_image};
 use crate::app::App;
+use crate::settings::TrackColumns;
 use crate::i18n::{Locale, gettext, ngettext};
 use crate::model::{
     Action, Dialog, DragTrack, Loadable, Page, PagedList, RowContext, RowPick, SortColumn,
@@ -818,6 +819,14 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
     );
     let thin = app.settings.tracklist_compact;
     let show_cover = !thin && table.show_cover;
+    // Playlists and Liked Songs show the columns the listener chose, from
+    // the menu on their headings. Other lists keep their own.
+    let chosen = matches!(table.page, Page::Playlist(_) | Page::LikedSongs)
+        .then_some(app.settings.track_columns);
+    let show_album = table.show_album && chosen.is_none_or(|columns| columns.album);
+    let show_added = table.show_added && chosen.is_none_or(|columns| columns.added);
+    let show_released = chosen.is_some_and(|columns| columns.released);
+    let show_duration = chosen.is_none_or(|columns| columns.duration);
     let row_height = if thin {
         theme::THIN_ROW_HEIGHT
     } else {
@@ -828,19 +837,25 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
         .pagination
         .filter(|page| page.total > 0 && sort.is_none() && needle.is_empty());
     let rows = finite.map_or(entry.visible.len(), |page| page.total as usize);
-    if rows > 0
-        && let Some(column) = widgets::table_header(
+    let heading = (rows > 0).then(|| {
+        widgets::table_header(
             ui,
             &palette,
             app.locale,
-            table.show_album,
-            table.show_added,
+            show_album,
+            show_added,
             table.show_added_by,
             table.show_plays,
+            show_released,
+            show_duration,
             show_cover,
             sort,
         )
-    {
+    });
+    if let (Some((_, response)), Some(columns)) = (&heading, chosen) {
+        column_menu(app, response, columns);
+    }
+    if let Some((Some(column), _)) = heading {
         let next = next_sort(sort, column);
         match next {
             Some(sort) => {
@@ -1041,12 +1056,14 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 item,
                 context: &context,
                 show_cover,
-                show_album: table.show_album,
+                show_album,
                 // Rows reserve the column only where the header does.
-                added_at: added_at.as_deref().filter(|_| table.show_added),
+                added_at: added_at.as_deref().filter(|_| show_added),
                 added_by: added_by.as_deref(),
                 show_added_by: table.show_added_by,
                 show_plays: table.show_plays,
+                show_released,
+                show_duration,
                 compact: false,
                 thin,
                 shift,
@@ -1580,10 +1597,13 @@ fn view_indices(
                     },
                 )
             }),
-            SortColumn::Added | SortColumn::Index | SortColumn::Duration => {
+            SortColumn::Added | SortColumn::Index | SortColumn::Duration | SortColumn::Released => {
                 visible.sort_by(|a, b| {
                     let ordering = match sort.column {
                         SortColumn::Added => items[*a].1.cmp(&items[*b].1),
+                        SortColumn::Released => {
+                            release_date(&items[*a].0).cmp(&release_date(&items[*b].0))
+                        }
                         SortColumn::Index => a.cmp(b),
                         SortColumn::Duration => {
                             items[*a].0.duration_ms().cmp(&items[*b].0.duration_ms())
@@ -1600,6 +1620,44 @@ fn view_indices(
         }
     }
     visible
+}
+
+/// The menu a secondary click on a playlist's headings opens: a checklist
+/// of the columns its song list can show.
+fn column_menu(app: &mut App, heading: &egui::Response, columns: TrackColumns) {
+    let palette = app.palette;
+    let locale = app.locale;
+    egui::Popup::context_menu(heading)
+        .id(egui::Id::new("track-columns-menu"))
+        .frame(widgets::menu_frame(&palette))
+        .show(|ui| {
+            let choices = [
+                (gettext(locale, "Album"), columns.album),
+                (gettext(locale, "Date added"), columns.added),
+                (gettext(locale, "Release date"), columns.released),
+                (gettext(locale, "Duration"), columns.duration),
+            ];
+            for (choice, (label, shown)) in choices.into_iter().enumerate() {
+                if widgets::menu_item(ui, &palette, shown.then_some(Icon::Check), &label) {
+                    let mut toggled = columns;
+                    match choice {
+                        0 => toggled.album = !shown,
+                        1 => toggled.added = !shown,
+                        2 => toggled.released = !shown,
+                        _ => toggled.duration = !shown,
+                    }
+                    app.actions.push(Action::SetTrackColumns(toggled));
+                }
+            }
+        });
+}
+
+/// The release date of a song's album, as Spotify sent it with the song.
+fn release_date(item: &PlayableItem) -> Option<&str> {
+    match item {
+        PlayableItem::Track(track) => track.album.as_ref()?.release_date.as_deref(),
+        PlayableItem::Episode(_) => None,
+    }
 }
 
 fn total_duration(items: &[TableItem]) -> u64 {

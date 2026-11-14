@@ -12,9 +12,9 @@ jobs:
       matrix:
         include:
           - name: before
-            ref: b75af93ad5b157ab4205710be2f0ea7878587082
+            ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
           - name: after
-            ref: heart-checklist
+            ref: full-screen-lyrics
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,17 +36,11 @@ jobs:
         with:
           workspaces: app
           key: captures-${{ matrix.name }}
-      - name: Capture-only demo data
-        run: |
-          python3 tools/.github/capture/patch_demo.py app/src/demo.rs
-          python3 tools/.github/capture/patch_pointer.py app/src/entrypoint.rs
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo
       - name: Shoot
-        env:
-          PAGES_SIZES: ""
-        run: bash tools/.github/capture/shoot.sh "$PWD/app/target/debug/spotifast" shots tools/.github/capture/clicks.txt
+        run: bash tools/.github/capture/shoot-lyrics.sh "$PWD/app/target/debug/spotifast" shots
       - if: always()
         uses: actions/upload-artifact@v4
         with:

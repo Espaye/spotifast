@@ -38,6 +38,7 @@ use librespot_playback::{
     player::{Player, PlayerEvent},
 };
 use librespot_protocol::connect::{Cluster, ClusterUpdate};
+use librespot_protocol::player::{PlayerState, ProvidedTrack};
 use sha1::{Digest, Sha1};
 
 use crate::api::models::ArtistRef;
@@ -290,6 +291,15 @@ pub enum PlayerCommand {
     Toggle,
     Next,
     Previous,
+    /// Skip to a row of the queue: the `occurrence`th copy (from 0) of
+    /// `uri` in the engine's own list of next tracks, after the row an
+    /// earlier skip is still on its way to. `skips` Nexts, the row's place
+    /// in the list on screen, are the fallback when that list lacks it.
+    SkipTo {
+        uri: String,
+        occurrence: usize,
+        skips: usize,
+    },
     /// Remove manually queued tracks and keep context tracks.
     ClearQueue,
     /// Queue a track, episode or local file after the ones already queued.
@@ -490,7 +500,20 @@ pub struct Engine {
     /// The player came from a dropped session and still plays what that
     /// session left it, until something is loaded through this one.
     carrying: std::sync::atomic::AtomicBool,
+    /// The row the last queue skip goes to, while its Nexts may still be
+    /// on their way through the Connect task.
+    skip_target: Mutex<Option<SkipTarget>>,
 }
+
+/// Where a queue skip lands: the row's uid, or its URI when it has none.
+struct SkipTarget {
+    key: String,
+    at: Instant,
+}
+
+/// Each of a skip's Nexts waits for a Connect state update, a fraction of
+/// a second; by this age the skip has landed or its list is gone.
+const SKIP_TARGET_LIFE: Duration = Duration::from_secs(20);
 
 impl Engine {
     pub(crate) fn credentials(&self) -> Option<Credentials> {
@@ -606,6 +629,7 @@ impl Engine {
             closing,
             audio,
             carrying: std::sync::atomic::AtomicBool::new(carrying),
+            skip_target: Mutex::new(None),
         })
     }
 
@@ -888,9 +912,29 @@ impl Engine {
 
     fn send_command(&self, command: PlayerCommand) -> Result<()> {
         let spirc = &self.spirc;
+        if matches!(
+            command,
+            PlayerCommand::Next
+                | PlayerCommand::Previous
+                | PlayerCommand::ClearQueue
+                | PlayerCommand::Load(_)
+                | PlayerCommand::Transfer
+        ) {
+            // The list a skip's target was counted in moves differently.
+            *self.skip_target.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
         match command {
             PlayerCommand::Toggle => spirc.play_pause()?,
             PlayerCommand::Next => spirc.next()?,
+            PlayerCommand::SkipTo {
+                uri,
+                occurrence,
+                skips,
+            } => {
+                for _ in 0..self.queue_skips(&uri, occurrence, skips) {
+                    spirc.next()?;
+                }
+            }
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,
             PlayerCommand::AddToQueue(uri) => spirc.add_to_queue(SpotifyUri::from_uri(&uri)?)?,
@@ -942,6 +986,116 @@ impl Engine {
         }
         Ok(())
     }
+
+    /// How many Nexts reach a queue row, counted in the engine's own list.
+    /// Spotify's copy of the queue, which the rows on screen come from, can
+    /// lag behind it, still lists songs librespot passes over, and cannot
+    /// show where a skip still on its way lands.
+    fn queue_skips(&self, uri: &str, occurrence: usize, fallback: usize) -> usize {
+        let mut target = self.skip_target.lock().unwrap_or_else(|p| p.into_inner());
+        if target
+            .as_ref()
+            .is_some_and(|target| target.at.elapsed() >= SKIP_TARGET_LIFE)
+        {
+            *target = None;
+        }
+        let found = {
+            let watch = self.spirc.watch_player_state();
+            let state = watch.borrow();
+            Option::as_ref(&*state).and_then(|state| {
+                queue_skip(
+                    state,
+                    target.as_ref().map(|target| target.key.as_str()),
+                    uri,
+                    occurrence,
+                )
+            })
+        };
+        match found {
+            Some(skip) => {
+                log::info!(
+                    "queue skip to {uri}: {} next, the row is {fallback} down on screen",
+                    skip.skips
+                );
+                *target = Some(SkipTarget {
+                    key: skip.key,
+                    at: Instant::now(),
+                });
+                skip.skips
+            }
+            None => {
+                log::info!("queue skip to {uri}: not in the engine's list, {fallback} next");
+                *target = None;
+                fallback
+            }
+        }
+    }
+}
+
+/// librespot's Next passes queue delimiters, and songs found unavailable
+/// this session, without stopping on them.
+fn next_stops_on(track: &ProvidedTrack) -> bool {
+    !track.uid.starts_with("delimiter") && track.provider != "unavailable"
+}
+
+fn row_key(track: &ProvidedTrack) -> &str {
+    if track.uid.is_empty() {
+        &track.uri
+    } else {
+        &track.uid
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct QueueSkip {
+    skips: usize,
+    key: String,
+}
+
+/// The Nexts that take `state` to the `occurrence`th copy of `uri` in its
+/// next tracks, after the row an earlier skip to `pending` lands on.
+fn queue_skip(
+    state: &PlayerState,
+    pending: Option<&str>,
+    uri: &str,
+    occurrence: usize,
+) -> Option<QueueSkip> {
+    let next = &state.next_tracks;
+    let playing = state.track.as_ref().map(row_key);
+    // That skip's Nexts are still on their way: these follow them.
+    let from = match pending {
+        Some(key) if playing != Some(key) => next
+            .iter()
+            .position(|track| row_key(track) == key)
+            .map_or(0, |at| at + 1),
+        _ => 0,
+    };
+    let Some((at, track)) = next
+        .iter()
+        .enumerate()
+        .skip(from)
+        .filter(|(_, track)| track.uri == uri)
+        .nth(occurrence)
+    else {
+        // A row above the one being skipped to: Next cannot go back to
+        // it, so that skip stands.
+        return pending
+            .filter(|_| from > 0 && next[..from].iter().any(|track| track.uri == uri))
+            .map(|key| QueueSkip {
+                skips: 0,
+                key: key.to_string(),
+            });
+    };
+    // Next passes an unavailable row too, onto the song after it.
+    let skips = next[from..at]
+        .iter()
+        .filter(|track| next_stops_on(track))
+        .count()
+        + 1;
+    Some(QueueSkip {
+        skips,
+        key: row_key(track).to_string(),
+    })
 }
 
 /// What to pick up: `resume` as it was when the session dropped, or where a
@@ -980,7 +1134,10 @@ fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool
     state.playback == Playback::Playing
         && matches!(
             command,
-            PlayerCommand::Next | PlayerCommand::Previous | PlayerCommand::Load(_)
+            PlayerCommand::Next
+                | PlayerCommand::Previous
+                | PlayerCommand::SkipTo { .. }
+                | PlayerCommand::Load(_)
         )
 }
 
@@ -1954,6 +2111,95 @@ mod tests {
         }
     }
 
+    fn provided(uri: &str, uid: &str, provider: &str) -> ProvidedTrack {
+        ProvidedTrack {
+            uri: uri.into(),
+            uid: uid.into(),
+            provider: provider.into(),
+            ..ProvidedTrack::default()
+        }
+    }
+
+    fn player_state(playing: ProvidedTrack, next: Vec<ProvidedTrack>) -> PlayerState {
+        PlayerState {
+            track: protobuf::MessageField::some(playing),
+            next_tracks: next,
+            ..PlayerState::default()
+        }
+    }
+
+    /// A Next up click counts the rows librespot's Next stops on, which the
+    /// rows on screen do not tell: Spotify still lists a song this session
+    /// found unavailable, and never shows a queue delimiter.
+    #[test]
+    fn a_queue_skip_counts_only_the_rows_next_stops_on() {
+        let state = player_state(
+            provided("spotify:track:now", "u0", "context"),
+            vec![
+                provided("spotify:track:a", "u1", "autoplay"),
+                provided("spotify:track:b", "u2", "unavailable"),
+                provided("spotify:delimiter", "delimiter0", "context"),
+                provided("spotify:track:c", "u3", "autoplay"),
+                provided("spotify:track:a", "u4", "autoplay"),
+            ],
+        );
+        assert_eq!(
+            queue_skip(&state, None, "spotify:track:c", 0),
+            Some(QueueSkip {
+                skips: 2,
+                key: "u3".into()
+            }),
+            "the screen's row count would say four"
+        );
+        let skips = |uri: &str, occurrence| {
+            queue_skip(&state, None, uri, occurrence).map(|skip| skip.skips)
+        };
+        assert_eq!(skips("spotify:track:a", 1), Some(3), "the second copy");
+        assert_eq!(
+            skips("spotify:track:b", 0),
+            Some(2),
+            "Next passes an unavailable row onto the song after it"
+        );
+        assert_eq!(skips("spotify:track:gone", 0), None);
+    }
+
+    /// A second click while the first skip's Nexts are still on their way
+    /// counts from where that skip lands, however far the player has got.
+    #[test]
+    fn a_second_queue_skip_counts_from_where_the_first_lands() {
+        let next = vec![
+            provided("spotify:track:a", "u1", "autoplay"),
+            provided("spotify:track:b", "u2", "autoplay"),
+            provided("spotify:track:c", "u3", "autoplay"),
+            provided("spotify:track:d", "u4", "autoplay"),
+        ];
+        let before = player_state(provided("spotify:track:now", "u0", "context"), next.clone());
+        let halfway = player_state(next[0].clone(), next[1..].to_vec());
+        let landed = player_state(next[2].clone(), next[3..].to_vec());
+        for state in [&before, &halfway, &landed] {
+            assert_eq!(
+                queue_skip(state, Some("u3"), "spotify:track:d", 0),
+                Some(QueueSkip {
+                    skips: 1,
+                    key: "u4".into()
+                })
+            );
+        }
+        assert_eq!(
+            queue_skip(&before, Some("u3"), "spotify:track:b", 0),
+            Some(QueueSkip {
+                skips: 0,
+                key: "u3".into()
+            }),
+            "a row above the target leaves the first skip standing"
+        );
+        assert_eq!(
+            queue_skip(&before, Some("gone"), "spotify:track:b", 0).map(|skip| skip.skips),
+            Some(2),
+            "a target the list no longer holds counts from the playing song"
+        );
+    }
+
     #[test]
     fn replacing_a_playing_track_interrupts_queued_audio() {
         let playing = LocalState {
@@ -1965,6 +2211,12 @@ mod tests {
 
         assert!(command_interrupts_audio(&playing, &PlayerCommand::Next));
         assert!(command_interrupts_audio(&playing, &PlayerCommand::Previous));
+        let skip = PlayerCommand::SkipTo {
+            uri: "spotify:track:a".into(),
+            occurrence: 0,
+            skips: 3,
+        };
+        assert!(command_interrupts_audio(&playing, &skip));
         assert!(command_interrupts_audio(&playing, &load));
         assert!(!command_interrupts_audio(&stopped, &PlayerCommand::Next));
         assert!(!command_interrupts_audio(

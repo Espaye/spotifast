@@ -54,6 +54,9 @@ struct Known {
 pub struct Controller {
     known: Mutex<Known>,
     queue_writes: tokio::sync::Mutex<()>,
+    /// Skips to a Next up row reach the device in the order they were
+    /// asked for: a second click's skip follows the first one's.
+    queue_skips: tokio::sync::Mutex<()>,
 }
 
 impl Controller {
@@ -160,6 +163,11 @@ impl Controller {
             _ => self.restricted_target(device),
         }
     }
+
+    /// Holds skips to a Next up row to one at a time, in the order asked.
+    pub async fn queue_skip_turn(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.queue_skips.lock().await
+    }
 }
 
 /// Whether a ZeroConf receiver is a Sonos player.
@@ -211,6 +219,19 @@ pub fn command_body(
         RemoteAction::Volume { .. } => return None,
     };
     Some(json!({ "command": command }))
+}
+
+/// A skip to one row of the device's Next up. Spotify's own apps name the
+/// row in the skip, where one skip per row above it would have the device
+/// start every song on the way, and a second click would count its rows in
+/// a list still moving. The row's uid tells copies of a song apart; without
+/// one the song alone is named, and the device goes to its first copy.
+pub fn skip_to_body(uri: &str, uid: Option<&str>) -> Value {
+    let mut track = json!({ "uri": uri });
+    if let Some(uid) = uid.filter(|uid| !uid.is_empty()) {
+        track["uid"] = json!(uid);
+    }
+    json!({ "command": { "endpoint": "skip_next", "track": track } })
 }
 
 /// Keeps a Spotify context intact or builds an ordered page for explicit tracks.
@@ -422,6 +443,23 @@ mod tests {
         let body = command_body(RemoteAction::Play, None, 0, false, "").unwrap();
         assert_eq!(body["command"]["endpoint"], "resume");
         assert!(command_body(RemoteAction::Volume { request: 1 }, None, 0, false, "").is_none());
+    }
+
+    /// A Next up click on a restricted device is one skip that names its
+    /// row, not a skip for every row above it.
+    #[test]
+    fn a_skip_to_a_queue_row_names_the_row() {
+        let body = skip_to_body("spotify:track:c", Some("u3"));
+        let command = &body["command"];
+        assert_eq!(command["endpoint"], "skip_next");
+        assert_eq!(command["track"]["uri"], "spotify:track:c");
+        assert_eq!(command["track"]["uid"], "u3");
+
+        let song_alone = json!({ "uri": "spotify:track:c" });
+        let unknown = skip_to_body("spotify:track:c", None);
+        assert_eq!(unknown["command"]["track"], song_alone);
+        let empty = skip_to_body("spotify:track:c", Some(""));
+        assert_eq!(empty["command"]["track"], song_alone);
     }
 
     #[test]

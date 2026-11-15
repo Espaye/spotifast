@@ -392,15 +392,64 @@ impl ClusterView {
     }
 }
 
+/// What the device that plays has coming up, as the latest cluster push
+/// told it, and the row the last skip sent to another device goes to.
+#[derive(Default)]
+struct RemoteQueue {
+    device: String,
+    state: Option<PlayerState>,
+    target: Option<SkipTarget>,
+}
+
+impl RemoteQueue {
+    /// Takes what a cluster push tells of the device that plays.
+    fn show(&mut self, cluster: Cluster) {
+        self.device = cluster.active_device_id;
+        self.state = cluster.player_state.into_option();
+    }
+
+    /// The uid of the Next up row of `device` holding the `occurrence`th
+    /// copy of `uri`, counted after the row a skip still on its way there
+    /// goes to. `None` when no push has told what `device` has coming up,
+    /// the song is not in it, or its row has no uid: that skip names the
+    /// song alone.
+    fn row(&mut self, device: &str, uri: &str, occurrence: usize) -> Option<String> {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|target| target.at.elapsed() >= SKIP_TARGET_LIFE)
+        {
+            self.target = None;
+        }
+        let pending = self.target.as_ref().map(|target| target.key.as_str());
+        // A copy above the row that skip goes to is behind the device by
+        // now, so it is not the one meant.
+        let key = self
+            .state
+            .as_ref()
+            .filter(|_| self.device == device)
+            .and_then(|state| queue_skip(state, pending, uri, occurrence))
+            .filter(|skip| skip.skips > 0)
+            .map(|skip| skip.key);
+        self.target = key.clone().map(|key| SkipTarget {
+            key,
+            at: Instant::now(),
+        });
+        key.filter(|key| key != uri)
+    }
+}
+
 /// Forwards cluster pushes that change another device's playback, so the
 /// interface shows them at once instead of on its next poll: a new volume
 /// as it is, anything else as a reason to poll. Spotify pushes no cluster
 /// back for this device's own announcement, so the first push often is the
 /// next change on another device, and it counts as one: at most one extra
-/// poll per connect.
+/// poll per connect. Each push also leaves what the playing device has
+/// coming up in `queue`, for a skip to one of those rows to name.
 async fn watch_cluster(
     mut updates: BoxedStreamResult<ClusterUpdate>,
     own_device: String,
+    queue: Arc<Mutex<RemoteQueue>>,
     notify: Notify,
 ) {
     use futures_util::StreamExt as _;
@@ -420,6 +469,8 @@ async fn watch_cluster(
             });
         }
         shown = view;
+        let mut kept = queue.lock().unwrap_or_else(|p| p.into_inner());
+        kept.show(cluster);
     }
 }
 
@@ -503,6 +554,8 @@ pub struct Engine {
     /// The row the last queue skip goes to, while its Nexts may still be
     /// on their way through the Connect task.
     skip_target: Mutex<Option<SkipTarget>>,
+    /// What another device has coming up, for a queue skip sent there.
+    remote_queue: Arc<Mutex<RemoteQueue>>,
 }
 
 /// Where a queue skip lands: the row's uid, or its URI when it has none.
@@ -570,6 +623,7 @@ impl Engine {
         // Subscribed before the Spirc task starts the dealer, while its
         // builder still takes subscriptions. Without it the interface still
         // polls; it only learns of other devices' changes later.
+        let remote_queue: Arc<Mutex<RemoteQueue>> = Arc::default();
         match session
             .dealer()
             .listen_for("hm://connect-state/v1/cluster", Message::from_raw)
@@ -578,6 +632,7 @@ impl Engine {
                 tokio::spawn(watch_cluster(
                     updates,
                     config.device_id(),
+                    Arc::clone(&remote_queue),
                     Arc::clone(&notify),
                 ));
             }
@@ -630,6 +685,7 @@ impl Engine {
             audio,
             carrying: std::sync::atomic::AtomicBool::new(carrying),
             skip_target: Mutex::new(None),
+            remote_queue,
         })
     }
 
@@ -846,6 +902,16 @@ impl Engine {
             .borrow()
             .active_device_id
             .clone()
+    }
+
+    /// The uid of the row that a skip to the `occurrence`th copy of `uri`
+    /// in the Next up of `device`, playing elsewhere, names. `None` leaves
+    /// the skip to name the song alone.
+    pub fn remote_row(&self, device: &str, uri: &str, occurrence: usize) -> Option<String> {
+        self.remote_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .row(device, uri, occurrence)
     }
 
     pub fn shutdown(&self) {
@@ -2196,6 +2262,42 @@ mod tests {
             queue_skip(&before, Some("gone"), "spotify:track:b", 0).map(|skip| skip.skips),
             Some(2),
             "a target the list no longer holds counts from the playing song"
+        );
+    }
+
+    /// A skip sent to another device names the row by the uid that device
+    /// lists it under, and a second click's skip counts from the row the
+    /// first one goes to, wherever the device has got to.
+    #[test]
+    fn a_skip_on_another_device_names_the_row_by_its_uid() {
+        let next = vec![
+            provided("spotify:track:a", "u1", "context"),
+            provided("spotify:track:b", "u2", "context"),
+            provided("spotify:track:a", "u3", "context"),
+            provided("spotify:track:c", "", "context"),
+        ];
+        let listed = || {
+            let mut pushed = cluster("sonos", "spotify:track:now", true, 30_000);
+            pushed.player_state.mut_or_insert_default().next_tracks = next.clone();
+            let mut queue = RemoteQueue::default();
+            queue.show(pushed);
+            queue
+        };
+        let uid = |uri: &str, n| listed().row("sonos", uri, n);
+        assert_eq!(uid("spotify:track:b", 0).as_deref(), Some("u2"));
+        assert_eq!(uid("spotify:track:a", 1).as_deref(), Some("u3"));
+        assert_eq!(uid("spotify:track:c", 0), None, "a row without a uid");
+        assert_eq!(uid("spotify:track:gone", 0), None);
+        assert_eq!(listed().row("phone", "spotify:track:b", 0), None);
+
+        let mut queue = listed();
+        let first = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(first.as_deref(), Some("u2"));
+        let second = queue.row("sonos", "spotify:track:a", 0);
+        assert_eq!(
+            second.as_deref(),
+            Some("u3"),
+            "the first copy is above the row the first skip goes to"
         );
     }
 

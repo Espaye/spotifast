@@ -32,7 +32,7 @@ if [ "$record" = record ]; then
   for theme in dark light; do
     show=()
     [ "$theme" = light ] && show=(--demo-show light)
-    env $(env_for) DISPLAY=:99 timeout 20 "$bin" --demo-page playlist:pl1 \
+    env $(env_for) DISPLAY=:99 timeout 20 "$bin" --demo --demo-page playlist:pl1 \
       --demo-size 1280x800 "${show[@]}" &
     app=$!
     sleep 8

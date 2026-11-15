@@ -1321,7 +1321,12 @@ fn paint_mark(ui: &Ui, palette: &Palette, center: egui::Pos2, mark: Mark) {
 /// A menu entry with the checklist's check at its end. A click turns it on
 /// or off and leaves the menu open for the next, when the menu closes only
 /// on a click outside it.
-pub(crate) fn menu_check_item(ui: &mut Ui, palette: &Palette, label: &str, checked: bool) -> bool {
+pub(crate) fn menu_check_item(
+    ui: &mut Ui,
+    palette: &Palette,
+    label: &str,
+    checked: bool,
+) -> bool {
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
     if ui.is_rect_visible(rect) {

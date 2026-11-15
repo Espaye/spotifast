@@ -107,6 +107,50 @@ pub fn layout(
     galley
 }
 
+/// Lays `text` out in `font` on the rows it takes in `wrap_font` within
+/// `wrap_width`, so a line drawn at any size up to `wrap_font` keeps every
+/// word on the same row. Scaling a font does not scale its widths exactly,
+/// so a column scaled with the font would still move a word now and then.
+pub fn layout_on_rows_of(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    wrap_font: FontId,
+    color: Color32,
+    wrap_width: f32,
+) -> Arc<Galley> {
+    let sized = layout(
+        painter,
+        text,
+        wrap_font,
+        color,
+        wrap_width,
+        usize::MAX,
+        None,
+    );
+    let mut rows = String::new();
+    let mut wrapped = false;
+    for (index, row) in sized.rows.iter().enumerate() {
+        if index > 0 {
+            rows.push('\n');
+        }
+        // A row that wraps ends at its space; the space has nowhere to go.
+        let piece = row.text();
+        let piece = if wrapped { piece.trim_start() } else { &piece };
+        wrapped = !row.ends_with_newline;
+        rows.push_str(if wrapped { piece.trim_end() } else { piece });
+    }
+    let mut job = LayoutJob::simple(rows, font, color, f32::INFINITY);
+    if text.split('\n').any(is_rtl) {
+        job.halign = Align::RIGHT;
+    }
+    let mut galley = painter.layout_job(job);
+    if has_rtl(text) {
+        reorder(&mut galley);
+    }
+    galley
+}
+
 /// Fills rows with whole words up to `wrap_width`, at most `max_rows` of
 /// them, and ends a cut with `overflow`. The rows come back in logical
 /// order, one string each.
@@ -713,6 +757,59 @@ mod tests {
                     Some(ELLIPSIS),
                 );
                 assert_eq!(galley.text(), word);
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    /// A line keeps the rows it takes at its full size while it grows to
+    /// it, in either direction, whatever width each size gives its words.
+    #[test]
+    fn a_growing_line_keeps_its_words_on_their_rows() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let full = FontId::proportional(44.0 * 1.15);
+            let rows = |galley: &Galley| -> Vec<String> {
+                galley.rows.iter().map(|row| row.text()).collect()
+            };
+            for line in [
+                "We were dancing in the kitchen while the radio played on",
+                "غيوم في السماء الزرقاء فوق البحر الواسع عند الغروب",
+            ] {
+                let whole = painter
+                    .layout_no_wrap(line.to_owned(), full.clone(), Color32::WHITE)
+                    .size()
+                    .x;
+                for share in [0.35, 0.5, 0.7] {
+                    let column = whole * share;
+                    let at_full = rows(&layout_on_rows_of(
+                        painter,
+                        line,
+                        full.clone(),
+                        full.clone(),
+                        Color32::WHITE,
+                        column,
+                    ));
+                    assert!(at_full.len() > 1, "{line} wraps in {column} px");
+                    for step in 0..=30 {
+                        let size = 44.0 * (1.0 + 0.15 * step as f32 / 30.0);
+                        let galley = layout_on_rows_of(
+                            painter,
+                            line,
+                            FontId::proportional(size),
+                            full.clone(),
+                            Color32::WHITE,
+                            column,
+                        );
+                        assert_eq!(rows(&galley), at_full, "{line} at {size} pt");
+                        assert!(galley.size().x <= column + 1.0, "{line} at {size} pt");
+                    }
+                }
             }
         });
         output.textures_delta.clear();

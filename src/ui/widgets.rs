@@ -2351,9 +2351,15 @@ fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
     }
 }
 
-/// Frames a second the playing song's bars move at: smooth on a 16 point
-/// mark without redrawing the window at the screen's full rate.
-const PLAYING_BARS_FRAME: std::time::Duration = std::time::Duration::from_millis(33);
+/// How often the playing song's bars move: smooth on a 16 point mark
+/// without redrawing the window at the screen's full rate, and at half
+/// that rate, as other animations, while saving energy or out of focus.
+fn playing_bars_frame(budget: crate::power::Budget) -> std::time::Duration {
+    match budget {
+        crate::power::Budget::Normal => std::time::Duration::from_millis(33),
+        _ => std::time::Duration::from_millis(66),
+    }
+}
 
 /// Half the length of each of the six playing bars `time` seconds in, in the
 /// 24 unit grid of the Audio Lines icon. Each bar swings out from the middle
@@ -2379,9 +2385,10 @@ fn playing_bar_halves(time: f64) -> [f32; 6] {
 }
 
 /// The six green bars that mark the playing song, centred in `rect` at
-/// `size` points. They move while the song plays and stand still as the
-/// Audio Lines icon when the system asks for less motion.
-fn playing_bars(ui: &Ui, rect: Rect, size: f32, color: Color32) {
+/// `size` points. They move while the song plays, at the pace `budget`
+/// allows, and stand still as the Audio Lines icon when the system asks
+/// for less motion.
+fn playing_bars(ui: &Ui, rect: Rect, size: f32, color: Color32, budget: crate::power::Budget) {
     if crate::motion::reduced(ui.ctx()) {
         theme::paint_icon(ui, Icon::AudioLines, rect, size, color);
         return;
@@ -2400,7 +2407,7 @@ fn playing_bars(ui: &Ui, rect: Rect, size: f32, color: Color32) {
         );
         ui.painter().rect_filled(bar_rect, width / 2.0, color);
     }
-    ui.ctx().request_repaint_after(PLAYING_BARS_FRAME);
+    ui.ctx().request_repaint_after(playing_bars_frame(budget));
 }
 
 /// Draws one song in a list.
@@ -2572,7 +2579,7 @@ fn track_row_contents(
             };
             theme::paint_icon(ui, icon, cell, 14.0, palette.text);
         } else if playing {
-            playing_bars(ui, cell, 16.0, palette.accent);
+            playing_bars(ui, cell, 16.0, palette.accent, app.budget);
         } else {
             let color = if is_current {
                 palette.accent
@@ -2638,7 +2645,7 @@ fn track_row_contents(
                 theme::paint_icon(ui, icon, cover_rect, 16.0, Color32::WHITE);
             } else if playing {
                 scrim(110);
-                playing_bars(ui, cover_rect, 16.0, palette.accent);
+                playing_bars(ui, cover_rect, 16.0, palette.accent, app.budget);
             }
         }
         x += cols.cover;
@@ -5944,5 +5951,12 @@ mod playing_bars_tests {
             }
             last = halves;
         }
+    }
+
+    #[test]
+    fn the_playing_bars_slow_down_with_other_animations() {
+        use crate::power::Budget;
+        let normal = playing_bars_frame(Budget::Normal);
+        assert_eq!(playing_bars_frame(Budget::Saver), normal * 2);
     }
 }

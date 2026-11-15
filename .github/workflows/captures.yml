@@ -11,9 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: before
+            ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
           - name: after
             ref: full-screen-lyrics
-            record: only
     steps:
       - uses: actions/checkout@v4
         with:

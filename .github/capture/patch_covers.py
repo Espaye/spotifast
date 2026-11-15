@@ -1,6 +1,9 @@
 """Capture-only demo covers, applied the same way to the baseline and each
 candidate: bright photos from the same placeholder service instead of its
-random seeds, with the playing song's album (seed 200) on a colourful one."""
+random seeds, with the playing song's album (seed 200) on a colourful one.
+Also shows the demo's recent plays in the Recent tab: the demo fills them
+but never rebuilds the list the tab draws."""
+import os
 import sys
 
 path = sys.argv[1]
@@ -21,5 +24,16 @@ text = text.replace(
 old = "picsum.photos/seed/spotifast{seed}/"
 assert text.count(old) == 3, old
 text = text.replace(old, "picsum.photos/id/{seed}/")
+
+recents = "    app.recents.error = None;\n"
+assert text.count(recents) == 1, recents
+text = text.replace(recents, recents + "    app.rebuild_recents();\n")
 open(path, "w", encoding="utf-8", newline="\n").write(text)
-print("covers patched")
+
+app_path = os.path.join(os.path.dirname(path), "app.rs")
+app = open(app_path, encoding="utf-8").read()
+private = "    fn rebuild_recents(&mut self) {\n"
+assert app.count(private) == 1, private
+app = app.replace(private, "    pub(crate) fn rebuild_recents(&mut self) {\n")
+open(app_path, "w", encoding="utf-8", newline="\n").write(app)
+print("covers and recents patched")

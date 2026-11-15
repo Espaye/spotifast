@@ -826,6 +826,10 @@ pub struct App {
     /// device, and when. The songs above it play for a moment at most on
     /// the way, and show nowhere.
     queue_skip: Option<(String, Instant)>,
+    /// That skip, on another device, goes to a later copy of its song and
+    /// is not answered yet. Sent as a Next per row, it passes the earlier
+    /// copies, so an answer naming the song may be one of those.
+    queue_skip_unanswered: bool,
     pub playlist_busy: bool,
     pub quit_requested: bool,
     /// Wheel step, Linux touchpad scale and glide, and the axis a gesture
@@ -1486,6 +1490,7 @@ impl App {
             last_now_playing_sequence: 0,
             queue_start_pending: None,
             queue_skip: None,
+            queue_skip_unanswered: false,
             playlist_busy: false,
             quit_requested: false,
             scrolling: fastframe_scroll::Scrolling::default(),
@@ -2267,10 +2272,12 @@ impl App {
     /// held and checked once more. Agreement, or two later mismatches, settles
     /// on the reported state. A Next up click's skip has its own time to
     /// land: until then an answer naming another song, the old one or one
-    /// passed on the way, is only a reason to ask again. Returns whether the
-    /// answer is the one that confirms such a skip has landed.
+    /// passed on the way, is only a reason to ask again, and so is one
+    /// naming its song before a skip to a later copy is answered. Returns
+    /// whether the answer is the one that confirms such a skip has landed.
     fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) -> bool {
         let skipping = self.queue_skip_in_flight();
+        let unanswered = skipping && self.queue_skip_unanswered;
         let mut settled = false;
         let mut arrived = false;
         let mut recheck = false;
@@ -2281,7 +2288,7 @@ impl App {
             } = &mut intent.confirmation
             && poll > *after_poll
         {
-            arrived = reported == Some(intent.uri.as_str());
+            arrived = !unanswered && reported == Some(intent.uri.as_str());
             if arrived || (*mismatches > 0 && !skipping) {
                 settled = true;
             } else {
@@ -7466,6 +7473,7 @@ impl App {
                 // Next passes over, and cannot show where a skip still on
                 // its way lands.
                 self.queue_skip = Some((uri.clone(), Instant::now()));
+                self.queue_skip_unanswered = false;
                 self.backend.player(PlayerCommand::SkipTo {
                     uri,
                     occurrence,
@@ -7484,6 +7492,7 @@ impl App {
                 // showed the songs on the way as the song playing, with
                 // the chosen one back in Next up.
                 self.queue_skip = Some((uri.clone(), Instant::now()));
+                self.queue_skip_unanswered = occurrence > 0;
                 self.backend.api(ApiRequest::SkipTo {
                     device_id,
                     uri,
@@ -7753,13 +7762,15 @@ impl App {
     fn queue_fetch_is_stale(&self, fetched: &Queue) -> bool {
         // While a Next up click's skip is on its way, Spotify's copy shows
         // the songs it passes, the chosen one listed again under each, for
-        // as long as the skip takes. Only its own song ends the wait.
+        // as long as the skip takes. Only its own song ends the wait, and
+        // not an earlier copy of it while a skip to a later one goes on.
         if let Some((uri, _)) = &self.queue_skip
             && self.queue_skip_in_flight()
-            && fetched
-                .currently_playing
-                .as_ref()
-                .is_none_or(|item| item.uri() != uri.as_str())
+            && (self.queue_skip_unanswered
+                || fetched
+                    .currently_playing
+                    .as_ref()
+                    .is_none_or(|item| item.uri() != uri.as_str()))
         {
             return true;
         }
@@ -9935,6 +9946,10 @@ impl App {
                 }
                 if matches!(action, RemoteAction::Play | RemoteAction::Pause) {
                     self.clear_play_pending();
+                }
+                if action == RemoteAction::Next {
+                    // A skip's Nexts are all sent: its song is the one meant.
+                    self.queue_skip_unanswered = false;
                 }
                 match result {
                     Ok(()) => {
@@ -21052,6 +21067,79 @@ mod tests {
             queue_uris(&app),
             (Some("spotify:track:e".to_string()), Vec::new())
         );
+    }
+
+    /// A skip to a later copy of a song, on a device whose rows have no
+    /// uid, goes a Next per row and passes the earlier copy. An answer
+    /// naming the song before the skip is answered may be that copy, so it
+    /// neither ends the skip nor brings back the rows passed.
+    #[test]
+    fn a_skip_to_a_later_copy_waits_for_its_answer() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        let sent = app.backend.take_queue_skip_requests();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ApiRequest::SkipTo {
+                    occurrence: 1,
+                    skips: 3,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+        let chosen = (
+            Some("spotify:track:b".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+
+        // The first copy, passed on the way.
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_some(), "its Nexts are still going");
+        let passed = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:b"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(passed),
+        });
+        assert_eq!(queue_uris(&app), chosen, "the rows passed stay gone");
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+        assert_eq!(queue_uris(&app), chosen);
     }
 
     /// A skip that never lands does not hold the screen for good: once its

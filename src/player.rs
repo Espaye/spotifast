@@ -1125,7 +1125,7 @@ impl Engine {
                     skip.skips
                 );
                 *target = Some(SkipTarget {
-                    key: skip.key,
+                    key: skip.lands,
                     at: Instant::now(),
                 });
                 skip.skips
@@ -1178,6 +1178,9 @@ fn row_key(track: &ProvidedTrack) -> &str {
 struct QueueSkip {
     skips: usize,
     key: String,
+    /// The row its last Next stops on: the chosen row, or the song after
+    /// it when Next passes it as unavailable.
+    lands: String,
 }
 
 /// Where the next tracks of `state` still ahead start: after the row an
@@ -1228,6 +1231,7 @@ fn queue_skip(
             .map(|key| QueueSkip {
                 skips: 0,
                 key: key.to_string(),
+                lands: key.to_string(),
             });
     };
     // Next passes an unavailable row too, onto the song after it.
@@ -1236,9 +1240,14 @@ fn queue_skip(
         .filter(|track| next_stops_on(track))
         .count()
         + 1;
+    let lands = next[at..]
+        .iter()
+        .find(|track| next_stops_on(track))
+        .unwrap_or(track);
     Some(QueueSkip {
         skips,
         key: row_key(track).to_string(),
+        lands: row_key(lands).to_string(),
     })
 }
 
@@ -2292,6 +2301,7 @@ mod tests {
             Some(QueueSkip {
                 skips: 2,
                 key: "u3".into(),
+                lands: "u3".into(),
             }),
             "the screen's row count would say four"
         );
@@ -2303,6 +2313,33 @@ mod tests {
             "Next passes an unavailable row onto the song after it"
         );
         assert_eq!(skips("spotify:track:gone", 0), None);
+    }
+
+    /// A skip to a row Next passes as unavailable lands on the song after
+    /// it, and a second click counts on from there: d is one Next further,
+    /// not two on to e.
+    #[test]
+    fn a_skip_to_an_unavailable_row_counts_on_from_where_it_lands() {
+        let state = player_state(
+            provided("spotify:track:now", "u0", "context"),
+            vec![
+                provided("spotify:track:a", "u1", "autoplay"),
+                provided("spotify:track:b", "u2", "unavailable"),
+                provided("spotify:track:c", "u3", "autoplay"),
+                provided("spotify:track:d", "u4", "autoplay"),
+                provided("spotify:track:e", "u5", "autoplay"),
+            ],
+        );
+        let to_b = queue_skip(&state, None, "spotify:track:b", 0).unwrap();
+        assert_eq!((to_b.skips, to_b.lands.as_str()), (2, "u3"));
+        assert_eq!(
+            queue_skip(&state, Some(to_b.lands.as_str()), "spotify:track:d", 0),
+            Some(QueueSkip {
+                skips: 1,
+                key: "u4".into(),
+                lands: "u4".into(),
+            })
+        );
     }
 
     /// A second click while the first skip's Nexts are still on their way
@@ -2325,6 +2362,7 @@ mod tests {
                 Some(QueueSkip {
                     skips: 1,
                     key: "u4".into(),
+                    lands: "u4".into(),
                 })
             );
         }
@@ -2333,6 +2371,7 @@ mod tests {
             Some(QueueSkip {
                 skips: 0,
                 key: "u3".into(),
+                lands: "u3".into(),
             }),
             "a row above the target leaves the first skip standing"
         );
@@ -2362,6 +2401,7 @@ mod tests {
         let two_more = Some(QueueSkip {
             skips: 2,
             key: "u3".into(),
+            lands: "u3".into(),
         });
         assert_eq!(to_d(&before), two_more, "Next still on its way to b");
         assert_eq!(to_d(&landed), two_more, "Next already at b");

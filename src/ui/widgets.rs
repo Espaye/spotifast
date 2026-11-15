@@ -2354,10 +2354,12 @@ fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
 /// How often the playing song's bars move: smooth on a 16 point mark
 /// without redrawing the window at the screen's full rate, and at half
 /// that rate, as other animations, while saving energy or out of focus.
-fn playing_bars_frame(budget: crate::power::Budget) -> std::time::Duration {
+/// `None` while nobody can see the window: no frames.
+fn playing_bars_frame(budget: crate::power::Budget) -> Option<std::time::Duration> {
     match budget {
-        crate::power::Budget::Normal => std::time::Duration::from_millis(33),
-        _ => std::time::Duration::from_millis(66),
+        crate::power::Budget::Normal => Some(std::time::Duration::from_millis(33)),
+        crate::power::Budget::Saver => Some(std::time::Duration::from_millis(66)),
+        crate::power::Budget::Background => None,
     }
 }
 
@@ -2406,7 +2408,9 @@ fn playing_bars(ui: &Ui, rect: Rect, size: f32, color: Color32, budget: crate::p
         );
         ui.painter().rect_filled(bar_rect, width / 2.0, color);
     }
-    ui.ctx().request_repaint_after(playing_bars_frame(budget));
+    if let Some(frame) = playing_bars_frame(budget) {
+        theme::repaint_after(ui.ctx(), frame);
+    }
 }
 
 /// Draws one song in a list.
@@ -5955,7 +5959,44 @@ mod playing_bars_tests {
     #[test]
     fn the_playing_bars_slow_down_with_other_animations() {
         use crate::power::Budget;
-        let normal = playing_bars_frame(Budget::Normal);
-        assert_eq!(playing_bars_frame(Budget::Saver), normal * 2);
+        use std::time::Duration;
+        // The repaint delay egui is left with after a playing row's second
+        // pass, the first being a new context's.
+        let delay = |budget| {
+            let ctx = egui::Context::default();
+            let mut last = Duration::ZERO;
+            for frame in 1..=2 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(f64::from(frame) / 60.0),
+                        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(64.0))),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(16.0));
+                        playing_bars(ui, rect, 16.0, Color32::GREEN, budget);
+                    },
+                );
+                output.textures_delta.clear();
+                last = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            }
+            last
+        };
+        // egui takes its predicted frame time off a delayed repaint, and the
+        // bars add it back, so what is left is their own pace.
+        let normal = delay(Budget::Normal);
+        assert!(
+            (Duration::from_millis(30)..Duration::from_millis(40)).contains(&normal),
+            "about 30 frames a second: {normal:?}"
+        );
+        let saver = delay(Budget::Saver);
+        assert!(
+            (Duration::from_millis(60)..Duration::from_millis(70)).contains(&saver),
+            "half as many while saving energy or out of focus: {saver:?}"
+        );
+        assert!(
+            delay(Budget::Background) > Duration::from_secs(1),
+            "no frames while nobody can see the window"
+        );
     }
 }

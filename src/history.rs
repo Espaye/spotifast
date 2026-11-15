@@ -223,9 +223,9 @@ pub fn recent_rows(
     let mut rows = merged(local, remote);
     if let Some(playing) = playing {
         // Once the playing song counts, its own record stands for it.
-        let counted = rows.iter().any(|row| {
-            row.track.uri == playing.track.uri && time(row) >= time(playing)
-        });
+        let counted = rows
+            .iter()
+            .any(|row| row.track.uri == playing.track.uri && time(row) >= time(playing));
         if !counted {
             rows.insert(0, playing.clone());
         }
@@ -413,7 +413,10 @@ mod tests {
         let elsewhere = [play("spotify:track:c", "2026-09-01T15:05:00Z")];
         let rows = recent_rows(&local, &elsewhere, Some(&playing));
         let uris: Vec<&str> = rows.iter().map(|play| play.track.uri.as_str()).collect();
-        assert_eq!(uris, ["spotify:track:c", "spotify:track:b", "spotify:track:a"]);
+        assert_eq!(
+            uris,
+            ["spotify:track:c", "spotify:track:b", "spotify:track:a"]
+        );
 
         // Heard again now, a song last played earlier shows the new play.
         let playing = play("spotify:track:b", "2026-09-01T15:09:00Z");

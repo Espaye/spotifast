@@ -551,8 +551,8 @@ pub struct Engine {
     /// The player came from a dropped session and still plays what that
     /// session left it, until something is loaded through this one.
     carrying: std::sync::atomic::AtomicBool,
-    /// The row the last queue skip goes to, while its Nexts may still be
-    /// on their way through the Connect task.
+    /// The row the last queue skip or Next goes to, while its Nexts may
+    /// still be on their way through the Connect task.
     skip_target: Mutex<Option<SkipTarget>>,
     /// What another device has coming up, for a queue skip sent there.
     remote_queue: Arc<Mutex<RemoteQueue>>,
@@ -980,8 +980,7 @@ impl Engine {
         let spirc = &self.spirc;
         if matches!(
             command,
-            PlayerCommand::Next
-                | PlayerCommand::Previous
+            PlayerCommand::Previous
                 | PlayerCommand::ClearQueue
                 | PlayerCommand::Load(_)
                 | PlayerCommand::Transfer
@@ -991,7 +990,10 @@ impl Engine {
         }
         match command {
             PlayerCommand::Toggle => spirc.play_pause()?,
-            PlayerCommand::Next => spirc.next()?,
+            PlayerCommand::Next => {
+                self.note_next();
+                spirc.next()?;
+            }
             PlayerCommand::SkipTo {
                 uri,
                 occurrence,
@@ -1096,6 +1098,27 @@ impl Engine {
             }
         }
     }
+
+    /// Moves the row a queue skip counts from on to where the Next about to
+    /// be sent lands. Until its Connect state update the engine's list does
+    /// not show it, so a click right after it would otherwise count one row
+    /// short and land one song too far.
+    fn note_next(&self) {
+        let mut target = self.skip_target.lock().unwrap_or_else(|p| p.into_inner());
+        let earlier = target
+            .take()
+            .filter(|target| target.at.elapsed() < SKIP_TARGET_LIFE);
+        let pending = earlier.as_ref().map(|target| target.key.as_str());
+        let lands = {
+            let watch = self.spirc.watch_player_state();
+            let state = watch.borrow();
+            Option::as_ref(&*state).and_then(|state| next_lands_on(state, pending))
+        };
+        *target = lands.map(|key| SkipTarget {
+            key,
+            at: Instant::now(),
+        });
+    }
 }
 
 /// librespot's Next passes queue delimiters, and songs found unavailable
@@ -1118,6 +1141,30 @@ struct QueueSkip {
     key: String,
 }
 
+/// Where the next tracks of `state` still ahead start: after the row an
+/// earlier skip to `pending` lands on, or at the top once it has landed.
+fn skip_from(state: &PlayerState, pending: Option<&str>) -> usize {
+    let playing = state.track.as_ref().map(row_key);
+    // That skip's Nexts are still on their way: these follow them.
+    match pending {
+        Some(key) if playing != Some(key) => state
+            .next_tracks
+            .iter()
+            .position(|track| row_key(track) == key)
+            .map_or(0, |at| at + 1),
+        _ => 0,
+    }
+}
+
+/// The row one more Next takes `state` to, after an earlier skip to
+/// `pending` lands.
+fn next_lands_on(state: &PlayerState, pending: Option<&str>) -> Option<String> {
+    state.next_tracks[skip_from(state, pending)..]
+        .iter()
+        .find(|track| next_stops_on(track))
+        .map(|track| row_key(track).to_string())
+}
+
 /// The Nexts that take `state` to the `occurrence`th copy of `uri` in its
 /// next tracks, after the row an earlier skip to `pending` lands on.
 fn queue_skip(
@@ -1127,15 +1174,7 @@ fn queue_skip(
     occurrence: usize,
 ) -> Option<QueueSkip> {
     let next = &state.next_tracks;
-    let playing = state.track.as_ref().map(row_key);
-    // That skip's Nexts are still on their way: these follow them.
-    let from = match pending {
-        Some(key) if playing != Some(key) => next
-            .iter()
-            .position(|track| row_key(track) == key)
-            .map_or(0, |at| at + 1),
-        _ => 0,
-    };
+    let from = skip_from(state, pending);
     let Some((at, track)) = next
         .iter()
         .enumerate()
@@ -2262,6 +2301,47 @@ mod tests {
             queue_skip(&before, Some("gone"), "spotify:track:b", 0).map(|skip| skip.skips),
             Some(2),
             "a target the list no longer holds counts from the playing song"
+        );
+    }
+
+    /// A click right after Next, while that Next still waits for its
+    /// Connect state update, counts from the song the Next lands on: from
+    /// a, Next and then d is two more Nexts, not three on to e.
+    #[test]
+    fn a_queue_skip_counts_from_where_a_pending_next_lands() {
+        let next = vec![
+            provided("spotify:track:b", "u1", "autoplay"),
+            provided("spotify:track:c", "u2", "autoplay"),
+            provided("spotify:track:d", "u3", "autoplay"),
+            provided("spotify:track:e", "u4", "autoplay"),
+        ];
+        let before = player_state(provided("spotify:track:a", "u0", "context"), next.clone());
+        let landed = player_state(next[0].clone(), next[1..].to_vec());
+        let lands = next_lands_on(&before, None);
+        assert_eq!(lands.as_deref(), Some("u1"));
+        let to_d = |state: &PlayerState| queue_skip(state, lands.as_deref(), "spotify:track:d", 0);
+        let two_more = Some(QueueSkip {
+            skips: 2,
+            key: "u3".into(),
+        });
+        assert_eq!(to_d(&before), two_more, "Next still on its way to b");
+        assert_eq!(to_d(&landed), two_more, "Next already at b");
+        assert_eq!(
+            next_lands_on(&before, Some("u2")).as_deref(),
+            Some("u3"),
+            "a Next after a skip to c still on its way"
+        );
+        let unavailable = player_state(
+            provided("spotify:track:a", "u0", "context"),
+            vec![
+                provided("spotify:track:b", "u1", "unavailable"),
+                provided("spotify:track:c", "u2", "autoplay"),
+            ],
+        );
+        assert_eq!(
+            next_lands_on(&unavailable, None).as_deref(),
+            Some("u2"),
+            "Next passes an unavailable song"
         );
     }
 

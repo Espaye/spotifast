@@ -406,6 +406,8 @@ impl RemoteQueue {
     fn show(&mut self, cluster: Cluster) {
         self.device = cluster.active_device_id;
         self.state = cluster.player_state.into_option();
+        let playing = self.state.as_ref().and_then(|state| state.track.as_ref());
+        retire_landed(&mut self.target, playing.map(row_key));
     }
 
     /// The uid of the Next up row of `device` holding the `occurrence`th
@@ -553,7 +555,7 @@ pub struct Engine {
     carrying: std::sync::atomic::AtomicBool,
     /// The row the last queue skip or Next goes to, while its Nexts may
     /// still be on their way through the Connect task.
-    skip_target: Mutex<Option<SkipTarget>>,
+    skip_target: Arc<Mutex<Option<SkipTarget>>>,
     /// What another device has coming up, for a queue skip sent there.
     remote_queue: Arc<Mutex<RemoteQueue>>,
 }
@@ -567,6 +569,37 @@ struct SkipTarget {
 /// Each of a skip's Nexts waits for a Connect state update, a fraction of
 /// a second; by this age the skip has landed or its list is gone.
 const SKIP_TARGET_LIFE: Duration = Duration::from_secs(20);
+
+/// Forgets the row a skip or Next goes to once it is `playing`. Counted
+/// after that row, a later click would leave out the Nexts already taken
+/// if another app stepped back to the song before it.
+fn retire_landed(target: &mut Option<SkipTarget>, playing: Option<&str>) {
+    if target
+        .as_ref()
+        .is_some_and(|target| playing == Some(target.key.as_str()))
+    {
+        *target = None;
+    }
+}
+
+/// Retires the engine's skip target as each Connect state update shows
+/// the row it goes to playing.
+async fn retire_landed_skips(
+    mut states: tokio::sync::watch::Receiver<Option<PlayerState>>,
+    target: Arc<Mutex<Option<SkipTarget>>>,
+) {
+    while states.changed().await.is_ok() {
+        // Out of the watch before the target is locked: a skip holds the
+        // target while it reads the watch.
+        let playing = Option::as_ref(&*states.borrow_and_update())
+            .and_then(|state| state.track.as_ref())
+            .map(|track| row_key(track).to_owned());
+        retire_landed(
+            &mut target.lock().unwrap_or_else(|p| p.into_inner()),
+            playing.as_deref(),
+        );
+    }
+}
 
 impl Engine {
     pub(crate) fn credentials(&self) -> Option<Credentials> {
@@ -671,6 +704,12 @@ impl Engine {
             }
         });
 
+        let skip_target: Arc<Mutex<Option<SkipTarget>>> = Arc::default();
+        tokio::spawn(retire_landed_skips(
+            spirc.watch_player_state(),
+            Arc::clone(&skip_target),
+        ));
+
         let device_id = config.device_id();
         Ok(Self {
             player,
@@ -684,7 +723,7 @@ impl Engine {
             closing,
             audio,
             carrying: std::sync::atomic::AtomicBool::new(carrying),
-            skip_target: Mutex::new(None),
+            skip_target,
             remote_queue,
         })
     }
@@ -2379,6 +2418,44 @@ mod tests {
             Some("u3"),
             "the first copy is above the row the first skip goes to"
         );
+    }
+
+    /// Once the row a skip went to plays, the next click counts from the
+    /// top again, even after another app steps back to the song before it.
+    #[test]
+    fn a_skip_target_is_forgotten_once_its_row_plays() {
+        let push = |playing: ProvidedTrack, next: &[ProvidedTrack]| {
+            let mut pushed = Cluster::new();
+            pushed.active_device_id = "sonos".into();
+            let state = pushed.player_state.mut_or_insert_default();
+            *state.track.mut_or_insert_default() = playing;
+            state.next_tracks = next.to_vec();
+            pushed
+        };
+        let a = provided("spotify:track:a", "u0", "context");
+        let next = [
+            provided("spotify:track:b", "u1", "context"),
+            provided("spotify:track:c", "u2", "context"),
+            provided("spotify:track:b", "u3", "context"),
+        ];
+        let mut queue = RemoteQueue::default();
+        queue.show(push(a.clone(), &next));
+        let first = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(first.as_deref(), Some("u1"));
+
+        queue.show(push(next[0].clone(), &next[1..]));
+        queue.show(push(a, &next));
+        let again = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(again.as_deref(), Some("u1"), "not the copy after it");
+
+        let mut target = Some(SkipTarget {
+            key: "u1".into(),
+            at: Instant::now(),
+        });
+        retire_landed(&mut target, Some("u0"));
+        assert!(target.is_some(), "still on its way");
+        retire_landed(&mut target, Some("u1"));
+        assert!(target.is_none());
     }
 
     #[test]

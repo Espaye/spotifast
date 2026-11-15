@@ -1,0 +1,25 @@
+"""Capture-only demo covers, applied the same way to the baseline and each
+candidate: bright photos from the same placeholder service instead of its
+random seeds, with the playing song's album (seed 200) on a colourful one."""
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+
+head = "fn image(seed: u32) -> Vec<Image> {\n    vec![\n"
+assert text.count(head) == 1, head
+text = text.replace(
+    head,
+    "fn image(seed: u32) -> Vec<Image> {\n"
+    "    const BRIGHT: [u32; 25] = [\n"
+    "        56, 158, 360, 499, 274, 402, 184, 110, 152, 82, 503, 167, 429, 53, 54, 63, 102,\n"
+    "        106, 165, 247, 287, 352, 164, 21, 75,\n"
+    "    ];\n"
+    "    let seed = BRIGHT[seed as usize % BRIGHT.len()];\n"
+    "    vec![\n",
+)
+old = "picsum.photos/seed/spotifast{seed}/"
+assert text.count(old) == 3, old
+text = text.replace(old, "picsum.photos/id/{seed}/")
+open(path, "w", encoding="utf-8", newline="\n").write(text)
+print("covers patched")

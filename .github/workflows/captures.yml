@@ -14,7 +14,7 @@ jobs:
           - name: before
             ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
           - name: after
-            ref: playing-bars
+            ref: full-screen-lyrics
             record: record
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libxkbcommon-dev \
             libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri fonts-noto-cjk \
-            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2 ffmpeg
+            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2 ffmpeg xdotool
       - name: Toolchain
         working-directory: app
         run: rustup show active-toolchain || rustup toolchain install
@@ -37,11 +37,13 @@ jobs:
         with:
           workspaces: app
           key: captures-${{ matrix.name }}
+      - name: Bright covers
+        run: python3 tools/.github/capture/patch_covers.py app/src/demo.rs
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo
       - name: Shoot
-        run: bash tools/.github/capture/shoot-bars.sh "$PWD/app/target/debug/spotifast" shots ${{ matrix.record }}
+        run: bash tools/.github/capture/shoot-lyrics.sh "$PWD/app/target/debug/spotifast" shots ${{ matrix.record }}
       - if: always()
         uses: actions/upload-artifact@v4
         with:

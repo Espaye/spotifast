@@ -554,10 +554,12 @@ copy, so a later copy without a uid gets one plain `skip_next` per row down to
 it instead. A second click's command, and a Next or Previous pressed
 meanwhile, waits for the first one's answer. A click right after a Next counts
 its rows from where that Next lands, before the next cluster push shows it,
-and a command that fails leaves the count where it was. A device the Web API
-controls has no such command and gets one Next per row down to the song, the
-song's own row included (one for the top row), each sent after the one before
-it is answered.
+and a command that fails leaves the count where the device got to: where it
+was, or for a Next per row stopped partway, past the rows it passed. A row
+without a uid is told apart by the copies of its song after it. A device the
+Web API controls has no such command and gets one Next per row down to the
+song, the song's own row included (one for the top row), each sent after the
+one before it is answered.
 
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their

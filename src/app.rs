@@ -826,17 +826,18 @@ pub struct App {
     /// device, and when. The songs above it play for a moment at most on
     /// the way, and show nowhere.
     queue_skip: Option<(String, Instant)>,
-    /// That skip, on another device, goes to a later copy of its song: the
-    /// Next answers still to come, its own the last of them. Sent as a Next
-    /// per row, it passes the earlier copies, so until then an answer
-    /// naming the song may be one of those.
+    /// That skip, on another device, goes to a later copy of its song, or
+    /// to the song that played when it was sent: the Next answers still to
+    /// come, its own the last of them. Until then an answer naming the
+    /// song may be a copy passed on the way, or the one from before.
     queue_skip_unanswered: usize,
     /// Nexts and Next up skips sent to another device and not answered
     /// yet. Each is answered as a `Next`.
     next_answers_due: usize,
-    /// That skip, on this computer, goes to a later copy of its song: the
-    /// reports of the song still to come, the chosen copy's included. The
-    /// engine reports each earlier copy as it passes it.
+    /// That skip, on this computer, goes to a later copy of its song, or to
+    /// the song playing again: the reports of the song still to come, the
+    /// chosen copy's included. The engine reports each earlier copy as it
+    /// passes it.
     queue_skip_copies: usize,
     pub playlist_busy: bool,
     pub quit_requested: bool,
@@ -3992,8 +3993,13 @@ impl App {
         if state.track != self.local.track && !passing {
             self.clear_play_pending();
         }
-        // A copy passed on the way does not settle what was asked for.
-        let settles_on = state.track.as_ref().filter(|_| !passing);
+        // A copy passed on the way does not settle what was asked for, and
+        // while the skip goes on, nor does a report that only moves a song
+        // on.
+        let settles_on = state
+            .track
+            .as_ref()
+            .filter(|_| !passing && (track_changed || skipping_to.is_none()));
         self.reconcile_local_track_intent(
             track_changed && !passing,
             settles_on.map(|track| track.uri.as_str()),
@@ -7451,6 +7457,9 @@ impl App {
             self.play_request(PlayRequest::tracks(uris).starting_at_index(index), false);
             return;
         }
+        // A report of the song playing now names the chosen song too.
+        let replays = self.current_track_uri().as_deref() == Some(uri.as_str())
+            || self.now_playing().is_some_and(|now| now.uri == uri);
         let mut skips = index + 1;
         let mut occurrence = 0;
         let mut consumed: Vec<String> = Vec::new();
@@ -7502,7 +7511,11 @@ impl App {
                 // its way lands.
                 self.queue_skip = Some((uri.clone(), Instant::now()));
                 self.queue_skip_unanswered = 0;
-                self.queue_skip_copies = if occurrence > 0 { occurrence + 1 } else { 0 };
+                self.queue_skip_copies = if occurrence > 0 || replays {
+                    occurrence + 1
+                } else {
+                    0
+                };
                 self.backend.player(PlayerCommand::SkipTo {
                     uri,
                     occurrence,
@@ -7522,7 +7535,7 @@ impl App {
                 // the chosen one back in Next up.
                 self.queue_skip = Some((uri.clone(), Instant::now()));
                 self.next_answers_due += 1;
-                self.queue_skip_unanswered = if occurrence > 0 {
+                self.queue_skip_unanswered = if occurrence > 0 || replays {
                     self.next_answers_due
                 } else {
                     0
@@ -21000,6 +21013,9 @@ mod tests {
             state.track = track(passed);
             state.track_sequence += 1;
             app.handle_local(state.clone());
+            // A report of its progress alone settles nothing either.
+            state.position_ms += 1_000;
+            app.handle_local(state.clone());
             assert!(app.queue_skip.is_some(), "{passed} is on the way");
             assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
             assert!(app.play_pending("spotify:track:b"));
@@ -21348,6 +21364,100 @@ mod tests {
         assert!(app.queue_skip.is_some(), "it may be the earlier copy");
 
         report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// A click on a later copy of the song playing waits for its answer:
+    /// until then a report of the song may be the copy from before.
+    #[test]
+    fn a_skip_to_the_song_playing_again_waits_for_its_answer() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:b"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:b",
+            &["spotify:track:c", "spotify:track:b", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_some(), "it may be the song from before");
+        report_sonos_playing(&mut app, "spotify:track:c");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// On this computer too, a click on a later copy of the song playing
+    /// waits for the engine to report that copy, and Spotify's copy of the
+    /// queue from before it is not shown.
+    #[test]
+    fn a_local_skip_to_the_song_playing_again_waits_for_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        let track = |uri: &str| {
+            Some(crate::player::LocalTrack {
+                uri: uri.into(),
+                ..Default::default()
+            })
+        };
+        app.local.track = track("spotify:track:b");
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:b",
+            &["spotify:track:c", "spotify:track:b", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let chosen = (
+            Some("spotify:track:b".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+        let before = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:b"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(before),
+        });
+        assert_eq!(queue_uris(&app), chosen, "the song from before");
+
+        let mut state = app.local.clone();
+        state.track = track("spotify:track:c");
+        state.track_sequence += 1;
+        app.handle_local(state.clone());
+        assert!(app.queue_skip.is_some(), "c is on the way");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+
+        state.track = track("spotify:track:b");
+        state.track_sequence += 1;
+        app.handle_local(state);
         assert!(app.queue_skip.is_none(), "it plays");
     }
 

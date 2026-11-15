@@ -2799,12 +2799,12 @@ mod tests {
                 let tree = accessible_frame(&ctx, &mut app, vec![]);
                 accessible_node(&tree, &gettext(locale, next), Role::Button);
             }
-            // A liked song's heart opens a checklist where unchecking Liked
-            // Songs and choosing Done unlikes it; the heart then likes it at
-            // once (#792).
+            // The heart opens a checklist where unchecking Liked Songs and
+            // choosing Done unlikes the song. The heart of a song saved
+            // nowhere opens the same checklist rather than liking it at once.
             let click = |ctx: &egui::Context, app: &mut App, label: &'static str| {
                 let tree = accessible_frame(ctx, app, vec![]);
-                let button = accessible_node(&tree, &gettext(locale, label), Role::Button);
+                let button = lowest_node(&tree, &gettext(locale, label), Role::Button);
                 accessible_frame(
                     ctx,
                     app,
@@ -2828,14 +2828,23 @@ mod tests {
             assert_eq!(app.is_saved(&now), Some(true), "a check waits for Done");
             click(&ctx, &mut app, "Done");
             assert_eq!(app.is_saved(&now), Some(false));
-            click(&ctx, &mut app, "Save to Liked Songs");
+            click(&ctx, &mut app, "Add to playlist");
+            assert_eq!(app.is_saved(&now), Some(false), "no like at once");
+            let tree = accessible_frame(&ctx, &mut app, vec![]);
+            let liked = accessible_node(&tree, &gettext(locale, "Liked Songs"), Role::CheckBox);
+            accessible_frame(
+                &ctx,
+                &mut app,
+                vec![accessible_action(liked, AccessibleAction::Click, None)],
+            );
+            click(&ctx, &mut app, "Done");
             assert_eq!(app.is_saved(&now), Some(true));
             let tree = accessible_frame(&ctx, &mut app, vec![]);
             assert!(
                 !tree.nodes.iter().any(|(_, node)| {
                     node.label() == Some(gettext(locale, "Filter playlists").as_ref())
                 }),
-                "liking a song does not open the menu"
+                "Done closes the menu"
             );
 
             app.remote = None;
@@ -13489,10 +13498,11 @@ mod tests {
     fn saved_toggles_stay_green_while_hovered() {
         // alb0 is saved, its first song is liked, and so is the song in
         // the player bar, so all three save toggles show their on state.
+        // Every song's heart has the same name, so the topmost row's wins.
         type Pick = fn(&egui::accesskit::Rect) -> bool;
         let targets: [(&str, &str, Pick); 3] = [
             ("album header", "Remove from Your Library", |_| true),
-            ("song row", "Remove from Liked Songs", |b| b.y1 < 700.0),
+            ("song row", "Add to playlist", |b| b.y1 < 700.0),
             ("player bar", "Add to playlist", |b| b.y0 > 700.0),
         ];
         for theme in ["dark", "light"] {
@@ -13532,7 +13542,8 @@ mod tests {
                         node.label() == Some(label) && node.role() == egui::accesskit::Role::Button
                     })
                     .filter_map(|(_, node)| node.bounds())
-                    .find(pick)
+                    .filter(pick)
+                    .min_by(|a, b| a.y0.total_cmp(&b.y0))
                     .unwrap_or_else(|| panic!("missing {place} {label:?}"));
                 let centre = egui::pos2(
                     (bounds.x0 + bounds.x1) as f32 / 2.0,

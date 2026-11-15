@@ -36,7 +36,7 @@ if [ "$record" = record ]; then
       --demo-size 1280x800 "${show[@]}" &
     app=$!
     sleep 8
-    ffmpeg -loglevel error -y -f x11grab -video_size 1280x800 -framerate 30 -i :99 -t 4 \
+    ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :99 -t 4 \
       -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/bars-1280x800-$theme.mp4" \
       || { echo "FAILED recording $theme"; failed=1; }
     kill $app 2>/dev/null; wait $app 2>/dev/null

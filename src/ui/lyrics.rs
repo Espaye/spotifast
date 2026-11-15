@@ -45,6 +45,31 @@ fn music_note(ui: &mut egui::Ui, size: f32, color: Color32, sense: Sense) -> egu
     response
 }
 
+/// What a line `grown` times its quiet size is drawn from: the size its
+/// letters are laid out at, as a multiple of the quiet size, and how far
+/// that picture is then scaled. Letters are only ever drawn at the quiet
+/// and the sung size. The font atlas keeps every letter at every size it
+/// was asked for until it is full, so a line growing through a size of its
+/// own each frame fills it with letters used once, up to a gigabyte (#954).
+fn drawn_from(grown: f32) -> (f32, f32) {
+    if grown < (1.0 + SUNG_LINE_GROWTH) / 2.0 {
+        (1.0, grown)
+    } else {
+        (SUNG_LINE_GROWTH, grown / SUNG_LINE_GROWTH)
+    }
+}
+
+/// `galley` drawn `scale` times as large, from the letters it already has
+/// in the font atlas.
+fn scaled(galley: std::sync::Arc<egui::Galley>, scale: f32) -> std::sync::Arc<egui::Galley> {
+    if scale == 1.0 {
+        return galley;
+    }
+    let mut shape = egui::epaint::TextShape::new(pos2(0.0, 0.0), galley, Color32::TRANSPARENT);
+    shape.transform(egui::emath::TSTransform::from_scaling(scale));
+    shape.galley
+}
+
 fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     egui::Color32::from(egui::Rgba::from(from) * (1.0 - t) + egui::Rgba::from(to) * t)
@@ -1174,21 +1199,25 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, scroll_right: f32, cont
                 } else {
                     1.0
                 };
-                let font = theme::bold(size * grown);
+                // On its way between quiet and sung, a line is the nearer
+                // size's letters scaled, never a size of its own.
+                let (drawn, scale) = drawn_from(grown);
+                let font = theme::bold(size * drawn);
                 let full = theme::bold(size * SUNG_LINE_GROWTH);
                 // Untimed words have nowhere to jump to, but a click on them
                 // is still on a line, so it must not reach the backdrop.
                 let sense = Sense::click();
                 let note = line.text.is_empty() && lyrics.synced;
                 let galley = (!note).then(|| {
-                    crate::bidi::layout_on_rows_of(
+                    let galley = crate::bidi::layout_on_rows_of(
                         ui.painter(),
                         &line.text,
                         font,
                         full,
                         color,
                         column,
-                    )
+                    );
+                    scaled(galley, scale)
                 });
                 let height = galley
                     .as_ref()
@@ -1320,6 +1349,24 @@ mod tests {
         let (padding, _) = room_around_lyrics(true, 701.3, 37.7);
         lines_scroll_as_one(padding, &[27.0, 27.0 + 1.0 / 3.0], 37.7);
         lines_scroll_as_one(room_around_lyrics(false, 701.3, 37.7).0, &[27.0], 37.7);
+    }
+
+    /// A line lighting up or fading passes through a size of its own every
+    /// frame. Its letters are laid out at the quiet or the sung size all
+    /// the way, and scaled to the rest, so the font atlas is asked for two
+    /// sizes however long the songs go on.
+    #[test]
+    fn a_growing_line_is_drawn_from_the_quiet_or_the_sung_letters() {
+        let sung = super::SUNG_LINE_GROWTH;
+        for step in 0..=300 {
+            let grown = 1.0 + (sung - 1.0) * step as f32 / 300.0;
+            let (drawn, scale) = super::drawn_from(grown);
+            assert!(drawn == 1.0 || drawn == sung, "step {step}");
+            assert!((drawn * scale - grown).abs() < 1e-6, "step {step}");
+        }
+        // At rest a line is its letters as they were drawn.
+        assert_eq!(super::drawn_from(1.0), (1.0, 1.0));
+        assert_eq!(super::drawn_from(sung), (sung, 1.0));
     }
 
     /// A sentence wrapped over two lines is gone by the time its top line

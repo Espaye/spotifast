@@ -125,7 +125,13 @@ not consume a queue row or restore an older queue saved on this computer.
 
 5. **Playing a row from the queue skips to it.** The rows above it are
    skipped and removed, as if you had pressed Next down to it. The rows
-   below it stay, and the playlist keeps going afterwards.
+   below it stay, and the playlist keeps going afterwards. Until the player
+   reaches the song, here or on another device, the chosen row stays the
+   playing one and the songs passed on the way show nowhere: not as the
+   song playing, not in the player bar, and not as a queue in which the
+   chosen song is still waiting. A second row clicked meanwhile is counted
+   on the rows as shown. A skip that has not landed after twelve seconds
+   gives way to what Spotify reports.
 
 6. **Starting a playlist or album keeps your songs.** The rows underneath
    change to the new collection; your songs stay under **Playing next**

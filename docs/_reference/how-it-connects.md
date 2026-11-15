@@ -546,6 +546,14 @@ commands go there directly.
 Shuffle Play enables shuffle before starting the context, as it does for
 Web API devices. If enabling shuffle fails, playback does not start.
 
+Playing a row of Next up is one `skip_next` command that names the row, as
+Spotify's own apps send it: the song's URI, and the row's uid when the latest
+Connect cluster push listed that device's next tracks, which tells copies of a
+song apart. The device goes to that row itself. A second click's command waits
+for the first one's answer. A device the Web API controls has no such command
+and gets one Next per row above the song, each sent after the one before it
+is answered.
+
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their
 places, and a failed write stops the remaining songs. Signing out cancels

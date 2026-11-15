@@ -372,6 +372,15 @@ pub enum ApiRequest {
         flag: bool,
         repeat: String,
     },
+    /// Skips the device playing elsewhere to a row of its Next up: the
+    /// `occurrence`th copy of `uri`, `skips` rows down. Answered as
+    /// `Remote` with the `Next` action.
+    SkipTo {
+        device_id: Option<String>,
+        uri: String,
+        occurrence: usize,
+        skips: usize,
+    },
     Transfer {
         device_id: String,
         play: bool,
@@ -1208,6 +1217,8 @@ pub struct Backend {
     #[cfg(test)]
     transfer_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
+    queue_skip_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
     queue_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
     queued_tracks: std::sync::Mutex<Vec<String>>,
@@ -1310,6 +1321,8 @@ impl Backend {
             remote_shuffle_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             transfer_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            queue_skip_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             queue_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -1451,6 +1464,13 @@ impl Backend {
         #[cfg(test)]
         if matches!(request, ApiRequest::Transfer { .. }) {
             self.transfer_requests.lock().unwrap().push(request.clone());
+        }
+        #[cfg(test)]
+        if matches!(request, ApiRequest::SkipTo { .. }) {
+            self.queue_skip_requests
+                .lock()
+                .unwrap()
+                .push(request.clone());
         }
         #[cfg(test)]
         if matches!(
@@ -1618,6 +1638,11 @@ impl Backend {
     #[cfg(test)]
     pub fn take_remote_shuffle_requests(&self) -> Vec<ApiRequest> {
         std::mem::take(&mut *self.remote_shuffle_requests.lock().unwrap())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_queue_skip_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(&mut *self.queue_skip_requests.lock().unwrap())
     }
 
     #[cfg(test)]
@@ -5093,6 +5118,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::PlaybackState { .. }
         | ApiRequest::Queue { .. }
         | ApiRequest::Remote { .. }
+        | ApiRequest::SkipTo { .. }
         | ApiRequest::Transfer { .. }
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
@@ -6031,6 +6057,25 @@ async fn handle(
             };
             ApiResponse::Remote { action, result }
         }
+        ApiRequest::SkipTo {
+            device_id, skips, ..
+        } => {
+            // The Web API has no skip that names its song. One Next per
+            // row, each sent once the one before it is answered, so they
+            // reach the device in turn and the first refusal ends them.
+            let device = device_id.as_deref();
+            let mut result = Ok(());
+            for _ in 0..skips.max(1) {
+                result = routed!(next(device));
+                if result.is_err() {
+                    break;
+                }
+            }
+            ApiResponse::Remote {
+                action: RemoteAction::Next,
+                result,
+            }
+        }
         ApiRequest::ShufflePlay { device_id, play } => {
             let device = device_id.as_deref();
             let result = match routed!(set_shuffle(true, device)) {
@@ -6101,6 +6146,7 @@ async fn handle(
 fn command_device(request: &ApiRequest) -> Option<Option<&str>> {
     match request {
         ApiRequest::Remote { device_id, .. }
+        | ApiRequest::SkipTo { device_id, .. }
         | ApiRequest::ShufflePlay { device_id, .. }
         | ApiRequest::AddToQueue { device_id, .. }
         | ApiRequest::AddManyToQueue { device_id, .. } => Some(device_id.as_deref()),
@@ -6165,6 +6211,25 @@ async fn over_connect(
             ApiResponse::Remote {
                 action: *action,
                 result,
+            }
+        }
+        ApiRequest::SkipTo {
+            device_id,
+            uri,
+            occurrence,
+            ..
+        } => {
+            let to = connect.command_target(device_id.as_deref(), playing.as_deref())?;
+            // One skip that names its row, as Spotify's own apps send it.
+            // In turn, so a second click's skip follows the first one's.
+            let _turn = connect.queue_skip_turn().await;
+            let uid = engine.remote_row(&to, uri, *occurrence);
+            let named_by = if uid.is_some() { "row" } else { "song" };
+            log::info!("queue skip to {uri} on another device, named by its {named_by}");
+            let body = crate::sonos::skip_to_body(uri, uid.as_deref());
+            ApiResponse::Remote {
+                action: RemoteAction::Next,
+                result: crate::sonos::command(session, &to, &body).await,
             }
         }
         ApiRequest::ShufflePlay { device_id, play } => {
@@ -8059,6 +8124,13 @@ mod authorization_tests {
         };
         assert_eq!(command_device(&pause(Some("move"))), Some(Some("move")));
         assert_eq!(command_device(&pause(None)), Some(None));
+        let skip = ApiRequest::SkipTo {
+            device_id: Some("move".into()),
+            uri: "spotify:track:c".into(),
+            occurrence: 0,
+            skips: 3,
+        };
+        assert_eq!(command_device(&skip), Some(Some("move")));
         assert_eq!(command_device(&ApiRequest::Devices), None);
     }
 

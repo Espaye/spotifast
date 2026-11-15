@@ -128,16 +128,36 @@ pub fn layout_on_rows_of(
         usize::MAX,
         None,
     );
+    // Each row is cut from the text its glyphs came from. A glyph carries
+    // only the first character of its cluster, so a mark the shaper draws
+    // as a glyph of its own would come back as the letter it sits on.
+    let source = sized.job.text.as_str();
+    let starts: Vec<Option<usize>> = sized
+        .rows
+        .iter()
+        .map(|placed| row_start(&placed.row))
+        .collect();
     let mut rows = String::new();
     let mut wrapped = false;
-    for (index, row) in sized.rows.iter().enumerate() {
+    for (index, placed) in sized.rows.iter().enumerate() {
         if index > 0 {
             rows.push('\n');
         }
+        // A row runs to where the next one holding anything begins, less
+        // the line breaks between them.
+        let end = starts[index + 1..]
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or(source.len());
+        let piece = starts[index]
+            .and_then(|start| source.get(start..end))
+            .unwrap_or_default()
+            .trim_end_matches('\n');
         // A row that wraps ends at its space; the space has nowhere to go.
-        let piece = row.text();
-        let piece = if wrapped { piece.trim_start() } else { &piece };
-        wrapped = !row.ends_with_newline;
+        let piece = if wrapped { piece.trim_start() } else { piece };
+        wrapped = !placed.ends_with_newline;
         rows.push_str(if wrapped { piece.trim_end() } else { piece });
     }
     let mut job = LayoutJob::simple(rows, font, color, f32::INFINITY);
@@ -149,6 +169,11 @@ pub fn layout_on_rows_of(
         reorder(&mut galley);
     }
     galley
+}
+
+/// Where in its galley's text a row begins, if it holds anything.
+fn row_start(row: &Row) -> Option<usize> {
+    row.glyphs.iter().map(|glyph| glyph.cluster as usize).min()
 }
 
 /// Fills rows with whole words up to `wrap_width`, at most `max_rows` of
@@ -757,6 +782,44 @@ mod tests {
                     Some(ELLIPSIS),
                 );
                 assert_eq!(galley.text(), word);
+            }
+        });
+        output.textures_delta.clear();
+    }
+
+    /// The rows are cut from the line itself, so a mark the shaper draws as
+    /// a glyph of its own keeps its character: Arabic vowels and shadda,
+    /// Hebrew points and Devanagari conjuncts come back as they went in.
+    #[test]
+    fn a_line_on_its_rows_keeps_its_marks() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let painter = ui.painter();
+            let full = FontId::proportional(44.0 * 1.15);
+            for line in [
+                "مُحَمَّدٌ رَسُولُ السَّلَامِ فِي الْبَحْرِ",
+                "בְּרֵאשִׁית בָּרָא אֱלֹהִים אֵת הַשָּׁמַיִם",
+                "नमस्ते दुनिया क्षत्रिय श्रीमान् प्रार्थना",
+            ] {
+                let whole = painter
+                    .layout_no_wrap(line.to_owned(), full.clone(), Color32::WHITE)
+                    .size()
+                    .x;
+                for share in [0.35, 0.5, 1.5] {
+                    let galley = layout_on_rows_of(
+                        painter,
+                        line,
+                        FontId::proportional(44.0),
+                        full.clone(),
+                        Color32::WHITE,
+                        whole * share,
+                    );
+                    assert_eq!(galley.job.text.replace('\n', " "), line, "{share}");
+                }
             }
         });
         output.textures_delta.clear();

@@ -223,7 +223,8 @@ impl App {
 
     /// The song `request` plays on its own, when its radio may follow it:
     /// Autoplay is on, Repeat is off, and the session can find the radio.
-    /// Soloist is Spotify's own player, which keeps playing by itself.
+    /// Soloist is left out: its own play command can start a lone song as
+    /// a context of its own, which Spotify's Autoplay follows.
     fn lone_song(&self, request: &PlayRequest) -> Option<String> {
         // A song can also be its own context, as a search match is; the
         // song its offset names, when it names one, is the one that plays.

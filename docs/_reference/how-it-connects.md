@@ -73,8 +73,9 @@ Spotifast uses separate credentials for Web API access and local playback:
    Autoplay on, a single song played on another device, which would stop
    after it, waits up to two seconds for its station the same way, and plays
    first with the station's songs after it; a station that fails or is late
-   leaves the song to play alone. Soloist plays through Spotify's own
-   player, which keeps going by itself.
+   leaves the song to play alone. Soloist is left out: its own play
+   command can start a lone song as a context of its own, which Spotify's
+   Autoplay follows.
    Play counts on album pages and an artist's popular songs come from the
    same Pathfinder queries Spotify's own album and artist pages make, with the
    session's token and an already verified Web API grant. Albums are read once

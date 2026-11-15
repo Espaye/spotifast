@@ -1279,8 +1279,8 @@ mod tests {
                 for step in 0..40 {
                     let mut tops = Vec::new();
                     ctx.run_ui(egui::RawInput::default(), |ui| {
-                        let area = egui::ScrollArea::vertical()
-                            .vertical_scroll_offset(step as f32 / 7.0);
+                        let area =
+                            egui::ScrollArea::vertical().vertical_scroll_offset(step as f32 / 7.0);
                         area.show(ui, |ui| {
                             let top = ui.cursor().top();
                             ui.add_space(padding);

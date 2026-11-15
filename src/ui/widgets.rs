@@ -2377,9 +2377,8 @@ fn playing_bar_halves(time: f64) -> [f32; 6] {
         (6.3, 5.6, 3.1, 3.7),
     ];
     WAVES.map(|(fast, fast_phase, slow, slow_phase)| {
-        let swing = 0.5
-            + 0.25 * (time * fast + fast_phase).sin()
-            + 0.25 * (time * slow + slow_phase).sin();
+        let swing =
+            0.5 + 0.25 * (time * fast + fast_phase).sin() + 0.25 * (time * slow + slow_phase).sin();
         LOW + (HIGH - LOW) * swing as f32
     })
 }

@@ -6360,11 +6360,12 @@ async fn over_connect(
             log::info!("queue skip to {uri} on another device, {named_by}");
             let bodies = crate::sonos::skip_to_commands(uri, uid.as_deref(), *occurrence, *skips);
             let mut result = Ok(());
-            for body in &bodies {
+            for (sent, body) in bodies.iter().enumerate() {
                 result = crate::sonos::command(session, &to, body).await;
                 if result.is_err() {
-                    // A later click counts from where the device was.
-                    engine.remote_step_failed();
+                    // A later click counts from where the device got to,
+                    // past the rows the commands before this one passed.
+                    engine.remote_skip_stopped(&to, sent);
                     break;
                 }
             }

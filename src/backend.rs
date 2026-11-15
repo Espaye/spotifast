@@ -6315,6 +6315,13 @@ async fn over_connect(
             // A Next or Previous goes in turn with skips to a Next up row,
             // so it cannot overtake one still waiting and be undone by it.
             let _turn = connect.command_turn(*action).await;
+            // A skip right after it counts its rows from where it lands.
+            let step = matches!(action, RemoteAction::Next | RemoteAction::Previous);
+            match action {
+                RemoteAction::Next => engine.note_remote_next(&to),
+                RemoteAction::Previous => engine.note_remote_previous(),
+                _ => {}
+            }
             let result = match crate::sonos::command_body(
                 *action,
                 play.as_ref(),
@@ -6325,6 +6332,9 @@ async fn over_connect(
                 Some(body) => crate::sonos::command(session, &to, &body).await,
                 None => crate::sonos::set_volume(session, &to, *percent).await,
             };
+            if step && result.is_err() {
+                engine.remote_step_failed();
+            }
             ApiResponse::Remote {
                 action: *action,
                 result,
@@ -6353,6 +6363,8 @@ async fn over_connect(
             for body in &bodies {
                 result = crate::sonos::command(session, &to, body).await;
                 if result.is_err() {
+                    // A later click counts from where the device was.
+                    engine.remote_step_failed();
                     break;
                 }
             }

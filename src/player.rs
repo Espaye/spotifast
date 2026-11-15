@@ -399,6 +399,8 @@ struct RemoteQueue {
     device: String,
     state: Option<PlayerState>,
     target: Option<SkipTarget>,
+    /// The row before the last command moved it, for one that fails.
+    before: Option<SkipTarget>,
 }
 
 impl RemoteQueue {
@@ -408,6 +410,7 @@ impl RemoteQueue {
         self.state = cluster.player_state.into_option();
         let playing = self.state.as_ref().and_then(|state| state.track.as_ref());
         retire_landed(&mut self.target, playing.map(row_key));
+        retire_landed(&mut self.before, playing.map(row_key));
     }
 
     /// The uid of the Next up row of `device` holding the `occurrence`th
@@ -416,14 +419,8 @@ impl RemoteQueue {
     /// the song is not in it, or its row has no uid: that skip names the
     /// song alone.
     fn row(&mut self, device: &str, uri: &str, occurrence: usize) -> Option<String> {
-        if self
-            .target
-            .as_ref()
-            .is_some_and(|target| target.at.elapsed() >= SKIP_TARGET_LIFE)
-        {
-            self.target = None;
-        }
-        let pending = self.target.as_ref().map(|target| target.key.as_str());
+        let earlier = self.pending();
+        let pending = earlier.as_ref().map(|target| target.key.as_str());
         // A copy above the row that skip goes to is behind the device by
         // now, so it is not the one meant.
         let key = self
@@ -433,11 +430,51 @@ impl RemoteQueue {
             .and_then(|state| queue_skip(state, pending, uri, occurrence))
             .filter(|skip| skip.skips > 0)
             .map(|skip| skip.key);
+        self.before = earlier;
         self.target = key.clone().map(|key| SkipTarget {
             key,
             at: Instant::now(),
         });
         key.filter(|key| key != uri)
+    }
+
+    /// Moves the row a later skip counts from on to where a Next about to
+    /// be sent to `device` lands. The cluster push that shows it comes
+    /// after the command's answer, and a click before it would otherwise
+    /// name a copy the device has already passed.
+    fn note_next(&mut self, device: &str) {
+        let earlier = self.pending();
+        let pending = earlier.as_ref().map(|target| target.key.as_str());
+        let lands = self
+            .state
+            .as_ref()
+            .filter(|_| self.device == device)
+            .and_then(|state| next_lands_on(state, pending));
+        self.before = earlier;
+        self.target = lands.map(|key| SkipTarget {
+            key,
+            at: Instant::now(),
+        });
+    }
+
+    /// Previous moves the list differently from the row a skip counts
+    /// from, so the next click counts from the top.
+    fn note_previous(&mut self) {
+        self.before = self.pending();
+    }
+
+    /// Puts back the row a later skip counts from, as it was before a
+    /// command the device refused or never got.
+    fn refused(&mut self) {
+        self.target = self.before.take();
+    }
+
+    /// Takes the row a skip still on its way goes to, unless it is too old
+    /// to be on its way.
+    fn pending(&mut self) -> Option<SkipTarget> {
+        self.target
+            .take()
+            .filter(|target| target.at.elapsed() < SKIP_TARGET_LIFE)
     }
 }
 
@@ -951,6 +988,32 @@ impl Engine {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .row(device, uri, occurrence)
+    }
+
+    /// Notes a Next about to be sent to `device`, playing elsewhere, for a
+    /// skip after it to count its rows from.
+    pub fn note_remote_next(&self, device: &str) {
+        self.remote_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .note_next(device);
+    }
+
+    /// Notes a Previous about to be sent to another device.
+    pub fn note_remote_previous(&self) {
+        self.remote_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .note_previous();
+    }
+
+    /// The last skip, Next or Previous sent to another device failed: a
+    /// later skip counts from where the device was before it.
+    pub fn remote_step_failed(&self) {
+        self.remote_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .refused();
     }
 
     pub fn shutdown(&self) {
@@ -2496,6 +2559,39 @@ mod tests {
         assert!(target.is_some(), "still on its way");
         retire_landed(&mut target, Some("u1"));
         assert!(target.is_none());
+    }
+
+    /// A Next sent to another device moves the row a click right after it
+    /// counts from, before any cluster push shows it, and Previous sends
+    /// the count back to the top. A command that fails gives back the row
+    /// from before it.
+    #[test]
+    fn a_skip_on_another_device_follows_its_next_and_failures() {
+        let mut pushed = cluster("sonos", "spotify:track:now", true, 30_000);
+        pushed.player_state.mut_or_insert_default().next_tracks = vec![
+            provided("spotify:track:b", "u1", "context"),
+            provided("spotify:track:c", "u2", "context"),
+            provided("spotify:track:b", "u3", "context"),
+            provided("spotify:track:d", "u4", "context"),
+        ];
+        let mut queue = RemoteQueue::default();
+        queue.show(pushed);
+
+        queue.note_next("sonos");
+        let after_next = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(after_next.as_deref(), Some("u3"), "not the copy passed");
+
+        queue.note_previous();
+        let after_previous = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(after_previous.as_deref(), Some("u1"));
+
+        let refused = queue.row("sonos", "spotify:track:c", 0);
+        assert_eq!(refused.as_deref(), Some("u2"));
+        queue.refused();
+        let again = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(again.as_deref(), Some("u3"), "after the first skip");
+        queue.refused();
+        assert!(queue.target.is_some(), "the first skip stands");
     }
 
     #[test]

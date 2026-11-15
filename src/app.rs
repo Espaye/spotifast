@@ -12988,6 +12988,11 @@ impl App {
                     Target::Local => self.backend.player(PlayerCommand::Next),
                     Target::Remote(device_id) => self.remote(RemoteAction::Next, device_id),
                 }
+                if skipping && self.queue_skip_unanswered > 0 {
+                    // Its song is one more Next away, and the Web API may
+                    // answer that Next before the skip.
+                    self.queue_skip_unanswered = self.next_answers_due;
+                }
             }
             // Previous restarts after three seconds and otherwise steps back,
             // matching librespot.
@@ -21318,6 +21323,55 @@ mod tests {
             result: Ok(()),
         });
         report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// Next pressed while a skip to a later copy is on its way moves the
+    /// skip one song on. The Web API may answer that Next first, and the
+    /// skip still waits for its own answer.
+    #[test]
+    fn a_next_answered_before_the_skip_it_follows_does_not_end_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:d",
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 3,
+            },
+            &ctx,
+        );
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:d"));
+
+        // The Next's answer, then the first d, passed on the way.
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:d");
+        assert!(app.queue_skip.is_some(), "its Nexts are still going");
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:d");
         assert!(app.queue_skip.is_none(), "it plays");
     }
 

@@ -21100,12 +21100,18 @@ mod tests {
             Some("spotify:track:c"),
             "the song passed on the way does not show as playing"
         );
-        assert!(app.play_pending("spotify:track:c"), "the chosen song still loads");
+        assert!(
+            app.play_pending("spotify:track:c"),
+            "the chosen song still loads"
+        );
         assert_eq!(queue_uris(&app), chosen);
 
         let halfway = Queue {
             currently_playing: Some(queued_song("spotify:track:b")),
-            queue: vec![queued_song("spotify:track:c"), queued_song("spotify:track:d")],
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:d"),
+            ],
         };
         for _ in 0..=QUEUE_STALE_RETRIES {
             app.handle_api(ApiResponse::Queue {

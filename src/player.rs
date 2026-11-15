@@ -2147,13 +2147,11 @@ mod tests {
             queue_skip(&state, None, "spotify:track:c", 0),
             Some(QueueSkip {
                 skips: 2,
-                key: "u3".into()
+                key: "u3".into(),
             }),
             "the screen's row count would say four"
         );
-        let skips = |uri: &str, occurrence| {
-            queue_skip(&state, None, uri, occurrence).map(|skip| skip.skips)
-        };
+        let skips = |uri: &str, n| queue_skip(&state, None, uri, n).map(|skip| skip.skips);
         assert_eq!(skips("spotify:track:a", 1), Some(3), "the second copy");
         assert_eq!(
             skips("spotify:track:b", 0),
@@ -2173,7 +2171,8 @@ mod tests {
             provided("spotify:track:c", "u3", "autoplay"),
             provided("spotify:track:d", "u4", "autoplay"),
         ];
-        let before = player_state(provided("spotify:track:now", "u0", "context"), next.clone());
+        let now = provided("spotify:track:now", "u0", "context");
+        let before = player_state(now, next.clone());
         let halfway = player_state(next[0].clone(), next[1..].to_vec());
         let landed = player_state(next[2].clone(), next[3..].to_vec());
         for state in [&before, &halfway, &landed] {
@@ -2181,7 +2180,7 @@ mod tests {
                 queue_skip(state, Some("u3"), "spotify:track:d", 0),
                 Some(QueueSkip {
                     skips: 1,
-                    key: "u4".into()
+                    key: "u4".into(),
                 })
             );
         }
@@ -2189,7 +2188,7 @@ mod tests {
             queue_skip(&before, Some("u3"), "spotify:track:b", 0),
             Some(QueueSkip {
                 skips: 0,
-                key: "u3".into()
+                key: "u3".into(),
             }),
             "a row above the target leaves the first skip standing"
         );

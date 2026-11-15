@@ -1278,7 +1278,7 @@ mod tests {
                 let mut first = None;
                 for step in 0..40 {
                     let mut tops = Vec::new();
-                    let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
                         let area =
                             egui::ScrollArea::vertical().vertical_scroll_offset(step as f32 / 7.0);
                         area.show(ui, |ui| {
@@ -1292,6 +1292,7 @@ mod tests {
                             }
                         });
                     });
+                    output.textures_delta.clear();
                     let gaps: Vec<f32> = tops
                         .windows(2)
                         .map(|pair| (pair[1] * scale).round() - (pair[0] * scale).round())

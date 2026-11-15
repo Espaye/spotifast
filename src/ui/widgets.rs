@@ -5960,12 +5960,13 @@ mod playing_bars_tests {
     fn the_playing_bars_slow_down_with_other_animations() {
         use crate::power::Budget;
         use std::time::Duration;
-        // The repaint delay egui is left with after a playing row's second
-        // pass, the first being a new context's.
+        // The repaint delay egui is left with after a playing row's fourth
+        // pass. A new context repaints at once for its first passes, and a
+        // new area asks for one more.
         let delay = |budget| {
             let ctx = egui::Context::default();
             let mut last = Duration::ZERO;
-            for frame in 1..=2 {
+            for frame in 1..=4 {
                 let mut output = ctx.run_ui(
                     egui::RawInput {
                         time: Some(f64::from(frame) / 60.0),

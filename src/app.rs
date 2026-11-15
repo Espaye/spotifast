@@ -633,6 +633,9 @@ pub struct App {
     /// The play that row stands for: its song and, on this computer, the
     /// engine's count of loaded tracks, so a song played again is new.
     recent_play: Option<(String, Option<u64>)>,
+    /// When the request that dated that row was made, so a song chosen
+    /// again on another device is dated anew.
+    recent_request: Option<Instant>,
     pub recents_generation: u64,
     pub queue_tab: QueueTab,
     pub search: SearchState,
@@ -1411,6 +1414,7 @@ impl App {
             recents_view: std::sync::Arc::from([]),
             recent_playing: None,
             recent_play: None,
+            recent_request: None,
             recents_generation: 0,
             queue_tab: session
                 .queue_tab
@@ -10082,7 +10086,7 @@ impl App {
                         ) && self.intent_track.as_ref().is_some_and(|intent| {
                             matches!(intent.confirmation, TrackConfirmation::Remote { .. })
                         }) {
-                            self.intent_track = None;
+                            self.drop_failed_request();
                             if self.queue_skip.take().is_some() {
                                 // A Next up click that went nowhere: its
                                 // spinner goes and its rows come back.
@@ -10672,14 +10676,21 @@ impl App {
     /// shows it, from the moment it is chosen. The history records it only
     /// once it has played long enough to count.
     fn show_playing_in_recents(&mut self) {
-        let playing = self
-            .requested_track_preview()
+        let requested = self.requested_track_preview();
+        // On another device a song chosen again plays under the same name,
+        // so its request is what makes it a new play.
+        let request = requested
+            .as_ref()
+            .and(self.intent_track.as_ref())
+            .map(|intent| intent.at);
+        let chosen = request.is_some() && request != self.recent_request;
+        let playing = requested
             .or_else(|| self.now_playing_live())
             .filter(|now| !now.uri.is_empty());
         let play = playing
             .as_ref()
             .map(|now| (now.uri.clone(), now.local.then_some(self.local.track_sequence)));
-        if play == self.recent_play {
+        if play == self.recent_play && !chosen {
             return;
         }
         // A song held paused since before is not played now: only one that
@@ -10691,12 +10702,30 @@ impl App {
             return;
         }
         self.recent_play = play;
+        self.recent_request = request.or(self.recent_request);
         self.recent_playing = playing.map(|now| crate::api::models::PlayHistory {
             track: crate::history::played_track(&now),
             played_at: Some(jiff::Timestamp::now().to_string()),
             context: None,
         });
         self.rebuild_recents();
+    }
+
+    /// Drops a play request that failed, and with it the Recent row of the
+    /// song that never started.
+    fn drop_failed_request(&mut self) {
+        let Some(failed) = self.intent_track.take() else {
+            return;
+        };
+        if self
+            .recent_play
+            .as_ref()
+            .is_some_and(|(uri, _)| *uri == failed.uri)
+        {
+            self.recent_play = None;
+            self.recent_playing = None;
+            self.rebuild_recents();
+        }
     }
 
     /// Adds a page of play history to the Recents tab.
@@ -35419,6 +35448,75 @@ mod tests {
         app.show_playing_in_recents();
         assert_eq!(app.recents_view.len(), 1, "one row for the song heard again");
         assert_ne!(shown(&app), last(&app), "heard again");
+        app.backend.shutdown();
+    }
+
+    /// On another device, a song chosen while another is held paused leaves
+    /// the Recent tab when it fails to start, and a song chosen again is
+    /// dated anew at once.
+    #[test]
+    fn recent_follows_requests_on_another_device() {
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.selected_device = Some("speaker".into());
+        app.plays = crate::history::History::default();
+        let track = |id: &str| crate::api::models::Track {
+            id: Some(id.into()),
+            uri: format!("spotify:track:{id}"),
+            name: id.into(),
+            ..Default::default()
+        };
+        for id in ["held", "chosen"] {
+            app.track_cache.insert(id.into(), track(id));
+        }
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(crate::api::models::Device {
+                    id: Some("speaker".into()),
+                    name: "Speaker".into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                item: Some(crate::api::models::PlayableItem::Track(track("held"))),
+                is_playing: false,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        let shown = |app: &App| {
+            app.recents_view
+                .first()
+                .map(|row| (row.track.uri.clone(), row.played_at.clone()))
+        };
+
+        app.expect_track("spotify:track:chosen".into(), 0);
+        app.show_playing_in_recents();
+        assert_eq!(shown(&app).unwrap().0, "spotify:track:chosen");
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Play,
+            result: Err(crate::api::ApiError::Status {
+                status: 502,
+                message: "Bad Gateway".into(),
+            }),
+        });
+        app.show_playing_in_recents();
+        assert_eq!(shown(&app), None, "the chosen song never started");
+
+        let remote = app.remote.as_mut().unwrap();
+        remote.state.item = Some(crate::api::models::PlayableItem::Track(track("chosen")));
+        remote.state.is_playing = true;
+        app.show_playing_in_recents();
+        let before = "2026-01-01T00:00:00Z";
+        if let Some(row) = app.recent_playing.as_mut() {
+            row.played_at = Some(before.into());
+        }
+        app.rebuild_recents();
+        app.expect_track("spotify:track:chosen".into(), 0);
+        app.show_playing_in_recents();
+        let (uri, at) = shown(&app).unwrap();
+        assert_eq!(uri, "spotify:track:chosen");
+        assert_ne!(at.as_deref(), Some(before), "chosen again");
+        assert_eq!(app.recents_view.len(), 1);
         app.backend.shutdown();
     }
 

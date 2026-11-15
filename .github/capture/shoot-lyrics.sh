@@ -21,6 +21,7 @@ shot() {
 }
 failed=0
 for size in 800x600 1280x800 1920x1080; do
+  [ "$record" = only ] && break
   for theme in dark light; do
     shot lyrics lyrics-fullscreen-view "$size" "$theme"
     shot queue lyrics-fullscreen-view,queue "$size" "$theme"
@@ -31,23 +32,24 @@ for size in 800x600 1280x800 1920x1080; do
     shot queue-bar lyrics-fullscreen-view,queue "$size" "$theme" 1500
   done
 done
-if [ "$record" = record ]; then
-  Xvfb :99 -screen 0 1280x800x24 &
+# xvfb-run leaves its own display, :99, locked behind it.
+if [ "$record" = record ] || [ "$record" = only ]; then
+  Xvfb :77 -screen 0 1280x800x24 &
   xvfb=$!
   sleep 2
   for theme in dark light; do
     surfaces=lyrics-fullscreen-view
     [ "$theme" = light ] && surfaces="$surfaces,light"
-    env $(env_for) DISPLAY=:99 timeout 40 "$bin" --demo --demo-page home \
+    env $(env_for) DISPLAY=:77 timeout 40 "$bin" --demo --demo-page home \
       --demo-size 1280x800 --demo-show "$surfaces" &
     app=$!
     # Covers load and the player bar slides away.
     sleep 8
-    ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :99 -t 16 \
+    ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :77 -t 16 \
       -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/full-screen-1280x800-$theme.mp4" &
     rec=$!
     sleep 1.5
-    DISPLAY=:99 xdotool mousemove 600 400 sleep 0.2 mousemove 640 420
+    DISPLAY=:77 xdotool mousemove 600 400 sleep 0.2 mousemove 640 420
     wait $rec || { echo "FAILED recording $theme"; failed=1; }
     kill $app 2>/dev/null; wait $app 2>/dev/null
   done

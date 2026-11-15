@@ -401,6 +401,8 @@ struct RemoteQueue {
     target: Option<SkipTarget>,
     /// The row before the last command moved it, for one that fails.
     before: Option<SkipTarget>,
+    /// The list the last skip was counted on, for one stopped partway.
+    planned: Option<PlayerState>,
 }
 
 impl RemoteQueue {
@@ -431,6 +433,7 @@ impl RemoteQueue {
             .filter(|skip| skip.skips > 0)
             .map(|skip| skip.key);
         self.before = earlier;
+        self.planned = self.state.clone();
         self.target = key.clone().map(|key| SkipTarget {
             key,
             at: Instant::now(),
@@ -471,12 +474,15 @@ impl RemoteQueue {
 
     /// Moves the row a later skip counts from on by the `nexts` of a skip
     /// sent as a Next per row that went through before `device` refused
-    /// one.
+    /// one. They count on the list the skip was counted on, as a push
+    /// since may already show some of them.
     fn stopped(&mut self, device: &str, nexts: usize) {
         self.refused();
+        let shown = std::mem::replace(&mut self.state, self.planned.take());
         for _ in 0..nexts {
             self.note_next(device);
         }
+        self.state = shown;
     }
 
     /// Takes the row a skip still on its way goes to, unless it is too old
@@ -2667,6 +2673,24 @@ mod tests {
         queue.stopped("sonos", 2);
         let after_two = queue.row("sonos", "spotify:track:b", 0);
         assert_eq!(after_two.as_deref(), Some("u4"), "two Nexts went through");
+
+        // A push that shows the second Next landed before the third failed
+        // leaves the two that went through counted once.
+        let mut queue = listed();
+        assert_eq!(queue.row("sonos", "spotify:track:a", 1), None);
+        let mut pushed = cluster("sonos", "spotify:track:b", true, 30_000);
+        let state = pushed.player_state.mut_or_insert_default();
+        state.track.mut_or_insert_default().uid = "u2".into();
+        state.next_tracks = vec![
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u4", "context"),
+            provided("spotify:track:c", "u5", "context"),
+            provided("spotify:track:b", "u6", "context"),
+        ];
+        queue.show(pushed);
+        queue.stopped("sonos", 2);
+        let after_push = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(after_push.as_deref(), Some("u4"), "counted once");
     }
 
     #[test]

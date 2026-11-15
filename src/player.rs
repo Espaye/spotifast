@@ -482,7 +482,11 @@ impl RemoteQueue {
     /// have retired that row.
     fn stopped(&mut self, device: &str, nexts: usize) {
         self.before = None;
-        self.target = self.planned_from.take();
+        // The skip counted from that row, however old it is by now.
+        self.target = self.planned_from.take().map(|from| SkipTarget {
+            at: Instant::now(),
+            ..from
+        });
         let shown = std::mem::replace(&mut self.state, self.planned.take());
         for _ in 0..nexts {
             self.note_next(device);
@@ -2716,7 +2720,7 @@ mod tests {
             provided("spotify:track:b", "u6", "context"),
         ];
         let mut queue = RemoteQueue::default();
-        queue.show(pushed);
+        queue.show(pushed.clone());
         // #given a skip to the first b, then one to the second a after it
         let first = queue.row("sonos", "spotify:track:b", 0);
         assert_eq!(first.as_deref(), Some("u2"));
@@ -2737,6 +2741,19 @@ mod tests {
         // #then the next b is the one after the b those Nexts reached
         let after = queue.row("sonos", "spotify:track:b", 0);
         assert_eq!(after.as_deref(), Some("u6"));
+
+        // #and so when no push came, but the first skip's row has outlived
+        // a skip by the time the second stops
+        let mut queue = RemoteQueue::default();
+        queue.show(pushed);
+        let first = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(first.as_deref(), Some("u2"));
+        assert_eq!(queue.row("sonos", "spotify:track:a", 1), None);
+        let from = queue.planned_from.as_mut().expect("the first skip's row");
+        from.at -= SKIP_TARGET_LIFE;
+        queue.stopped("sonos", 2);
+        let after = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(after.as_deref(), Some("u6"), "not the b passed");
     }
 
     #[test]

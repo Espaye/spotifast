@@ -98,7 +98,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     // visualizer was: a click moves to the next mode. The controls
     // drawn after it take their own clicks.
     if app.settings.player_bar_vis_click && app.visualizers_available() {
-        let empty = ui.interact(behind, ui.id().with("player-bar-visualizer"), Sense::click());
+        let empty = ui.interact(
+            behind,
+            ui.id().with("player-bar-visualizer"),
+            Sense::click(),
+        );
         // An open tooltip stays while the pointer is inside its widget's
         // rect, and this one spans the bar: offer it only while the empty
         // space itself is hovered, not the controls over it, and only

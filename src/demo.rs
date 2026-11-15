@@ -2285,6 +2285,22 @@ mod tests {
             .0
     }
 
+    /// The lowest node with `label` and `role`. Every heart reads Add to
+    /// playlist, so this finds the player bar's below any row's.
+    fn lowest_node(
+        tree: &egui::accesskit::TreeUpdate,
+        label: &str,
+        role: egui::accesskit::Role,
+    ) -> egui::accesskit::NodeId {
+        let top = |node: &egui::accesskit::Node| node.bounds().map_or(0.0, |rect| rect.y0);
+        tree.nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label) && node.role() == role)
+            .max_by(|(_, a), (_, b)| top(a).total_cmp(&top(b)))
+            .unwrap_or_else(|| panic!("missing {label:?} with role {role:?}"))
+            .0
+    }
+
     fn accessible_action(
         target: egui::accesskit::NodeId,
         action: egui::accesskit::Action,

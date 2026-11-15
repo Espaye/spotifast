@@ -641,7 +641,7 @@ pub struct App {
     pub search: SearchState,
     pub playlist_pages: HashMap<String, PlaylistPage>,
     /// Which of the account's own playlists hold each song, for the hearts.
-    membership: crate::playlist_membership::Membership,
+    pub(crate) membership: crate::playlist_membership::Membership,
     /// When the index last looked for playlists to read.
     membership_checked_at: Option<Instant>,
     /// One checkpoint snapshot at a time, including pages evicted while it writes.
@@ -10732,9 +10732,12 @@ impl App {
         let playing = requested
             .or_else(|| self.now_playing_live())
             .filter(|now| !now.uri.is_empty());
-        let play = playing
-            .as_ref()
-            .map(|now| (now.uri.clone(), now.local.then_some(self.local.track_sequence)));
+        let play = playing.as_ref().map(|now| {
+            (
+                now.uri.clone(),
+                now.local.then_some(self.local.track_sequence),
+            )
+        });
         if play == self.recent_play && !chosen {
             return;
         }
@@ -11125,7 +11128,8 @@ impl App {
 
     fn send_remote_play(&mut self, device_id: Option<String>, play: PlayRequest, shuffle: bool) {
         if shuffle {
-            self.backend.api(ApiRequest::ShufflePlay { device_id, play });
+            self.backend
+                .api(ApiRequest::ShufflePlay { device_id, play });
         } else {
             self.backend.api(ApiRequest::Remote {
                 action: RemoteAction::Play,
@@ -21465,10 +21469,7 @@ mod tests {
         );
         let chosen = (
             Some("spotify:track:c".to_string()),
-            vec![
-                "spotify:track:d".to_string(),
-                "spotify:track:e".to_string(),
-            ],
+            vec!["spotify:track:d".to_string(), "spotify:track:e".to_string()],
         );
 
         for passed in ["spotify:track:a", "spotify:track:b", "spotify:track:b"] {
@@ -35655,7 +35656,11 @@ mod tests {
         assert_eq!(shown(&app), last(&app), "the counted play stands");
         app.handle_local(state(Playback::Playing, 2));
         app.show_playing_in_recents();
-        assert_eq!(app.recents_view.len(), 1, "one row for the song heard again");
+        assert_eq!(
+            app.recents_view.len(),
+            1,
+            "one row for the song heard again"
+        );
         assert_ne!(shown(&app), last(&app), "heard again");
         app.backend.shutdown();
     }

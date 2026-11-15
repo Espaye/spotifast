@@ -6198,6 +6198,9 @@ async fn over_connect(
             repeat,
         } => {
             let to = connect.command_target(device_id.as_deref(), playing.as_deref())?;
+            // A Next or Previous goes in turn with skips to a Next up row,
+            // so it cannot overtake one still waiting and be undone by it.
+            let _turn = connect.command_turn(*action).await;
             let result = match crate::sonos::command_body(
                 *action,
                 play.as_ref(),
@@ -6217,19 +6220,31 @@ async fn over_connect(
             device_id,
             uri,
             occurrence,
-            ..
+            skips,
         } => {
             let to = connect.command_target(device_id.as_deref(), playing.as_deref())?;
             // One skip that names its row, as Spotify's own apps send it.
             // In turn, so a second click's skip follows the first one's.
             let _turn = connect.queue_skip_turn().await;
             let uid = engine.remote_row(&to, uri, *occurrence);
-            let named_by = if uid.is_some() { "row" } else { "song" };
-            log::info!("queue skip to {uri} on another device, named by its {named_by}");
-            let body = crate::sonos::skip_to_body(uri, uid.as_deref());
+            let named_by = match &uid {
+                Some(_) => "naming its row",
+                None if *occurrence == 0 => "naming its song",
+                // Naming the song would take the device to its first copy.
+                None => "a Next per row",
+            };
+            log::info!("queue skip to {uri} on another device, {named_by}");
+            let bodies = crate::sonos::skip_to_commands(uri, uid.as_deref(), *occurrence, *skips);
+            let mut result = Ok(());
+            for body in &bodies {
+                result = crate::sonos::command(session, &to, body).await;
+                if result.is_err() {
+                    break;
+                }
+            }
             ApiResponse::Remote {
                 action: RemoteAction::Next,
-                result: crate::sonos::command(session, &to, &body).await,
+                result,
             }
         }
         ApiRequest::ShufflePlay { device_id, play } => {

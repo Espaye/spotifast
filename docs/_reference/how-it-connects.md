@@ -560,10 +560,12 @@ Web API devices. If enabling shuffle fails, playback does not start.
 Playing a row of Next up is one `skip_next` command that names the row, as
 Spotify's own apps send it: the song's URI, and the row's uid when the latest
 Connect cluster push listed that device's next tracks, which tells copies of a
-song apart. The device goes to that row itself. A second click's command waits
-for the first one's answer. A device the Web API controls has no such command
-and gets one Next per row above the song, each sent after the one before it
-is answered.
+song apart. The device goes to that row itself. The song alone names its first
+copy, so a later copy without a uid gets one plain `skip_next` per row down to
+it instead. A second click's command, and a Next or Previous pressed
+meanwhile, waits for the first one's answer. A device the Web API controls has
+no such command and gets one Next per row above the song, each sent after the
+one before it is answered.
 
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their

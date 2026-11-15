@@ -2320,8 +2320,9 @@ impl App {
     /// held and checked once more. Agreement, or two later mismatches, settles
     /// on the reported state. A Next up click's skip has its own time to
     /// land: until then an answer naming another song, the old one or one
-    /// passed on the way, is only a reason to ask again.
-    fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) {
+    /// passed on the way, is only a reason to ask again. Returns whether the
+    /// answer is the one that confirms such a skip has landed.
+    fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) -> bool {
         let skipping = self.queue_skip_in_flight();
         let mut settled = false;
         let mut arrived = false;
@@ -2349,12 +2350,14 @@ impl App {
         } else if recheck {
             self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
         }
-        if arrived && self.queue_skip.take().is_some() {
+        let landed = arrived && self.queue_skip.take().is_some();
+        if landed {
             // It plays. Spotify's copy of the queue gets its own tries to
             // catch up.
             self.clear_play_pending();
             self.queue_stale_retries = 0;
         }
+        landed
     }
 
     /// Playback state shown by the UI, including a recent local request.
@@ -8536,7 +8539,7 @@ impl App {
                                 .as_ref()
                                 .map(|item| item.uri().to_string())
                         });
-                        self.reconcile_remote_track_intent(seq, uri.as_deref());
+                        let skip_landed = self.reconcile_remote_track_intent(seq, uri.as_deref());
                         if let Some(remote) = &self.remote
                             && let Some(device) = &remote.state.device
                             && device.id.is_some()
@@ -8556,8 +8559,10 @@ impl App {
                         }
                         // A song a Next up click passes on its way to its
                         // own is not the song playing: it changes nothing
-                        // on screen or in the queue.
-                        if uri != previous_uri && !self.queue_skip_in_flight() {
+                        // on screen or in the queue. The answer confirming
+                        // the skip is the change, even when an earlier one
+                        // already named its song.
+                        if (uri != previous_uri || skip_landed) && !self.queue_skip_in_flight() {
                             self.on_now_playing_changed();
                         }
                     }
@@ -21403,6 +21408,52 @@ mod tests {
         assert!(app.intent_track.is_some(), "one lagging answer is retried");
         report_sonos_playing(&mut app, "spotify:track:a");
         assert!(app.intent_track.is_none(), "the second one is believed");
+    }
+
+    /// An answer to a poll sent before the click may already name the
+    /// chosen song without confirming it. The answer that does confirm it
+    /// names the same song again, and the arrival is still taken in: the
+    /// queue row it consumed is not consumed a second time later.
+    #[test]
+    fn a_queue_skip_confirmed_by_a_repeated_answer_still_arrives() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &["spotify:track:b", "spotify:track:c", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:c".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(sonos_playing("spotify:track:c"))),
+        });
+        assert!(app.queue_skip.is_some(), "a poll from before the click");
+        assert!(app.queue_start_pending.is_some());
+
+        report_sonos_playing(&mut app, "spotify:track:c");
+        assert!(app.queue_skip.is_none(), "it plays");
+        assert_eq!(
+            app.last_now_playing_uri.as_deref(),
+            Some("spotify:track:c"),
+            "lyrics and tint follow the song"
+        );
+        assert!(
+            app.queue_start_pending.is_none(),
+            "the arrival took in the row the click consumed"
+        );
     }
 
     /// The click names a song: when the rows have shifted under the

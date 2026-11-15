@@ -177,7 +177,7 @@ impl Membership {
     pub(crate) fn by_last_added<'a>(&self, ids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
         let at = |id: &str| self.lists.get(id).and_then(|list| list.last_added);
         let mut ids: Vec<&str> = ids.into_iter().collect();
-        ids.sort_by_key(|id| std::cmp::Reverse(at(*id)));
+        ids.sort_by_key(|id| std::cmp::Reverse(at(id)));
         ids.into_iter().map(str::to_string).collect()
     }
 

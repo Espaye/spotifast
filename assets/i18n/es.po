@@ -4161,7 +4161,7 @@ msgstr "{month} {year}"
 #. Translators: When a song was added or played, less than a minute ago.
 #: src/util.rs:136
 msgid "Just now"
-msgstr ""
+msgstr "Justo ahora"
 
 #. Translators: How long ago a song was added. Keep {count}.
 #: src/util.rs:146

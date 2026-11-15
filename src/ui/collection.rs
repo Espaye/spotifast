@@ -8,12 +8,12 @@ use egui::{Align, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::api::models::{Album, Image, PlayableItem, Playlist, pick_image};
 use crate::app::App;
-use crate::settings::TrackColumns;
 use crate::i18n::{Locale, gettext, ngettext};
 use crate::model::{
     Action, Dialog, DragTrack, Loadable, Page, PagedList, RowContext, RowPick, SortColumn,
     TableItem, TableRowsCache, TableSort, TopPeriod,
 };
+use crate::settings::TrackColumns;
 use crate::theme::{self, Icon, Palette};
 use crate::util;
 

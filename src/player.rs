@@ -401,8 +401,10 @@ struct RemoteQueue {
     target: Option<SkipTarget>,
     /// The row before the last command moved it, for one that fails.
     before: Option<SkipTarget>,
-    /// The list the last skip was counted on, for one stopped partway.
+    /// The list the last skip was counted on, and the row it counted
+    /// from, for one stopped partway.
     planned: Option<PlayerState>,
+    planned_from: Option<SkipTarget>,
 }
 
 impl RemoteQueue {
@@ -432,8 +434,9 @@ impl RemoteQueue {
             .and_then(|state| queue_skip(state, pending, uri, occurrence))
             .filter(|skip| skip.skips > 0)
             .map(|skip| skip.key);
-        self.before = earlier;
         self.planned = self.state.clone();
+        self.planned_from = earlier.clone();
+        self.before = earlier;
         self.target = key.clone().map(|key| SkipTarget {
             key,
             at: Instant::now(),
@@ -474,15 +477,19 @@ impl RemoteQueue {
 
     /// Moves the row a later skip counts from on by the `nexts` of a skip
     /// sent as a Next per row that went through before `device` refused
-    /// one. They count on the list the skip was counted on, as a push
-    /// since may already show some of them.
+    /// one. They count on the list the skip was counted on, from the row
+    /// it counted from: a push since may already show some of them, or
+    /// have retired that row.
     fn stopped(&mut self, device: &str, nexts: usize) {
-        self.refused();
+        self.before = None;
+        self.target = self.planned_from.take();
         let shown = std::mem::replace(&mut self.state, self.planned.take());
         for _ in 0..nexts {
             self.note_next(device);
         }
         self.state = shown;
+        let playing = self.state.as_ref().and_then(playing_key);
+        retire_landed(&mut self.target, playing.as_deref());
     }
 
     /// Takes the row a skip still on its way goes to, unless it is too old
@@ -614,6 +621,7 @@ pub struct Engine {
 }
 
 /// Where a queue skip lands, named as `row_key` names the row.
+#[derive(Clone)]
 struct SkipTarget {
     key: String,
     at: Instant,
@@ -2691,6 +2699,44 @@ mod tests {
         queue.stopped("sonos", 2);
         let after_push = queue.row("sonos", "spotify:track:b", 0);
         assert_eq!(after_push.as_deref(), Some("u4"), "counted once");
+    }
+
+    /// A Next per row stopped partway after an earlier skip counts on from
+    /// that skip's row, even once a push has shown it playing.
+    #[test]
+    fn a_stopped_skip_counts_on_from_the_skip_before_it() {
+        let mut pushed = cluster("sonos", "spotify:track:now", true, 30_000);
+        pushed.player_state.mut_or_insert_default().next_tracks = vec![
+            provided("spotify:track:x", "u0", "context"),
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u2", "context"),
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u4", "context"),
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u6", "context"),
+        ];
+        let mut queue = RemoteQueue::default();
+        queue.show(pushed);
+        // #given a skip to the first b, then one to the second a after it
+        let first = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(first.as_deref(), Some("u2"));
+        assert_eq!(queue.row("sonos", "spotify:track:a", 1), None);
+        // #when the push for the first skip comes in, and the second stops
+        // after two of its Nexts
+        let mut landed = cluster("sonos", "spotify:track:b", true, 30_000);
+        let state = landed.player_state.mut_or_insert_default();
+        state.track.mut_or_insert_default().uid = "u2".into();
+        state.next_tracks = vec![
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u4", "context"),
+            provided("spotify:track:a", "", "context"),
+            provided("spotify:track:b", "u6", "context"),
+        ];
+        queue.show(landed);
+        queue.stopped("sonos", 2);
+        // #then the next b is the one after the b those Nexts reached
+        let after = queue.row("sonos", "spotify:track:b", 0);
+        assert_eq!(after.as_deref(), Some("u6"));
     }
 
     #[test]

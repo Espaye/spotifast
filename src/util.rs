@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(format_total_ms(Locale::Spanish, 7_980_000), "2 h 13 min");
         assert_eq!(format_episode_ms(Locale::Spanish, 2_280_000), "38 min");
         for (added, expected) in [
-            ("2026-08-31T11:59:59Z", "hace 1 segundo"),
+            ("2026-08-31T11:59:59Z", "Justo ahora"),
             ("2026-08-31T11:58:00Z", "hace 2 minutos"),
             ("2026-08-30T12:00:00Z", "hace 1 día"),
             ("2026-08-17T12:00:00Z", "hace 2 semanas"),
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(format_total_ms(Locale::Turkish, 7_980_000), "2 sa 13 dk");
         assert_eq!(format_episode_ms(Locale::Turkish, 2_280_000), "38 dk");
         for (added, expected) in [
-            ("2026-08-31T11:59:59Z", "1 saniye önce"),
+            ("2026-08-31T11:59:59Z", "Az önce"),
             ("2026-08-31T11:58:00Z", "2 dakika önce"),
             ("2026-08-30T12:00:00Z", "1 gün önce"),
             ("2026-08-17T12:00:00Z", "2 hafta önce"),
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(format_total_ms(Locale::Ukrainian, 7_980_000), "2 год 13 хв");
         assert_eq!(format_episode_ms(Locale::Ukrainian, 2_280_000), "38 хв");
         for (added, expected) in [
-            ("2026-08-31T11:59:59Z", "1 секунду тому"),
+            ("2026-08-31T11:59:59Z", "Щойно"),
             ("2026-08-31T11:58:00Z", "2 хвилини тому"),
             ("2026-08-31T07:00:00Z", "5 годин тому"),
             ("2026-08-30T12:00:00Z", "1 день тому"),
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(format_total_ms(Locale::Korean, 7_980_000), "2시간 13분");
         assert_eq!(format_episode_ms(Locale::Korean, 2_280_000), "38분");
         for (added, expected) in [
-            ("2026-08-31T11:59:59Z", "1초 전"),
+            ("2026-08-31T11:59:59Z", "방금 전"),
             ("2026-08-31T11:58:00Z", "2분 전"),
             ("2026-08-31T07:00:00Z", "5시간 전"),
             ("2026-08-30T12:00:00Z", "1일 전"),

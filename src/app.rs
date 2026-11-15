@@ -630,6 +630,9 @@ pub struct App {
     pub recents_view: std::sync::Arc<[crate::api::models::PlayHistory]>,
     /// The Recent row of the song playing now, dated when it started.
     recent_playing: Option<crate::api::models::PlayHistory>,
+    /// The play that row stands for: its song and, on this computer, the
+    /// engine's count of loaded tracks, so a song played again is new.
+    recent_play: Option<(String, Option<u64>)>,
     pub recents_generation: u64,
     pub queue_tab: QueueTab,
     pub search: SearchState,
@@ -1403,6 +1406,7 @@ impl App {
             recents: crate::model::CursorList::default(),
             recents_view: std::sync::Arc::from([]),
             recent_playing: None,
+            recent_play: None,
             recents_generation: 0,
             queue_tab: session
                 .queue_tab
@@ -10645,10 +10649,21 @@ impl App {
             .requested_track_preview()
             .or_else(|| self.now_playing_live())
             .filter(|now| !now.uri.is_empty());
-        let shown = self.recent_playing.as_ref().map(|row| row.track.uri.as_str());
-        if playing.as_ref().map(|now| now.uri.as_str()) == shown {
+        let play = playing
+            .as_ref()
+            .map(|now| (now.uri.clone(), now.local.then_some(self.local.track_sequence)));
+        if play == self.recent_play {
             return;
         }
+        // A song held paused since before is not played now: only one that
+        // plays, or one just chosen, leads with a new date.
+        if playing
+            .as_ref()
+            .is_some_and(|now| !now.playing && !now.loading)
+        {
+            return;
+        }
+        self.recent_play = play;
         self.recent_playing = playing.map(|now| crate::api::models::PlayHistory {
             track: crate::history::played_track(&now),
             played_at: Some(jiff::Timestamp::now().to_string()),
@@ -35062,6 +35077,64 @@ mod tests {
         assert_eq!(app.recents_view.len(), 1);
         assert_eq!(app.recents_view[0].track.uri, "spotify:track:now");
         assert_eq!(app.recents_view[0].track.name, "Just started");
+        app.backend.shutdown();
+    }
+
+    /// A song held paused since before keeps the date it was played, and a
+    /// song played here again from its start is dated anew.
+    #[test]
+    fn recent_dates_a_song_played_again_but_not_one_held_paused() {
+        let mut app = headless_app();
+        app.remote = None;
+        app.selected_device = None;
+        app.plays = crate::history::History::default();
+        let track = crate::player::LocalTrack {
+            uri: "spotify:track:again".into(),
+            title: "Again".into(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        let state = |playback, track_sequence| LocalState {
+            connected: true,
+            playback,
+            track_sequence,
+            track: Some(track.clone()),
+            ..Default::default()
+        };
+        let yesterday: jiff::Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let played = crate::api::models::Track {
+            uri: track.uri.clone(),
+            name: track.title.clone(),
+            ..Default::default()
+        };
+        app.plays.record(played.clone(), yesterday);
+        app.rebuild_recents();
+        let shown = |app: &App| app.recents_view[0].played_at.clone();
+        let last = |app: &App| app.plays.plays()[0].played_at.clone();
+
+        app.handle_local(state(Playback::Paused, 1));
+        app.show_playing_in_recents();
+        assert_eq!(app.recents_view.len(), 1);
+        assert_eq!(shown(&app), last(&app), "held paused");
+
+        app.handle_local(state(Playback::Playing, 1));
+        app.show_playing_in_recents();
+        assert_ne!(shown(&app), last(&app), "played now");
+
+        // The play counts after it started; heard again from its start, the
+        // row is the new play rather than the one just counted.
+        let started: jiff::Timestamp = "2026-01-02T00:00:00Z".parse().unwrap();
+        if let Some(row) = app.recent_playing.as_mut() {
+            row.played_at = Some(started.to_string());
+        }
+        let counted: jiff::Timestamp = "2026-01-02T00:00:30Z".parse().unwrap();
+        app.plays.record(played, counted);
+        app.rebuild_recents();
+        assert_eq!(shown(&app), last(&app), "the counted play stands");
+        app.handle_local(state(Playback::Playing, 2));
+        app.show_playing_in_recents();
+        assert_eq!(app.recents_view.len(), 1, "one row for the song heard again");
+        assert_ne!(shown(&app), last(&app), "heard again");
         app.backend.shutdown();
     }
 

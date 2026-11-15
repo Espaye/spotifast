@@ -6082,6 +6082,87 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// The checklist lists the song's own playlists first. Liked Songs
+    /// leads them while the song is liked and follows them when it is not.
+    #[test]
+    fn the_hearts_checklist_lists_the_songs_own_playlists_first() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+
+        let (ctx, mut app) = accessible_app("heart-checklist-order");
+        app.backend.set_offline(true);
+        let owner = app.user_id().unwrap().to_string();
+        let make = |id: &str, name: &str| Playlist {
+            id: id.into(),
+            uri: format!("spotify:playlist:{id}"),
+            name: name.into(),
+            owner: crate::api::models::Owner {
+                id: Some(owner.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.library.playlists = Loadable::Loaded(vec![
+            make("a", "Alpha"),
+            make("b", "Beta"),
+            make("c", "Gamma"),
+        ]);
+        let now = app.now_playing().unwrap().uri;
+        let all = ["a", "b", "c"].map(|id| (id.to_string(), None::<String>));
+        let read = |app: &mut App, id: &str, uris: Vec<String>, at: i64| {
+            app.membership.start_reads(&all);
+            app.membership.receive(id, Ok((uris, Some(at))));
+        };
+        read(&mut app, "a", Vec::new(), 1_000);
+        read(&mut app, "b", Vec::new(), 2_000);
+        read(&mut app, "c", vec![now.clone()], 500);
+        let names = ["Liked Songs", "Alpha", "Beta", "Gamma"];
+        let open = |app: &mut App| {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let heart = lowest_node(&tree, "Add to playlist", Role::Button);
+            let open = accessible_action(heart, AccessibleAction::Click, None);
+            accessible_frame(&ctx, app, vec![open]);
+            // A menu's first frame only measures it.
+            accessible_frame(&ctx, app, vec![]);
+        };
+        let rows = |app: &mut App| -> Vec<String> {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let mut rows: Vec<(f64, String)> = tree
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == Role::CheckBox)
+                .filter_map(|(_, node)| Some((node.bounds()?.y0, node.label()?.to_string())))
+                .collect();
+            rows.retain(|(_, label)| names.contains(&label.as_str()));
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            rows.into_iter().map(|(_, label)| label).collect()
+        };
+        let close = |app: &mut App| {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let cancel = lowest_node(&tree, "Cancel", Role::Button);
+            let close = accessible_action(cancel, AccessibleAction::Click, None);
+            accessible_frame(&ctx, app, vec![close]);
+        };
+        // The song's own playlist leads; the rest follow, the one a song was
+        // last added to first.
+        app.saved.insert(now.clone(), true);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Liked Songs", "Gamma", "Beta", "Alpha"]);
+        close(&mut app);
+        app.saved.insert(now, false);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Beta", "Alpha"]);
+        // A read landing while the list is open moves no row; the next
+        // opening takes it.
+        app.membership.seen("a", Some("newer"));
+        read(&mut app, "a", Vec::new(), 3_000);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Beta", "Alpha"]);
+        close(&mut app);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Alpha", "Beta"]);
+        close(&mut app);
+        app.backend.shutdown();
+    }
+
     #[test]
     fn play_next_menus_queue_the_chosen_rows_only_for_local_playback() {
         for multiple in [false, true] {

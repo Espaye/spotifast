@@ -529,7 +529,8 @@ pub enum ApiResponse {
     },
     PlaylistUris {
         id: String,
-        result: ApiResult<Vec<String>>,
+        /// Every row's song, and when the newest row was added.
+        result: ApiResult<(Vec<String>, Option<i64>)>,
     },
     PlaylistItemsChanged {
         id: String,
@@ -5598,7 +5599,7 @@ async fn handle(
                 )
                 .await
                 {
-                    Ok(Ok((_, uris))) => Ok(uris),
+                    Ok(Ok((_, uris, last_added))) => Ok((uris, last_added)),
                     Ok(Err(error)) => Err(ApiError::Network(format!("{error:#}"))),
                     Err(_) => Err(ApiError::Network("The playlist read timed out.".into())),
                 }

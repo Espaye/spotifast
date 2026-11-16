@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # shoot-growth.sh BINARY OUTDIR
 # The sung line of full screen lyrics growing. Stills at a narrow and a
-# normal size in dark and light, then the live demo recorded at 1280x800 for
+# normal size in dark and light, each taken three times because where the
+# lines come to rest differs a little from run to run, then the live demo recorded at 1280x800 for
 # twenty seconds (lines change every 6.5 s): plain in both themes, and in
 # dark with an emoji ending each line. Each recording also gets a copy of
 # its first ten seconds slowed four times.
@@ -17,9 +18,11 @@ for size in 800x600 1280x800; do
   for theme in dark light; do
     surfaces=lyrics-fullscreen-view
     [ "$theme" = light ] && surfaces="$surfaces,light"
-    env $(env_for) timeout 120 xvfb-run -a -s "-screen 0 1920x1200x24" \
-      "$bin" --demo-page home --demo-size "$size" --demo-shot "$out/lyrics-$size-$theme.png" \
-      --demo-shot-delay 6000 --demo-show "$surfaces" || { echo "FAILED still $size $theme"; failed=1; }
+    for take in 1 2 3; do
+      env $(env_for) timeout 120 xvfb-run -a -s "-screen 0 1920x1200x24" \
+        "$bin" --demo-page home --demo-size "$size" --demo-shot "$out/lyrics-$size-$theme-$take.png" \
+        --demo-shot-delay 6000 --demo-show "$surfaces" || { echo "FAILED still $size $theme $take"; failed=1; }
+    done
   done
 done
 # xvfb-run leaves its own display, :99, locked behind it.

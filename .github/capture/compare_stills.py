@@ -17,6 +17,8 @@ import numpy
 
 before_dir, after_dir = sys.argv[1], sys.argv[2]
 out_dir = sys.argv[3] if len(sys.argv) > 3 else None
+if out_dir:
+    os.makedirs(out_dir, exist_ok=True)
 NAME = re.compile(r"^([a-z-]+)-(\d+)x(\d+)-(dark|light)-(\d)\.png$")
 
 

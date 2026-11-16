@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # shoot-unavailable.sh BINARY OUTDIR [CLICKS_FILE]
-# Discover Weekly (a removed song in row 2, a hidden song in row 3) and Late
-# night focus (a local file missing from this computer in row 5) at a narrow
-# and a normal size in dark and light. CLICKS_FILE lines: NAME PAGE
+# Discover Weekly (a removed song in row 2, a hidden song in row 3) at a
+# narrow and a normal size in dark and light. CLICKS_FILE lines: NAME PAGE
 # WIDTHxHEIGHT X,Y; the shot clicks that point and leaves the pointer on it.
 set -u
 bin=$1 out=$2 clicks=${3:-}
@@ -21,7 +20,6 @@ failed=0
 for size in 800x600 1280x800; do
   for theme in dark light; do
     shot discover playlist:pl0 $size $theme
-    shot focus playlist:pl1 $size $theme
   done
 done
 if [ -n "$clicks" ]; then

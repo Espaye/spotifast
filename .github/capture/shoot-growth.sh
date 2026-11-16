@@ -2,10 +2,9 @@
 # shoot-growth.sh BINARY OUTDIR
 # The sung line of full screen lyrics growing. Stills at a narrow and a
 # normal size in dark and light, each taken three times because where the
-# lines come to rest differs a little from run to run, then the live demo recorded at 1280x800 for
-# twenty seconds (lines change every 6.5 s): plain in both themes, and in
-# dark with an emoji ending each line. Each recording also gets a copy of
-# its first ten seconds slowed four times.
+# lines come to rest differs a little from run to run. Then the live demo
+# recorded for twenty seconds (lines change every 6.5 s): at both sizes in
+# both themes, and at the normal size with an emoji ending each line.
 set -u
 bin=$1 out=$2
 mkdir -p "$out"
@@ -26,25 +25,25 @@ for size in 800x600 1280x800; do
   done
 done
 # xvfb-run leaves its own display, :99, locked behind it.
-Xvfb :77 -screen 0 1280x800x24 &
-xvfb=$!
-sleep 2
 record() {
-  local name=$1 surfaces=$2
+  local name=$1 size=$2 surfaces=$3
+  Xvfb :77 -screen 0 "${size}x24" &
+  local xvfb=$!
+  sleep 2
   env $(env_for) DISPLAY=:77 timeout 50 "$bin" --demo --demo-page home \
-    --demo-size 1280x800 --demo-show "$surfaces" &
+    --demo-size "$size" --demo-show "$surfaces" &
   local app=$!
   # Covers load and the player bar slides away.
   sleep 8
-  ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :77 -t 20 \
-    -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/$name.mp4" || { echo "FAILED recording $name"; failed=1; }
+  ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size "$size" -framerate 30 -i :77 -t 20 \
+    -c:v libx264 -pix_fmt yuv420p -crf 18 "$out/$name.mp4" || { echo "FAILED recording $name"; failed=1; }
   kill $app 2>/dev/null; wait $app 2>/dev/null
-  ffmpeg -loglevel error -y -i "$out/$name.mp4" -vf "setpts=4*PTS" -r 30 -t 40 \
-    -c:v libx264 -pix_fmt yuv420p -crf 22 "$out/$name-slow.mp4" || { echo "FAILED slowing $name"; failed=1; }
+  kill $xvfb; wait $xvfb 2>/dev/null
 }
-record growth-1280x800-dark lyrics-fullscreen-view
-record growth-1280x800-light lyrics-fullscreen-view,light
-record growth-emoji-1280x800-dark lyrics-fullscreen-view,emoji
-kill $xvfb
+record growth-1280x800-dark 1280x800 lyrics-fullscreen-view
+record growth-1280x800-light 1280x800 lyrics-fullscreen-view,light
+record growth-800x600-dark 800x600 lyrics-fullscreen-view
+record growth-800x600-light 800x600 lyrics-fullscreen-view,light
+record growth-emoji-1280x800-dark 1280x800 lyrics-fullscreen-view,emoji
 ls -la "$out"
 exit $failed

@@ -14,7 +14,7 @@ jobs:
           - name: before
             ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
           - name: after
-            ref: bff1c4af90661ce0051822bbf6129bbff7d3db7d
+            ref: 6c3301a688aa178b53de2d6b8950e2011a46ae43
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,13 +38,13 @@ jobs:
           key: captures-${{ matrix.name }}
       - name: Bright covers
         run: python3 tools/.github/capture/patch_covers.py app/src/demo.rs
-      - name: See-through switch
-        run: python3 tools/.github/capture/patch_holes.py app/src/images.rs
+      - name: Removed song
+        run: python3 tools/.github/capture/patch_unavailable.py app/src/demo.rs
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo
       - name: Shoot
-        run: bash tools/.github/capture/shoot-holes.sh "$PWD/app/target/debug/spotifast" shots
+        run: bash tools/.github/capture/shoot-unavailable.sh "$PWD/app/target/debug/spotifast" shots
       - if: always()
         uses: actions/upload-artifact@v4
         with:

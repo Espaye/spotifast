@@ -11,10 +11,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: before
-            ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
           - name: after
-            ref: 48edb88049bbf509a5d5004b158a921bafb368fe
+            ref: 348e3c76d2e4a3aa8665512c809488bbd0656075
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,13 +36,11 @@ jobs:
           key: captures-${{ matrix.name }}
       - name: Bright covers
         run: python3 tools/.github/capture/patch_covers.py app/src/demo.rs
-      - name: No art switch
-        run: python3 tools/.github/capture/patch_no_art.py app/src/ui/lyrics.rs
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo
       - name: Shoot
-        run: bash tools/.github/capture/shoot-backdrop.sh "$PWD/app/target/debug/spotifast" shots
+        run: bash tools/.github/capture/shoot-bars.sh "$PWD/app/target/debug/spotifast" shots only
       - if: always()
         uses: actions/upload-artifact@v4
         with:

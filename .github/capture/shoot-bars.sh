@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# shoot-bars.sh BINARY OUTDIR [record]
+# shoot-bars.sh BINARY OUTDIR [record|only]
 # Home and a playlist with its playing song at a narrow and a normal size in
 # dark and light, each in fresh XDG directories. With "record", also four
 # seconds of the playlist at 1280x800 in each theme, to show the bars moving.
+# With "only", the recordings alone.
 set -u
 bin=$1 out=$2 record=${3:-}
 mkdir -p "$out"
@@ -20,23 +21,25 @@ shot() {
 }
 failed=0
 for size in 800x600 1280x800; do
+  [ "$record" = only ] && break
   for theme in dark light; do
     shot home home $size $theme
     shot playlist playlist:pl1 $size $theme
   done
 done
-if [ "$record" = record ]; then
-  Xvfb :99 -screen 0 1280x800x24 &
+# xvfb-run leaves its own display, :99, locked behind it.
+if [ "$record" = record ] || [ "$record" = only ]; then
+  Xvfb :77 -screen 0 1280x800x24 &
   xvfb=$!
   sleep 2
   for theme in dark light; do
     show=()
     [ "$theme" = light ] && show=(--demo-show light)
-    env $(env_for) DISPLAY=:99 timeout 20 "$bin" --demo --demo-page playlist:pl1 \
+    env $(env_for) DISPLAY=:77 timeout 20 "$bin" --demo --demo-page playlist:pl1 \
       --demo-size 1280x800 "${show[@]}" &
     app=$!
     sleep 8
-    ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :99 -t 4 \
+    ffmpeg -loglevel error -y -f x11grab -draw_mouse 0 -video_size 1280x800 -framerate 30 -i :77 -t 4 \
       -c:v libx264 -pix_fmt yuv420p -crf 20 "$out/bars-1280x800-$theme.mp4" \
       || { echo "FAILED recording $theme"; failed=1; }
     kill $app 2>/dev/null; wait $app 2>/dev/null

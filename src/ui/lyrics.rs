@@ -67,6 +67,22 @@ fn scaled(galley: std::sync::Arc<egui::Galley>, scale: f32) -> std::sync::Arc<eg
     }
     let mut shape = egui::epaint::TextShape::new(pos2(0.0, 0.0), galley, Color32::TRANSPARENT);
     shape.transform(egui::emath::TSTransform::from_scaling(scale));
+    // That scales the rows and their letters, and leaves each glyph where
+    // and as large as it was laid out. The emoji plugin paints its pictures
+    // from the glyphs, so they go along.
+    for placed in &mut std::sync::Arc::make_mut(&mut shape.galley).rows {
+        for glyph in &mut std::sync::Arc::make_mut(&mut placed.row).glyphs {
+            glyph.pos *= scale;
+            glyph.advance_width *= scale;
+            glyph.line_height *= scale;
+            glyph.font_ascent *= scale;
+            glyph.font_height *= scale;
+            glyph.font_face_ascent *= scale;
+            glyph.font_face_height *= scale;
+            glyph.uv_rect.offset *= scale;
+            glyph.uv_rect.size *= scale;
+        }
+    }
     shape.galley
 }
 

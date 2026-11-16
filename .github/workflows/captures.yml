@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libpipewire-0.3-dev libxkbcommon-dev \
             libwayland-dev libgl1-mesa-dev cmake libclang-dev xvfb libgl1-mesa-dri fonts-noto-cjk \
-            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2 ffmpeg xdotool \n            fonts-noto-color-emoji
+            libegl1 libxkbcommon-x11-0 libx11-xcb1 libxcursor1 libxi6 libxrandr2 ffmpeg xdotool fonts-noto-color-emoji
       - name: Toolchain
         working-directory: app
         run: rustup show active-toolchain || rustup toolchain install

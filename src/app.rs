@@ -738,6 +738,8 @@ pub struct App {
     pub softened_covers: crate::images::SoftenedCovers,
     /// The track the lyrics below are for.
     pub lyrics_uri: Option<String>,
+    /// Lyrics on either side of the playing song, including an outstanding read.
+    adjacent_lyrics: Vec<(String, Loadable<Option<crate::lyrics::Lyrics>>)>,
     /// How many of `LYRICS_RETRIES` this song has used.
     lyrics_retries: usize,
     /// When to ask again for lyrics a busy service didn't answer for.
@@ -843,6 +845,8 @@ pub struct App {
     /// The repeat mode saved by the last run, which the first local load
     /// starts with: the engine starts at off.
     repeat_wanted: RepeatMode,
+    /// The choice shown while this player catches up with a repeat command.
+    pending_repeat: Option<(Target, RepeatMode, Instant)>,
     /// Last local shuffle change, used to ignore its echo from the engine.
     shuffle_set_at: Option<Instant>,
     /// When tracks recently came up unavailable, to spot a key-service
@@ -1488,6 +1492,7 @@ impl App {
             lyrics_backdrop: Default::default(),
             softened_covers: Default::default(),
             lyrics_uri: None,
+            adjacent_lyrics: Vec::new(),
             lyrics_retries: 0,
             lyrics_retry_at: None,
             lyrics: Loadable::NotLoaded,
@@ -1542,6 +1547,7 @@ impl App {
             local_files: None,
             shuffle_wanted: session.shuffle_on,
             repeat_wanted: RepeatMode::from_api(&session.repeat),
+            pending_repeat: None,
             shuffle_set_at: None,
             unavailable_at: Vec::new(),
             last_unavailable_reconnect: None,
@@ -2558,7 +2564,7 @@ impl App {
                 // what the spinner follows.
                 loading: self.local.loading,
                 shuffle: self.shuffle_wanted,
-                repeat: self.local.repeat,
+                repeat: self.shown_repeat(self.local.repeat, Target::Local),
                 volume_percent: volume_to_percent(self.local.volume),
                 can_control: true,
                 can_set_volume: true,
@@ -2657,7 +2663,10 @@ impl App {
             playing,
             loading: false,
             shuffle: self.shuffle_wanted,
-            repeat: RepeatMode::from_api(&remote.state.repeat_state),
+            repeat: self.shown_repeat(
+                RepeatMode::from_api(&remote.state.repeat_state),
+                Target::Remote(device.and_then(|device| device.id.clone())),
+            ),
             volume_percent: volume,
             // A restricted device is driven over the playback session's
             // Connect link instead, see `crate::sonos`.
@@ -3188,13 +3197,17 @@ impl App {
                     Err(error) => log::warn!("rootlist unavailable: {error}"),
                 },
                 Event::Lyrics { uri, result } => {
+                    let result = result
+                        .map(|found| found.map(crate::lyrics::Lyrics::without_closing_notes));
                     if self.lyrics_uri.as_deref() == Some(uri.as_str()) {
                         self.lyrics = match result {
-                            Ok(found) => Loadable::Loaded(
-                                found.map(crate::lyrics::Lyrics::without_closing_notes),
-                            ),
+                            Ok(found) => Loadable::Loaded(found),
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
+                    } else if let Some((_, state)) =
+                        self.adjacent_lyrics.iter_mut().find(|(id, _)| id == &uri)
+                    {
+                        *state = Loadable::from_result(result);
                     }
                 }
                 Event::PlaylistCache {
@@ -3849,6 +3862,11 @@ impl App {
 
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
+        self.pending_repeat = None;
+        self.adjacent_lyrics.clear();
+        self.lyrics_uri = None;
+        self.lyrics = Loadable::NotLoaded;
+        self.lyrics_retry_at = None;
         self.pending_remote_volume = None;
         self.settled_remote_volume = None;
         self.local_transfer_sequence = None;
@@ -4542,6 +4560,7 @@ impl App {
         }
         if matches!(self.page(), Page::Queue)
             || self.show_queue_panel
+            || (!self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some()))
             || (self.settings.winamp_window && self.settings.playlist_open)
         {
             self.refresh_queue(true);
@@ -4625,13 +4644,26 @@ impl App {
         {
             return;
         }
+        let mut prepared = None;
         if self.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
+            prepared = self.adjacent_lyrics.iter().position(|(uri, _)| uri == &now.uri)
+                .map(|at| self.adjacent_lyrics.remove(at).1);
+            if let Some(uri) = self.lyrics_uri.take()
+                && matches!(self.lyrics, Loadable::Loaded(_))
+            {
+                let lyrics = std::mem::take(&mut self.lyrics);
+                self.remember_adjacent_lyrics(uri, lyrics);
+            }
             self.lyrics_retries = 0;
             self.lyrics_retry_at = None;
         }
         self.lyrics_uri = Some(now.uri.clone());
         self.lyrics_following = true;
         self.lyrics_line_shown = None;
+        if let Some(state @ (Loadable::Loaded(_) | Loadable::Loading)) = prepared {
+            self.lyrics = state;
+            return;
+        }
         if now.is_episode || self.offline {
             self.lyrics = Loadable::Loaded(None);
             return;
@@ -4650,6 +4682,79 @@ impl App {
                 album: now.album_name,
                 duration_ms: now.duration_ms,
             },
+            local_file,
+        })));
+    }
+
+    fn remember_adjacent_lyrics(
+        &mut self,
+        uri: String,
+        state: Loadable<Option<crate::lyrics::Lyrics>>,
+    ) {
+        if self.adjacent_lyrics.len() == 2 {
+            self.adjacent_lyrics.remove(0);
+        }
+        self.adjacent_lyrics.push((uri, state));
+    }
+
+    fn prepare_next_song(&mut self, ui: &egui::Ui) {
+        let reading = self.show_lyrics_panel || self.lyrics_fullscreen.is_some();
+        let Some(now) = &self.frame_now else {
+            return;
+        };
+        if reading && self.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
+            self.request_lyrics();
+            return;
+        }
+        if now.loading || now.resuming || self.offline || self.metered() || !self.network_reachable
+        {
+            return;
+        }
+        let Some(queue) = self.queue.get() else {
+            return;
+        };
+        if queue.currently_playing.as_ref().map(PlayableItem::uri) != Some(now.uri.as_str()) {
+            return;
+        }
+        let Some(item @ PlayableItem::Track(track)) = queue.queue.first() else {
+            return;
+        };
+        if track.uri == now.uri || !self.row_playable(item) {
+            return;
+        }
+        let art = self.backend.art();
+        let fullscreen = self.lyrics_fullscreen.is_some();
+        let size = if fullscreen { 320.0 } else { 56.0 };
+        let current_art = self.small_art(now, size);
+        if current_art.is_some_and(|url| !art.is_settled(url)) {
+            return;
+        }
+        let pixels = if fullscreen { 640 } else { self.art_px(size) };
+        if let Some(url) = self.item_image(item, pixels)
+            && !art.has_copy(&url)
+        {
+            crate::ui::widgets::cover_copy(ui, &url, egui::Vec2::splat(size), Some(art));
+        }
+        if !reading
+            || !matches!(self.lyrics, Loadable::Loaded(_))
+            || self.adjacent_lyrics.iter().any(|(uri, state)| {
+                uri == &track.uri || state.is_loading()
+            })
+        {
+            return;
+        }
+        let uri = track.uri.clone();
+        let query = crate::lyrics::Query {
+            artist: track.artists.first().map(|artist| artist.name.clone()).unwrap_or_default(),
+            title: track.name.clone(),
+            album: track.album.as_ref().map(|album| album.name.clone()).unwrap_or_default(),
+            duration_ms: track.duration_ms,
+        };
+        let local_file = self.local_file(&uri).map(std::path::Path::to_path_buf);
+        self.remember_adjacent_lyrics(uri.clone(), Loadable::Loading);
+        self.backend.send(Command::Lyrics(Box::new(LyricsRequest {
+            uri,
+            query,
             local_file,
         })));
     }
@@ -4823,7 +4928,12 @@ impl App {
                 self.refresh_devices();
             }
             let playlist_open = self.settings.winamp_window && self.settings.playlist_open;
-            if (self.show_queue_panel || matches!(self.page(), Page::Queue) || playlist_open)
+            let reading =
+                !self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some());
+            if (self.show_queue_panel
+                || matches!(self.page(), Page::Queue)
+                || playlist_open
+                || reading)
                 && !self.queue.is_loading()
                 && self
                     .queue_fetched_at
@@ -10131,6 +10241,9 @@ impl App {
                     Err(error) => {
                         self.optimistic_playing = None;
                         self.pending_remote_position = None;
+                        if action == RemoteAction::Repeat {
+                            self.pending_repeat = None;
+                        }
                         if matches!(action, RemoteAction::Volume { .. }) {
                             self.pending_remote_volume = None;
                             self.settled_remote_volume = None;
@@ -11847,10 +11960,19 @@ impl App {
         }
     }
 
+    fn shown_repeat(&self, actual: RepeatMode, target: Target) -> RepeatMode {
+        self.pending_repeat
+            .as_ref()
+            .filter(|(player, _, at)| *player == target && at.elapsed() < PLAYBACK_HOLD)
+            .map_or(actual, |(_, mode, _)| *mode)
+    }
+
     fn set_repeat(&mut self, mode: RepeatMode) {
+        let target = self.target();
+        self.pending_repeat = Some((target.clone(), mode, Instant::now()));
         // Next up leaves Spotify's padding out only with Repeat off.
         self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-        match self.target() {
+        match target {
             Target::Local => {
                 self.local.repeat = mode;
                 self.repeat_wanted = mode;
@@ -15373,6 +15495,7 @@ impl App {
         let ctx = &ctx;
         self.pixels_per_point = ctx.pixels_per_point();
         self.refresh_frame_now();
+        self.prepare_next_song(ui);
         self.apply_theme(ctx);
         let autoscroll_on = crate::autoscroll::enabled(self.settings.middle_click_autoscroll);
         self.autoscroll.begin(ctx, autoscroll_on);

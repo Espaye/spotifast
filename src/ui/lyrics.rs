@@ -3,7 +3,7 @@
 use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, UiBuilder, pos2, vec2};
 
 use crate::app::{App, NowPlaying};
-use crate::i18n::{gettext, pgettext};
+use crate::i18n::gettext;
 use crate::model::{Action, Loadable, Page};
 use crate::theme::{self, Icon};
 
@@ -151,24 +151,12 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.actions.push(Action::SetLyricsFullscreen(true));
                 }
-                let loaded = matches!(&app.lyrics, Loadable::Loaded(Some(_)));
-                if loaded
-                    && !app.lyrics_following
-                    && theme::pill_button(
-                        ui,
-                        &palette,
-                        &pgettext(app.locale, "lyrics", "Follow"),
-                        false,
-                    )
-                    .clicked()
-                {
-                    app.lyrics_following = true;
-                    app.lyrics_line_shown = None;
-                }
             });
         });
         ui.add_space(8.0);
+        let room = ui.available_rect_before_wrap();
         contents(app, ui);
+        sync_button(app, ui, room, &palette);
     });
     let current_width = response.response.rect.width();
     if (app.settings.lyrics_width - current_width).abs() > 1.0
@@ -262,7 +250,9 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     };
 
     let active = lyrics.active_line(now.position_ms);
-    let follow = app.lyrics_following && app.lyrics_line_shown != Some(active);
+    let gesture = scroll_gesture(ui, ui.available_rect_before_wrap());
+    let following = app.lyrics_following && !gesture;
+    let follow = following && app.lyrics_line_shown != Some(active);
     // The line being sung is bold and in the accent colour; every other
     // line is quiet, regular text, the same before and after it has been
     // sung. A line takes 220 ms to light up or fade, as in omarchy-lyrics.
@@ -340,7 +330,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
             }
             // Words without timing can only be followed by the clock: sit
             // at the part of the text the song is probably at.
-            if app.lyrics_following && !lyrics.synced && now.duration_ms > 0 {
+            if following && !lyrics.synced && now.duration_ms > 0 {
                 let fraction =
                     (f64::from(now.position_ms) / f64::from(now.duration_ms)).clamp(0.0, 1.0);
                 let content = ui.min_rect();
@@ -358,12 +348,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         },
     );
     crate::autoscroll::lyrics(ui, scroll.id);
-    // Scrolling by hand means the reader wants to look elsewhere; the
-    // Follow button in the header picks the song back up.
-    if ui.rect_contains_pointer(scroll.inner_rect)
-        && ui.input(|input| input.smooth_scroll_delta.y != 0.0)
-    {
-        app.lyrics_following = false;
+    if scrolled_by_hand(ui, &scroll, gesture) && app.lyrics_following {
+        app.actions.push(Action::PauseLyricsFollow);
     }
     app.lyrics_line_shown = Some(active);
 }
@@ -504,19 +490,10 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui, controls: f32) {
                 rect.min,
                 pos2(rect.right(), rect.bottom() - theme::PLAYER_BAR_HEIGHT),
             );
-            // The empty space is the backdrop's switch, as the player bar's
-            // is its visualizer's. Everything drawn after this takes its own
-            // clicks, and a drag is no click.
-            #[cfg(feature = "milkdrop")]
-            if ui
-                .interact(room, ui.id().with("lyrics-backdrop"), Sense::click())
-                .clicked()
-            {
-                app.actions.push(Action::ToggleLyricsMilkdrop);
-            }
             let top = theme::titlebar_inset(ui.ctx()) + 24.0;
             if app.now_playing().is_some() && room.width() >= COVER_BESIDE_MIN_WIDTH {
                 with_cover(app, ui, room, top, controls);
+                sync_button(app, ui, room, &theme::Palette::dark());
                 return;
             }
             let width = fullscreen_content_width(room.width());
@@ -530,6 +507,7 @@ pub fn fullscreen(app: &mut App, ui: &mut egui::Ui, controls: f32) {
             track_heading(app, &mut content);
             content.add_space(16.0);
             fullscreen_contents(app, &mut content, room.right(), controls);
+            sync_button(app, ui, room, &theme::Palette::dark());
         });
 }
 
@@ -955,7 +933,7 @@ fn cover_opens_immersive(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
         && ui
             .interact(cover, ui.id().with("lyrics-cover"), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
+            .double_clicked()
     {
         app.actions.push(Action::EnterImmersive);
     }
@@ -1064,21 +1042,46 @@ fn fullscreen_header(app: &mut App, ui: &mut egui::Ui, controls: f32) {
             {
                 app.actions.push(Action::SetLyricsFullscreen(false));
             }
-            let loaded = matches!(&app.lyrics, Loadable::Loaded(Some(_)));
-            if loaded
-                && !app.lyrics_following
-                && theme::pill_button(
-                    ui,
-                    &palette,
-                    &pgettext(app.locale, "lyrics", "Follow"),
-                    false,
-                )
-                .clicked()
-            {
-                app.actions.push(Action::FollowLyrics);
-            }
         });
     });
+}
+
+fn sync_button(app: &mut App, ui: &egui::Ui, room: Rect, palette: &theme::Palette) {
+    if app.lyrics_following
+        || !matches!(&app.lyrics, Loadable::Loaded(Some(lyrics)) if !lyrics.instrumental)
+    {
+        return;
+    }
+    let mut button = ui.new_child(
+        UiBuilder::new()
+            .max_rect(room.shrink2(vec2(0.0, 8.0)))
+            .layout(Layout::bottom_up(Align::Center)),
+    );
+    if theme::pill_button(&mut button, palette, &gettext(app.locale, "Sync lyrics"), true).clicked()
+    {
+        app.actions.push(Action::FollowLyrics);
+    }
+}
+
+fn scroll_gesture(ui: &egui::Ui, viewport: Rect) -> bool {
+    ui.rect_contains_pointer(viewport)
+        && ui.input(|input| {
+            input.smooth_scroll_delta.y != 0.0
+                || (input.pointer.primary_down() && input.pointer.delta().y != 0.0)
+        })
+}
+
+fn scrolled_by_hand(
+    ui: &egui::Ui,
+    scroll: &egui::scroll_area::ScrollAreaOutput<()>,
+    gesture: bool,
+) -> bool {
+    let offset = scroll.state.offset.y;
+    let previous = ui.data_mut(|data| {
+        let last = data.get_temp_mut_or_default::<f32>(scroll.id.with("last-offset"));
+        std::mem::replace(last, offset)
+    });
+    gesture && (offset - previous).abs() > f32::EPSILON
 }
 
 fn track_heading(app: &mut App, ui: &mut egui::Ui) {
@@ -1192,11 +1195,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, scroll_right: f32, cont
     );
     let mut ui = ui.new_child(UiBuilder::new().max_rect(viewport));
     let ui = &mut ui;
-    let manual_scroll = ui.rect_contains_pointer(viewport)
-        && ui.input(|input| {
-            input.smooth_scroll_delta.y != 0.0
-                || (input.pointer.primary_down() && input.pointer.delta().y != 0.0)
-        });
+    let manual_scroll = scroll_gesture(ui, viewport);
     let following = app.lyrics_following && !manual_scroll;
     let follow = following && app.lyrics_line_shown != Some(active);
     let animation = crate::motion::scroll(ui.ctx(), 0.45);
@@ -1219,7 +1218,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, scroll_right: f32, cont
     scroll.dormant_handle_opacity = scroll.active_handle_opacity * controls;
     scroll.active_handle_opacity *= controls;
     scroll.interact_handle_opacity *= controls;
-    egui::ScrollArea::vertical()
+    let output = egui::ScrollArea::vertical()
         .id_salt(("fullscreen-lyrics-scroll", &now.uri))
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -1323,9 +1322,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui, scroll_right: f32, cont
             }
             ui.add_space(below.max(60.0));
         });
-    // Scrolling by hand means the reader wants to look elsewhere; the
-    // Follow button in the header picks the song back up.
-    if manual_scroll && app.lyrics_following {
+    if scrolled_by_hand(ui, &output, manual_scroll) && app.lyrics_following {
         app.actions.push(Action::PauseLyricsFollow);
     }
     if now.playing

@@ -665,7 +665,7 @@ impl TopPeriod {
             ),
             Self::LongTerm => gettext(
                 locale,
-                "Calculated from several years of listening history.",
+                "Based on roughly the last year of listening, including new activity.",
             ),
         }
     }

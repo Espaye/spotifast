@@ -641,10 +641,10 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
         // playlists; a click opens the checklist of them, never likes the
         // song at once.
         let saved = app.saved_anywhere(&now.uri);
-        let (icon, color, hover) = if saved {
-            (Icon::HeartFilled, palette.accent, palette.accent_hover)
+        let (icon, color) = if saved {
+            (Icon::HeartFilled, palette.accent)
         } else {
-            (Icon::Heart, palette.secondary, palette.text)
+            (Icon::Heart, palette.secondary)
         };
         // Sit the heart just past the actual text, not at the region's far
         // edge, so it stays visually attached to the title.
@@ -655,12 +655,11 @@ fn now_playing_block(app: &mut App, ui: &mut egui::Ui, region: Rect, now: Option
                 .max_rect(heart_rect)
                 .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
         );
-        let response = theme::icon_button(
+        let response = theme::toggle_icon_button(
             &mut heart_ui,
             icon,
             17.0,
             color,
-            hover,
             &gettext(app.locale, "Add to playlist"),
         );
         let popup_id = egui::Id::new(LIKED_POPUP_ID);
@@ -742,16 +741,11 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
 
     let shuffle_color = if shuffle { palette.accent } else { dim };
     let mut cell = centered(ui, slot(widths[0]));
-    let shuffle_button = theme::icon_button(
+    let shuffle_button = theme::toggle_icon_button(
         &mut cell,
         Icon::Shuffle,
         17.0,
         shuffle_color,
-        if shuffle {
-            palette.accent_hover
-        } else {
-            palette.text
-        },
         &gettext(app.locale, "Shuffle"),
     );
     shuffle_button.widget_info(|| {
@@ -836,29 +830,28 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     }
 
     let (repeat_icon, repeat_color, tooltip) = match repeat {
-        RepeatMode::Off => (Icon::Repeat, dim, gettext(app.locale, "Repeat")),
+        RepeatMode::Off => (
+            Icon::Repeat,
+            dim,
+            gettext(app.locale, "Repeat is off. Click to repeat all."),
+        ),
         RepeatMode::Context => (
             Icon::Repeat,
             palette.accent,
-            gettext(app.locale, "Repeat one"),
+            gettext(app.locale, "Repeating all. Click to repeat this song."),
         ),
         RepeatMode::Track => (
             Icon::Repeat1,
             palette.accent,
-            gettext(app.locale, "Repeat off"),
+            gettext(app.locale, "Repeating this song. Click to turn repeat off."),
         ),
     };
     let mut cell = centered(ui, slot(widths[4]));
-    if theme::icon_button(
+    if theme::toggle_icon_button(
         &mut cell,
         repeat_icon,
         17.0,
         repeat_color,
-        if repeat == RepeatMode::Off {
-            palette.text
-        } else {
-            palette.accent_hover
-        },
         &tooltip,
     )
     .clicked()
@@ -1031,7 +1024,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         .filter(|_| remote)
         .and_then(|now| now.device_kind.as_deref())
         .map_or(Icon::Speaker, super::devices::device_icon);
-    let devices = theme::icon_button(
+    let devices = theme::toggle_icon_button(
         ui,
         icon,
         18.0,
@@ -1040,7 +1033,6 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         } else {
             palette.secondary
         },
-        palette.text,
         &gettext(app.locale, "Connect to a device"),
     );
     ui.ctx().data_mut(|data| {
@@ -1050,7 +1042,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         app.actions.push(Action::ToggleDevicesPopup);
     }
     let queue_open = app.show_queue_panel || matches!(app.page(), Page::Queue);
-    let queue_button = theme::icon_button(
+    let queue_button = theme::toggle_icon_button(
         ui,
         Icon::ListVideo,
         18.0,
@@ -1059,7 +1051,6 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         } else {
             palette.secondary
         },
-        palette.text,
         &gettext(app.locale, "Queue"),
     );
     if queue_button.clicked() {
@@ -1076,7 +1067,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
                 .collect(),
         });
     }
-    if theme::icon_button(
+    if theme::toggle_icon_button(
         ui,
         Icon::MicVocal,
         18.0,
@@ -1085,7 +1076,6 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         } else {
             palette.secondary
         },
-        palette.text,
         &gettext(app.locale, "Lyrics"),
     )
     .clicked()

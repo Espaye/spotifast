@@ -4235,6 +4235,21 @@ msgstr ""
 "stuurprogramma of zet GPU-versnelling aan voor de virtuele machine. {url} "
 "openen voor meer informatie?"
 
+msgid "Sync lyrics"
+msgstr "Songtekst synchroniseren"
+
+msgid "Repeat is off. Click to repeat all."
+msgstr "Herhalen staat uit. Klik om alles te herhalen."
+
+msgid "Repeating all. Click to repeat this song."
+msgstr "Alles wordt herhaald. Klik om dit nummer te herhalen."
+
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "Dit nummer wordt herhaald. Klik om herhalen uit te zetten."
+
+msgid "Based on roughly the last year of listening, including new activity."
+msgstr "Gebaseerd op ongeveer het afgelopen jaar, inclusief wat je onlangs hebt beluisterd."
+
 #~ msgid "3. Pair once in Spotify"
 #~ msgstr "3. Eenmalig koppelen in Spotify"
 

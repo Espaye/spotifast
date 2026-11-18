@@ -285,7 +285,7 @@ fn paint_cover_url(
 
 /// The copy of `url`'s artwork for a cover `size` points wide, asking for
 /// it to be fetched and made when egui has none yet.
-fn cover_copy(
+pub(crate) fn cover_copy(
     ui: &Ui,
     url: &str,
     size: Vec2,
@@ -4182,8 +4182,9 @@ pub fn thin_slider(
         let fill = if active { palette.accent } else { palette.text };
         ui.painter().rect_filled(filled, 2.0, fill);
         if active {
+            let radius = (width / 24.0).clamp(3.5, 6.0);
             ui.painter()
-                .circle_filled(pos2(filled.right(), bar.center().y), 6.0, palette.text);
+                .circle_filled(pos2(filled.right(), bar.center().y), radius, palette.text);
         }
     }
     event

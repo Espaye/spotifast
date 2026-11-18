@@ -39,6 +39,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         return;
     }
+    // Keep each shelf's scrollbar below its cards, including their hover backgrounds.
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.floating_allocated_width =
+        scroll.bar_inner_margin + scroll.bar_width + scroll.bar_outer_margin;
     ui.add_space(6.0);
     let greeting = crate::util::greeting(app.locale);
     theme::text(ui, greeting.as_ref(), theme::bold(30.0), palette.text);

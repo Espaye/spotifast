@@ -1046,7 +1046,7 @@ fn fullscreen_header(app: &mut App, ui: &mut egui::Ui, controls: f32) {
     });
 }
 
-fn sync_button(app: &mut App, ui: &egui::Ui, room: Rect, palette: &theme::Palette) {
+fn sync_button(app: &mut App, ui: &mut egui::Ui, room: Rect, palette: &theme::Palette) {
     if app.lyrics_following
         || !matches!(&app.lyrics, Loadable::Loaded(Some(lyrics)) if !lyrics.instrumental)
     {

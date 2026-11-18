@@ -2564,7 +2564,7 @@ impl App {
                 // what the spinner follows.
                 loading: self.local.loading,
                 shuffle: self.shuffle_wanted,
-                repeat: self.shown_repeat(self.local.repeat, Target::Local),
+                repeat: self.shown_repeat(self.local.repeat),
                 volume_percent: volume_to_percent(self.local.volume),
                 can_control: true,
                 can_set_volume: true,
@@ -2663,10 +2663,7 @@ impl App {
             playing,
             loading: false,
             shuffle: self.shuffle_wanted,
-            repeat: self.shown_repeat(
-                RepeatMode::from_api(&remote.state.repeat_state),
-                Target::Remote(device.and_then(|device| device.id.clone())),
-            ),
+            repeat: self.shown_repeat(RepeatMode::from_api(&remote.state.repeat_state)),
             volume_percent: volume,
             // A restricted device is driven over the playback session's
             // Connect link instead, see `crate::sonos`.
@@ -4702,7 +4699,10 @@ impl App {
         let Some(now) = &self.frame_now else {
             return;
         };
-        if reading && self.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
+        if reading
+            && self.intent_track.is_some()
+            && self.lyrics_uri.as_deref() != Some(now.uri.as_str())
+        {
             self.request_lyrics();
             return;
         }
@@ -11922,6 +11922,10 @@ impl App {
         }
     }
 
+    pub(crate) fn playback_repeat(&self, now: Option<&NowPlaying>) -> RepeatMode {
+        now.map_or_else(|| self.shown_repeat(self.local_repeat()), |now| now.repeat)
+    }
+
     /// Whether `action` is the listener choosing another song: Next, a
     /// Previous that steps back rather than restarting, or starting
     /// something to play. A play-search only counts once its match plays.
@@ -11960,10 +11964,10 @@ impl App {
         }
     }
 
-    fn shown_repeat(&self, actual: RepeatMode, target: Target) -> RepeatMode {
+    fn shown_repeat(&self, actual: RepeatMode) -> RepeatMode {
         self.pending_repeat
             .as_ref()
-            .filter(|(player, _, at)| *player == target && at.elapsed() < PLAYBACK_HOLD)
+            .filter(|(player, _, at)| at.elapsed() < PLAYBACK_HOLD && *player == self.target())
             .map_or(actual, |(_, mode, _)| *mode)
     }
 
@@ -13443,7 +13447,7 @@ impl App {
             }
             Action::SetShuffle(shuffle) => self.set_shuffle(shuffle),
             Action::CycleRepeat => {
-                let mode = self.now_playing().map(|now| now.repeat).unwrap_or_default();
+                let mode = self.playback_repeat(self.now_playing().as_ref());
                 self.set_repeat(mode.next());
             }
             Action::SetRepeat(mode) => self.set_repeat(mode),

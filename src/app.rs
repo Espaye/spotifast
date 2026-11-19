@@ -4579,11 +4579,7 @@ impl App {
         if let Some(url) = now.art_small.or(now.art_url) {
             self.tint_for(Some(&url));
         }
-        if matches!(self.page(), Page::Queue)
-            || self.show_queue_panel
-            || (!self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some()))
-            || (self.settings.winamp_window && self.settings.playlist_open)
-        {
+        if self.queue_on_show() {
             self.refresh_queue(true);
         }
         if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() {
@@ -7626,6 +7622,16 @@ impl App {
         self.backend.api(ApiRequest::Devices);
     }
 
+    /// Whether something on show reads the queue: its page or panel, the
+    /// classic playlist window, or lyrics when the connection is not
+    /// metered.
+    fn queue_on_show(&self) -> bool {
+        matches!(self.page(), Page::Queue)
+            || self.show_queue_panel
+            || (!self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some()))
+            || (self.settings.winamp_window && self.settings.playlist_open)
+    }
+
     /// The queue panel shows a current queue, and its Recent tab loads now
     /// rather than when it is chosen. Both are Web API reads.
     fn open_queue_panel(&mut self) {
@@ -7803,17 +7809,28 @@ impl App {
         Self::end_of_queued_rows_of(rows, &[manual, self.remote_queued()])
     }
 
-    /// The songs the device playing elsewhere lists as queued by hand, or
-    /// none when its last push is not about the song shown playing there.
+    /// The songs the device playing elsewhere lists as queued by hand. A
+    /// song shown playing since its last push (Next took it, or it came up
+    /// on its own) has left them, and the rest stay on show while the
+    /// device catches up rather than drop under Next from for a moment.
     fn remote_queued(&self) -> &[String] {
-        self.remote_queue_view()
-            .map(|view| view.queued.as_slice())
-            .unwrap_or_default()
+        let Some(view) = self.remote_queue_seen() else {
+            return &[];
+        };
+        let Some(shown) = self.current_track_uri() else {
+            return &[];
+        };
+        if shown == view.track {
+            return &view.queued;
+        }
+        match view.queued.iter().position(|uri| *uri == shown) {
+            Some(at) => &view.queued[at + 1..],
+            None => &view.queued,
+        }
     }
 
-    /// The last cluster push about the device this app controls elsewhere,
-    /// while it still describes the song shown playing there.
-    fn remote_queue_view(&self) -> Option<&crate::player::RemoteQueueView> {
+    /// The last cluster push about the device this app controls elsewhere.
+    fn remote_queue_seen(&self) -> Option<&crate::player::RemoteQueueView> {
         let Target::Remote(device) = self.target() else {
             return None;
         };
@@ -7823,9 +7840,16 @@ impl App {
         let view = self.remote_queue.as_ref()?;
         let named = device.as_deref().is_none_or(|id| id == view.device);
         let elsewhere = self.local_device_id.as_deref() != Some(view.device.as_str());
+        (named && elsewhere && !view.device.is_empty()).then_some(view)
+    }
+
+    /// The last cluster push about the device this app controls elsewhere,
+    /// while it still describes the song shown playing there. Edits wait
+    /// for it: Connect's set_queue rewrites the list that push holds.
+    fn remote_queue_view(&self) -> Option<&crate::player::RemoteQueueView> {
+        let view = self.remote_queue_seen()?;
         let current = self.current_track_uri();
-        let playing = current.as_deref() == Some(view.track.as_str());
-        (named && elsewhere && playing && !view.device.is_empty()).then_some(view)
+        (current.as_deref() == Some(view.track.as_str())).then_some(view)
     }
 
     /// Keeps a cluster push and asks for the queue again when what the
@@ -7836,8 +7860,13 @@ impl App {
             .as_ref()
             .is_none_or(|shown| shown.queued != view.queued || shown.track != view.track);
         self.remote_queue = Some(view);
-        if changed && self.remote_queue_view().is_some() && self.queue_recheck_at.is_none() {
-            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        if changed && self.remote_queue_view().is_some() {
+            if !self.queue_on_show() {
+                // Read when a queue shows again.
+                self.queue_fetched_at = None;
+            } else if self.queue_recheck_at.is_none() {
+                self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+            }
         }
     }
 
@@ -22075,6 +22104,43 @@ mod tests {
         app.handle_local(state);
         assert!(app.queue_skip.is_none(), "it plays");
         assert!(!app.play_pending("spotify:track:b"));
+    }
+
+    /// Songs queued on another device, from any app, stay under Next in
+    /// queue right after Next, before the device says the first of them
+    /// plays. They dropped under Next from until its push came.
+    #[test]
+    fn songs_queued_on_another_device_stay_queued_after_next() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:x",
+                "spotify:track:y",
+                "spotify:track:z",
+                "spotify:track:c",
+            ],
+        );
+        app.remote_queue = Some(crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: "spotify:track:a".into(),
+            queued: vec![
+                "spotify:track:x".into(),
+                "spotify:track:y".into(),
+                "spotify:track:z".into(),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(app.queued_rows_len(), 3);
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:x"));
+        assert_eq!(app.queued_rows_len(), 2, "y and z are still queued");
     }
 
     /// On another device a Next up click is one request naming the song. A

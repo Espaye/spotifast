@@ -1047,7 +1047,8 @@ pub struct DragTrack {
     pub items: Vec<PlayableItem>,
     /// Source playlist ID and row index for moves within an editable
     /// playlist, or [`QUEUED_ROW`] or [`UPCOMING_ROW`] and the row's index
-    /// in the whole queue for a row of the open queue.
+    /// in the whole queue for a row of the open queue, or
+    /// [`NOW_PLAYING_ROW`] for its Now playing row.
     pub from: Option<(String, u32)>,
     /// The editable playlist the rows were dragged from, however many there
     /// are. Several rows have no `from`, and dropping them back into their
@@ -1061,6 +1062,19 @@ pub const QUEUED_ROW: &str = "queue";
 /// The `from` origin of a row dragged out of the queue's rows after Next in
 /// queue, which play from the context in its own order.
 pub const UPCOMING_ROW: &str = "queue-upcoming";
+
+/// The `from` origin of the open queue's Now playing row.
+pub const NOW_PLAYING_ROW: &str = "queue-now-playing";
+
+impl DragTrack {
+    /// Whether the rows were dragged out of the open queue, which never
+    /// queues them again.
+    pub fn is_from_queue(&self) -> bool {
+        self.from.as_ref().is_some_and(|(origin, _)| {
+            [QUEUED_ROW, UPCOMING_ROW, NOW_PLAYING_ROW].contains(&origin.as_str())
+        })
+    }
+}
 
 /// Why a song dropped on the open queue stayed where it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

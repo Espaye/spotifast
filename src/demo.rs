@@ -11952,12 +11952,13 @@ mod tests {
     }
 
     /// Drags `name`'s row of the open queue and drops it on the top edge of
-    /// `onto`'s row, returning the payload the drag carried.
+    /// `onto`'s row, or on the player bar's Queue button without one,
+    /// returning the payload the drag carried.
     fn drag_queue_row_onto(
         ctx: &egui::Context,
         app: &mut App,
         name: &str,
-        onto: &str,
+        onto: Option<&str>,
     ) -> DragTrack {
         let tree = accessible_frame(ctx, app, vec![]);
         // The queue panel's own rows: some songs are also on the page
@@ -11985,8 +11986,33 @@ mod tests {
         };
         let start_row = row_rect(name);
         let start = egui::pos2(start_row.left() + 80.0, start_row.center().y);
-        let end_row = row_rect(onto);
-        let end = egui::pos2(end_row.left() + 130.0, end_row.top() + 2.0);
+        let end = match onto {
+            Some(onto) => {
+                let end_row = row_rect(onto);
+                egui::pos2(end_row.left() + 130.0, end_row.top() + 2.0)
+            }
+            None => {
+                // The player bar's Queue button, not the queue panel's tab.
+                let bounds = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.label() == Some("Queue")
+                            && node.bounds().is_some_and(|bounds| {
+                                bounds.y0 >= f64::from(800.0 - crate::theme::PLAYER_BAR_HEIGHT)
+                            })
+                    })
+                    .expect("the player bar's Queue button")
+                    .1
+                    .bounds()
+                    .unwrap();
+                egui::pos2(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                )
+            }
+        };
         frame_events(
             ctx,
             app,
@@ -12040,7 +12066,7 @@ mod tests {
                 frame_events(&ctx, &mut app, vec![]);
             }
             // "Otomo" is the first Next up row, after the three queued ones.
-            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", "Queued 0");
+            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 0"));
             assert_eq!(
                 payload.from,
                 Some((crate::model::UPCOMING_ROW.to_string(), 3)),
@@ -12072,7 +12098,7 @@ mod tests {
         for _ in 0..3 {
             frame_events(&ctx, &mut app, vec![]);
         }
-        let payload = drag_queue_row_onto(&ctx, &mut app, "Queued 2", "Queued 0");
+        let payload = drag_queue_row_onto(&ctx, &mut app, "Queued 2", Some("Queued 0"));
         assert_eq!(
             payload.from,
             Some((crate::model::QUEUED_ROW.to_string(), 2))
@@ -12086,6 +12112,55 @@ mod tests {
             app.toasts
         );
         app.backend.shutdown();
+    }
+
+    /// The Now playing row dropped on Next in queue does not queue the
+    /// playing song again, and the toast says why.
+    #[test]
+    fn the_now_playing_row_dropped_on_the_queue_is_not_queued_again() {
+        let (ctx, mut app) = accessible_app("queue-now-playing-no-copy");
+        app.show_queue_panel = true;
+        let uris = seed_queued_songs(&mut app);
+        let rows_before = app.queue.get().unwrap().queue.len();
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let playing = app.now_playing().expect("a song playing").title;
+        let payload = drag_queue_row_onto(&ctx, &mut app, &playing, Some("Queued 0"));
+        assert_eq!(
+            payload.from,
+            Some((crate::model::NOW_PLAYING_ROW.to_string(), 0))
+        );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(app.queue.get().unwrap().queue.len(), rows_before);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message == "Only songs in Next in queue can be moved"),
+            "{:?}",
+            app.toasts
+        );
+        app.backend.shutdown();
+    }
+
+    /// A queue row dropped on the player bar's Queue button is not queued
+    /// again, from Next in queue or from Next up.
+    #[test]
+    fn a_queue_row_dropped_on_the_queue_button_is_not_queued_again() {
+        for (index, name) in ["Queued 1", "Otomo"].into_iter().enumerate() {
+            let (ctx, mut app) = accessible_app(&format!("queue-button-no-copy-{index}"));
+            app.show_queue_panel = true;
+            let uris = seed_queued_songs(&mut app);
+            let rows_before = app.queue.get().unwrap().queue.len();
+            for _ in 0..3 {
+                frame_events(&ctx, &mut app, vec![]);
+            }
+            let payload = drag_queue_row_onto(&ctx, &mut app, name, None);
+            assert!(payload.is_from_queue(), "{name}");
+            assert_eq!(app.manual_queue, uris, "{name}");
+            assert_eq!(app.queue.get().unwrap().queue.len(), rows_before, "{name}");
+            app.backend.shutdown();
+        }
     }
 
     /// Pins are pins: dropping a pinned row at the top of the block

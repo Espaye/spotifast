@@ -8,7 +8,8 @@ use crate::api::models::PlayableItem;
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
 use crate::model::{
-    Action, DragTrack, Loadable, QUEUED_ROW, QueueRefusal, QueueTab, RowContext, UPCOMING_ROW,
+    Action, DragTrack, Loadable, NOW_PLAYING_ROW, QUEUED_ROW, QueueRefusal, QueueTab, RowContext,
+    UPCOMING_ROW,
 };
 use crate::theme::{self, Icon};
 
@@ -393,7 +394,7 @@ enum Landing {
 /// of the queue itself is never queued again: it moves, or nothing happens.
 fn landing_of(app: &App, track: &DragTrack) -> Landing {
     match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
-        Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Upcoming),
+        Some(UPCOMING_ROW | NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::Upcoming),
         Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
         Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked),
         _ if app.queue_locally_reorderable() => Landing::Insert,
@@ -564,7 +565,15 @@ fn rows(
             position: None,
             show_saved_heart: false,
         };
+        let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
         widgets::edge_faded(ui, row_height, |ui| widgets::track_row(ui, app, row));
+        // A drag that started on this row names it, so dropping the playing
+        // song back on the queue does not queue it again.
+        if !dragging && let Some(payload) = egui::DragAndDrop::payload::<DragTrack>(ui.ctx()) {
+            let mut payload = (*payload).clone();
+            payload.from = Some((NOW_PLAYING_ROW.to_string(), 0));
+            egui::DragAndDrop::set_payload(ui.ctx(), payload);
+        }
         ui.add_space(SECTION_GAP);
     }
     // Where Next in queue starts while it has no rows: halfway down the gap

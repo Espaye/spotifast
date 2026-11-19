@@ -611,6 +611,12 @@ pub struct App {
     /// Songs taken out of Playing next one by one, and when, used to
     /// reject a fetch that still has one right after the queued rows.
     queue_removed: Option<(std::collections::HashSet<String>, Instant)>,
+    /// What the device playing elsewhere has queued by hand, as Spotify
+    /// last pushed it over the Connect session.
+    remote_queue: Option<crate::player::RemoteQueueView>,
+    /// The last mismatch between that push and the Web API's queue that was
+    /// logged, so each is logged once.
+    remote_queue_logged: Option<(usize, usize, bool)>,
     /// What the window's title bar says, as last set.
     window_title: String,
 
@@ -1421,6 +1427,8 @@ impl App {
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
             queue_removed: None,
+            remote_queue: None,
+            remote_queue_logged: None,
             window_title: String::new(),
             library: Library::default(),
             liked_songs: crate::liked::LikedSongs::default(),
@@ -3147,6 +3155,7 @@ impl App {
                 Event::RemoteVolume { device_id, volume } => {
                     self.handle_remote_volume(&device_id, volume);
                 }
+                Event::RemoteQueue(view) => self.note_remote_queue(view),
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent {
                     url,
@@ -7762,11 +7771,108 @@ impl App {
     /// so the view can give them their own section.
     pub fn queued_rows_len(&self) -> usize {
         match &self.queue {
-            Loadable::Loaded(queue) => {
-                Self::end_of_queued_rows(&queue.queue, self.queued_by_hand())
-            }
+            Loadable::Loaded(queue) => self.queued_end(&queue.queue, self.queued_by_hand()),
             _ => 0,
         }
+    }
+
+    /// Index after the rows queued by hand, counting both the songs queued
+    /// here, `manual`, and those the device playing elsewhere lists as
+    /// queued, which include songs queued from another app.
+    fn queued_end(&self, rows: &[PlayableItem], manual: &[String]) -> usize {
+        Self::end_of_queued_rows_of(rows, &[manual, self.remote_queued()])
+    }
+
+    /// The songs the device playing elsewhere lists as queued by hand, or
+    /// none when its last push is not about the song shown playing there.
+    fn remote_queued(&self) -> &[String] {
+        self.remote_queue_view()
+            .map(|view| view.queued.as_slice())
+            .unwrap_or_default()
+    }
+
+    /// The last cluster push about the device this app controls elsewhere,
+    /// while it still describes the song shown playing there.
+    fn remote_queue_view(&self) -> Option<&crate::player::RemoteQueueView> {
+        let Target::Remote(device) = self.target() else {
+            return None;
+        };
+        if self.targets_own_soloist() {
+            return None;
+        }
+        let view = self.remote_queue.as_ref()?;
+        let named = device.as_deref().is_none_or(|id| id == view.device);
+        let elsewhere = self.local_device_id.as_deref() != Some(view.device.as_str());
+        let current = self.current_track_uri();
+        let playing = current.as_deref() == Some(view.track.as_str());
+        (named && elsewhere && playing && !view.device.is_empty()).then_some(view)
+    }
+
+    /// Keeps a cluster push and asks for the queue again when what the
+    /// device has queued changed, so Next in queue follows another app.
+    fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
+        let changed = self
+            .remote_queue
+            .as_ref()
+            .is_none_or(|shown| shown.queued != view.queued || shown.track != view.track);
+        self.remote_queue = Some(view);
+        if changed && self.remote_queue_view().is_some() && self.queue_recheck_at.is_none() {
+            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        }
+    }
+
+    /// Puts the songs the device playing elsewhere lists as queued by hand
+    /// at the front of its fetched queue, in the device's order. The Web
+    /// API's list does not mark them, and a song it lists only further down
+    /// would otherwise fall out of Next in queue. A song it leaves out is
+    /// added.
+    fn follow_remote_queue(&mut self, fetched: &mut Queue) {
+        let Some(view) = self.remote_queue_view() else {
+            return;
+        };
+        let playing = fetched.currently_playing.as_ref().map(PlayableItem::uri);
+        if playing != Some(view.track.as_str()) || view.queued.is_empty() {
+            return;
+        }
+        let queued = view.queued.clone();
+        let titles = view.titles.clone();
+        let in_order = fetched
+            .queue
+            .iter()
+            .map(PlayableItem::uri)
+            .take(queued.len())
+            .eq(queued.iter().map(String::as_str));
+        let mut rows: Vec<Option<PlayableItem>> = std::mem::take(&mut fetched.queue)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut front = Vec::with_capacity(queued.len());
+        let mut missing = 0;
+        for (index, uri) in queued.iter().enumerate() {
+            let row = rows
+                .iter_mut()
+                .find(|row| row.as_ref().is_some_and(|item| item.uri() == uri))
+                .and_then(Option::take);
+            match row {
+                Some(item) => front.push(item),
+                None => {
+                    missing += 1;
+                    let title = titles.get(index).filter(|title| !title.is_empty());
+                    front.push(self.optimistic_queue_item(uri, title.unwrap_or(uri)));
+                }
+            }
+        }
+        front.extend(rows.into_iter().flatten());
+        fetched.queue = front;
+        let seen = (queued.len(), missing, in_order);
+        if (missing > 0 || !in_order) && self.remote_queue_logged != Some(seen) {
+            log::info!(
+                "queue on another device: {} queued, {missing} missing from the Web API, \
+                 in order {in_order}",
+                queued.len()
+            );
+        }
+        self.remote_queue_logged = Some(seen);
     }
 
     /// The songs the user queued here. Before resume, the saved manual
@@ -8067,7 +8173,7 @@ impl App {
             && fetched.currently_playing.as_ref().map(|item| item.uri())
                 == pending.current_uri.as_deref()
         {
-            let at = Self::end_of_queued_rows(&fetched.queue, &self.manual_queue);
+            let at = self.queued_end(&fetched.queue, &self.manual_queue);
             let fetched_context = &fetched.queue[at..];
             if fetched_context.len() == pending.context_uris.len()
                 && fetched_context
@@ -8780,6 +8886,7 @@ impl App {
                     return;
                 }
                 if let Ok(fetched) = &mut result {
+                    self.follow_remote_queue(fetched);
                     self.drop_queue_padding(fetched);
                 }
                 // Partial reads and read failures must preserve optimistic
@@ -11901,7 +12008,7 @@ impl App {
 
     fn note_shuffle_pending(&mut self) {
         if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let at = self.queued_end(&queue.queue, &self.manual_queue);
             let context_uris: Vec<String> = queue.queue[at..]
                 .iter()
                 .map(|item| item.uri().to_string())
@@ -12373,7 +12480,7 @@ impl App {
             write: None,
         });
         if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let at = self.queued_end(&queue.queue, &self.manual_queue);
             if let Loadable::Loaded(queue) = &mut self.queue {
                 queue.queue.insert(at, item);
             }
@@ -12426,8 +12533,11 @@ impl App {
                 .iter()
                 .filter(|other| *other == uri)
                 .count();
+            let queued_len = match &self.queue {
+                Loadable::Loaded(queue) => self.queued_end(&queue.queue, &self.manual_queue),
+                _ => 0,
+            };
             if let Loadable::Loaded(queue) = &mut self.queue {
-                let queued_len = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
                 if let Some(row) = queue.queue[..queued_len]
                     .iter()
                     .enumerate()
@@ -12470,9 +12580,22 @@ impl App {
 
     /// Index after manual queue rows and before context rows.
     fn end_of_queued_rows(rows: &[PlayableItem], manual: &[String]) -> usize {
+        Self::end_of_queued_rows_of(rows, &[manual])
+    }
+
+    /// Index after the leading rows each list accounts for: a song counts
+    /// as often as the list that holds it most often has it.
+    fn end_of_queued_rows_of(rows: &[PlayableItem], lists: &[&[String]]) -> usize {
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for uri in manual {
-            *counts.entry(uri.as_str()).or_insert(0) += 1;
+        for &list in lists {
+            let mut own: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for uri in list {
+                *own.entry(uri.as_str()).or_insert(0) += 1;
+            }
+            for (uri, count) in own {
+                let held = counts.entry(uri).or_insert(0);
+                *held = (*held).max(count);
+            }
         }
         let mut at = 0;
         for item in rows {
@@ -12500,7 +12623,7 @@ impl App {
         let Some(current) = &fetched.currently_playing else {
             return;
         };
-        let queued = Self::end_of_queued_rows(&fetched.queue, self.queued_by_hand());
+        let queued = self.queued_end(&fetched.queue, self.queued_by_hand());
         Self::drop_wraparound(&mut fetched.queue, queued, current.uri());
     }
 
@@ -12583,19 +12706,31 @@ impl App {
         if self.pending_queue_adds.is_empty() {
             return;
         }
-        let Loadable::Loaded(queue) = &mut self.queue else {
+        let Loadable::Loaded(queue) = &self.queue else {
             return;
         };
-        let fetched: std::collections::HashSet<String> = queue
-            .queue
-            .iter()
-            .map(|item| item.uri().to_string())
-            .collect();
+        // Only a copy among the queued rows confirms an addition: the
+        // playing context may hold the same song further down.
+        let queued_len = self.queued_end(&queue.queue, &self.manual_queue);
+        let mut listed: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for item in &queue.queue[..queued_len] {
+            *listed.entry(item.uri().to_string()).or_insert(0) += 1;
+        }
         // A fetched or currently playing addition is no longer pending.
         let current = self.current_track_uri();
         self.pending_queue_adds.retain(|addition| {
-            !fetched.contains(addition.item.uri())
-                && current.as_deref() != Some(addition.item.uri())
+            let uri = addition.item.uri();
+            if current.as_deref() == Some(uri) {
+                return false;
+            }
+            match listed.get_mut(uri) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    false
+                }
+                _ => true,
+            }
         });
         let missing: Vec<PlayableItem> = self
             .pending_queue_adds
@@ -12603,7 +12738,7 @@ impl App {
             .map(|addition| addition.item.clone())
             .collect();
         let at = match &self.queue {
-            Loadable::Loaded(queue) => Self::end_of_queued_rows(&queue.queue, &self.manual_queue),
+            Loadable::Loaded(queue) => self.queued_end(&queue.queue, &self.manual_queue),
             _ => 0,
         };
         if let Loadable::Loaded(queue) = &mut self.queue {

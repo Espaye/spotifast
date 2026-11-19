@@ -1080,6 +1080,9 @@ pub enum Event {
         device_id: String,
         volume: u16,
     },
+    /// What the device playing elsewhere has queued by hand, as Spotify
+    /// last pushed it.
+    RemoteQueue(crate::player::RemoteQueueView),
     Api(Box<ApiResponse>),
     Accent {
         url: String,
@@ -3623,6 +3626,10 @@ impl Worker {
                 }
                 EngineEvent::RemoteVolume { device_id, volume } => {
                     let _ = events.send(Event::RemoteVolume { device_id, volume });
+                    waker.wake();
+                }
+                EngineEvent::RemoteQueue(view) => {
+                    let _ = events.send(Event::RemoteQueue(view));
                     waker.wake();
                 }
             }

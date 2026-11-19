@@ -341,6 +341,8 @@ pub enum EngineEvent {
         device_id: String,
         volume: u16,
     },
+    /// What the playing device has queued by hand changed.
+    RemoteQueue(RemoteQueueView),
 }
 
 /// The parts of a Connect cluster push that the interface shows for
@@ -399,6 +401,44 @@ impl ClusterView {
             ..self.clone()
         } == *next;
         same_otherwise.then(|| volume.min(u32::from(u16::MAX)) as u16)
+    }
+}
+
+/// The provider Connect marks a next track queued by hand with.
+const QUEUE_PROVIDER: &str = "queue";
+
+/// What the playing device has queued by hand, as a cluster push lists
+/// it. The Web API's queue does
+/// not tell queued rows from the context's; the cluster does.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemoteQueueView {
+    /// The device's Connect id.
+    pub device: String,
+    /// The song it plays.
+    pub track: String,
+    /// Its next tracks queued by hand, in play order.
+    pub queued: Vec<String>,
+    /// Their titles, empty where the push names none.
+    pub titles: Vec<String>,
+}
+
+impl RemoteQueueView {
+    fn of(cluster: &Cluster) -> Self {
+        let state = &cluster.player_state;
+        let queued: Vec<&ProvidedTrack> = state
+            .next_tracks
+            .iter()
+            .filter(|track| track.provider == QUEUE_PROVIDER)
+            .collect();
+        Self {
+            device: cluster.active_device_id.clone(),
+            track: state.track.uri.clone(),
+            queued: queued.iter().map(|track| track.uri.clone()).collect(),
+            titles: queued
+                .iter()
+                .map(|track| track.metadata.get("title").cloned().unwrap_or_default())
+                .collect(),
+        }
     }
 }
 
@@ -530,10 +570,16 @@ async fn watch_cluster(
 ) {
     use futures_util::StreamExt as _;
     let mut shown = ClusterView::default();
+    let mut shown_queue = RemoteQueueView::default();
     while let Some(update) = updates.next().await {
         let Some(cluster) = update.ok().and_then(|update| update.cluster.into_option()) else {
             continue;
         };
+        let queued = RemoteQueueView::of(&cluster);
+        if queued != shown_queue {
+            shown_queue = queued.clone();
+            notify(EngineEvent::RemoteQueue(queued));
+        }
         let view = ClusterView::of(&cluster);
         if shown.changed_elsewhere(&view, &own_device) {
             notify(match shown.volume_only(&view) {

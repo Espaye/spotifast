@@ -740,7 +740,7 @@ fn big_cover(app: &mut App, ui: &mut egui::Ui, column: Rect, align: Align, stand
     );
     widgets::settle_playing_cover(ui, app.backend.art(), url, stands_in);
     let art = now.art_url.is_some() || now.art_small.is_some();
-    cover_opens_immersive(app, ui, cover, art);
+    cover_milkdrop(app, ui, cover, art);
     let words = Rect::from_min_max(pos2(column.left(), cover.bottom() + 18.0), column.max);
     let mut text = ui.new_child(
         UiBuilder::new()
@@ -926,16 +926,26 @@ pub fn immersive_click(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
-/// The cover is the way into immersive mode, if there is MilkDrop to go to.
-fn cover_opens_immersive(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
+/// Clicking the cover changes the backdrop. Its menu also offers MilkDrop alone.
+fn cover_milkdrop(app: &mut App, ui: &egui::Ui, cover: Rect, art: bool) {
     #[cfg(feature = "milkdrop")]
-    if art
-        && ui
+    if art {
+        let response = ui
             .interact(cover, ui.id().with("lyrics-cover"), Sense::click())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .double_clicked()
-    {
-        app.actions.push(Action::EnterImmersive);
+            .on_hover_text(gettext(app.locale, "Change background"));
+        if response.clicked() {
+            app.actions.push(Action::ToggleLyricsMilkdrop);
+        }
+        let palette = theme::Palette::dark();
+        let only = gettext(app.locale, "Show MilkDrop only");
+        egui::Popup::context_menu(&response)
+            .frame(widgets::menu_frame(&palette))
+            .show(|ui| {
+                if widgets::menu_item(ui, &palette, None, &only) {
+                    app.actions.push(Action::EnterImmersive);
+                }
+            });
     }
     #[cfg(not(feature = "milkdrop"))]
     let _ = (app, ui, cover, art);
@@ -1099,7 +1109,7 @@ fn track_heading(app: &mut App, ui: &mut egui::Ui) {
                 4.0,
             );
             let art = now.art_url.is_some() || now.art_small.is_some();
-            cover_opens_immersive(app, ui, rect, art);
+            cover_milkdrop(app, ui, rect, art);
             ui.vertical(|ui| {
                 song_links(
                     app,

@@ -330,10 +330,11 @@ pub enum EngineEvent {
     },
     /// Spotify pushed a change to playback on another device: a switch,
     /// play or pause, another song or collection, shuffle or repeat. It
-    /// names the song playing there and the one Previous steps back to.
+    /// names the song playing there and the songs Previous steps back
+    /// through, oldest first.
     RemoteChanged {
         track: String,
-        previous: Option<String>,
+        previous: Vec<String>,
     },
     /// Spotify pushed a new volume for the device playing elsewhere, and
     /// nothing else changed. It carries the value, so no poll is needed.
@@ -355,8 +356,9 @@ struct ClusterView {
     active_device: String,
     context: String,
     track: String,
-    /// The song before it, when Spotify lists one that can play.
-    previous: Option<String>,
+    /// The songs before it, oldest first, back to the nearest entry that is
+    /// not a song, and at most [`PREVIOUS_KEPT`] of them.
+    previous: Vec<String>,
     playing: bool,
     shuffle: bool,
     repeat_context: bool,
@@ -364,17 +366,29 @@ struct ClusterView {
     volume: Option<u32>,
 }
 
+/// How many songs before the playing one a push keeps, so that quick
+/// presses of Previous keep stepping back.
+const PREVIOUS_KEPT: usize = 20;
+
 impl ClusterView {
     fn of(cluster: &Cluster) -> Self {
         let state = &cluster.player_state;
-        let previous = state.prev_tracks.last().map(|track| track.uri.as_str());
+        // Only an unbroken run of songs counts: past an episode or a
+        // delimiter the steps back are not known.
+        let tracks = &state.prev_tracks;
+        let start = tracks
+            .iter()
+            .rposition(|track| !track.uri.starts_with("spotify:track:"))
+            .map_or(0, |index| index + 1)
+            .max(tracks.len().saturating_sub(PREVIOUS_KEPT));
         Self {
             active_device: cluster.active_device_id.clone(),
             context: state.context_uri.clone(),
             track: state.track.uri.clone(),
-            previous: previous
-                .filter(|uri| uri.starts_with("spotify:track:"))
-                .map(str::to_owned),
+            previous: tracks[start..]
+                .iter()
+                .map(|track| track.uri.clone())
+                .collect(),
             playing: state.is_playing && !state.is_paused,
             shuffle: state.options.shuffling_context,
             repeat_context: state.options.repeating_context,

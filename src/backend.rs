@@ -1078,10 +1078,11 @@ pub enum Event {
     },
     Local(Box<LocalState>),
     /// Playback on another device changed; poll it now rather than later.
-    /// It names the song playing there and the one Previous steps back to.
+    /// It names the song playing there and the songs Previous steps back
+    /// through, oldest first.
     RemoteChanged {
         track: String,
-        previous: Option<String>,
+        previous: Vec<String>,
     },
     /// The volume Spotify pushed for the device playing elsewhere, by its
     /// Connect id, on librespot's 0 to 65535 scale.

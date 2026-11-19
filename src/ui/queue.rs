@@ -360,22 +360,14 @@ fn save_button(
         .clicked()
 }
 
-/// Clears manual rows from the active local queue.
+/// Clears the songs under Next in queue, leaving the context's rows.
 fn clear_button(app: &mut App, ui: &mut egui::Ui) {
     if !app.can_clear_queue() {
         return;
     }
     let palette = app.palette;
-    if theme::icon_button(
-        ui,
-        Icon::Trash,
-        18.0,
-        palette.secondary,
-        palette.text,
-        &gettext(app.locale, "Clear queue"),
-    )
-    .clicked()
-    {
+    let label = gettext(app.locale, "Clear queue");
+    if theme::soft_button(ui, &palette, None, &label, false).clicked() {
         app.actions.push(Action::ClearQueue);
     }
 }
@@ -399,7 +391,7 @@ fn dragging_queued_row(ui: &egui::Ui) -> bool {
     from.is_some_and(|(origin, _)| origin == "queue")
 }
 
-/// Space below the now-playing row and below Playing next, before the next
+/// Space below the now-playing row and below Next in queue, before the next
 /// section's heading.
 const SECTION_GAP: f32 = 14.0;
 
@@ -454,32 +446,6 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     } else {
         theme::ROW_HEIGHT
     };
-    // Where the songs come from, above the song itself. A radio has no
-    // page, so its name is plain text.
-    if let Some(from) = app.playing_from().filter(|_| current.is_some()) {
-        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
-            ui.horizontal(|ui| {
-                theme::text(
-                    ui,
-                    gettext(app.locale, "Playing from"),
-                    theme::regular(13.0),
-                    palette.secondary,
-                );
-                match from.page {
-                    Some(page) => {
-                        if theme::link(ui, from.name, theme::semibold(13.0), palette.text).clicked()
-                        {
-                            app.actions.push(Action::Open(page));
-                        }
-                    }
-                    None => {
-                        theme::text(ui, from.name, theme::semibold(13.0), palette.text);
-                    }
-                }
-            });
-        });
-        ui.add_space(10.0);
-    }
     if let Some(current) = current.as_ref() {
         widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
             theme::text(
@@ -540,8 +506,8 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     // through both, because that is the order things play.
     let queued_len = app.queued_rows_len().min(queue_len);
     if queued_len > 0 {
-        // The trash sits with the songs it removes: only this section is
-        // the user's to clear, the context below plays itself.
+        // Clear sits with the songs it removes: only this section is the
+        // user's to clear, the context below plays itself.
         widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
             ui.horizontal(|ui| {
                 theme::text(
@@ -549,7 +515,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
                     gettext(
                         app.locale,
                         // Translators: Songs added manually, before the current playlist or album continues.
-                        "Playing next",
+                        "Next in queue",
                     ),
                     theme::semibold(14.0),
                     palette.text,
@@ -567,7 +533,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
         // Calculate the nearest drop slot from fixed row height because
         // virtualized rows are not all available during drawing.
         let list_top = ui.cursor().top();
-        // Bound the hit test to Playing next's own rows and the space below
+        // Bound the hit test to Next in queue's own rows and the space below
         // them, where the append-at-the-end slot sits. The scroll area's
         // clip rect also covers Next up below, which is never a drop target.
         let section_rect = egui::Rect::from_min_max(
@@ -663,21 +629,52 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
         }
         ui.add_space(SECTION_GAP);
     }
-    // With Playing next empty, the panel holds no drop target at all: every
+    // With Next in queue empty, the panel holds no drop target at all: every
     // row on it belongs to Next up, which plays from the context and is never
     // rewritten. The player bar's Queue button still takes the drop.
     if queue_len > queued_len {
-        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
-            theme::text(
-                ui,
-                gettext(
-                    app.locale,
-                    // Translators: Upcoming songs from the current playlist or album, after manually queued songs.
-                    "Next up",
-                ),
-                theme::semibold(14.0),
-                palette.text,
-            );
+        // Named after where its songs come from, which opens on a click. A
+        // radio has no page, so its name is plain text.
+        let from = app.playing_from();
+        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| match from {
+            Some(from) => {
+                ui.horizontal(|ui| {
+                    theme::text(
+                        ui,
+                        gettext(
+                            app.locale,
+                            // Translators: Followed by the name of the playlist, album or radio the next songs come from.
+                            "Next from:",
+                        ),
+                        theme::semibold(14.0),
+                        palette.text,
+                    );
+                    let name = from.name;
+                    match from.page {
+                        Some(page) => {
+                            if theme::link(ui, name, theme::semibold(14.0), palette.text).clicked()
+                            {
+                                app.actions.push(Action::Open(page));
+                            }
+                        }
+                        None => {
+                            theme::text(ui, name, theme::semibold(14.0), palette.text);
+                        }
+                    }
+                });
+            }
+            None => {
+                theme::text(
+                    ui,
+                    gettext(
+                        app.locale,
+                        // Translators: Upcoming songs after manually queued songs, when they come from no named playlist or album.
+                        "Next up",
+                    ),
+                    theme::semibold(14.0),
+                    palette.text,
+                );
+            }
         });
         ui.add_space(4.0);
         let unqueued = queue_len - queued_len;
@@ -842,7 +839,7 @@ fn warm_queue_covers(
 
 /// One row of the queue, numbered and indexed by its place in the whole
 /// queue, whichever section it sits in. `shift` parts rows around the slot
-/// a dragged row would land in, in the "Playing next" section only.
+/// a dragged row would land in, in the "Next in queue" section only.
 fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shift: f32) {
     let Some(item) = app
         .queue

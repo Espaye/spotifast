@@ -478,7 +478,8 @@ fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<us
 const SECTION_GAP: f32 = 14.0;
 
 fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
-    let dragging = egui::DragAndDrop::payload::<DragTrack>(ui.ctx()).map(|track| landing_of(app, &track));
+    let dragging =
+        egui::DragAndDrop::payload::<DragTrack>(ui.ctx()).map(|track| landing_of(app, &track));
     let landing = dragging.filter(|_| ui.rect_contains_pointer(ui.clip_rect()));
     let slot = rows(app, ui, compact, dragging, landing);
     if let Some(landing) = landing
@@ -578,7 +579,12 @@ fn rows(
     }
     // Where Next in queue starts while it has no rows: halfway down the gap
     // under Now playing, or at the top without one.
-    let start_line = ui.cursor().top() - if current.is_some() { SECTION_GAP / 2.0 } else { 0.0 };
+    let start_line = ui.cursor().top()
+        - if current.is_some() {
+            SECTION_GAP / 2.0
+        } else {
+            0.0
+        };
     if queue_is_empty(app) {
         // Nothing queued at all yet: the only slot a drop could land on is
         // the first one.
@@ -669,7 +675,11 @@ fn rows(
         });
         if let Some(slot) = slot {
             // The line between the parted rows, where the song will land.
-            drop_line(ui, palette.accent, list_top + slot as f32 * (row_height + gap));
+            drop_line(
+                ui,
+                palette.accent,
+                list_top + slot as f32 * (row_height + gap),
+            );
         }
         ui.add_space(SECTION_GAP);
     }

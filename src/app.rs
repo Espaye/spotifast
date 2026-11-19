@@ -8022,7 +8022,10 @@ impl App {
                         "The songs just added are still on their way. Try again in a moment.",
                     )
                 } else {
-                    gettext(self.locale, "This device does not let Spotifast reorder its queue")
+                    gettext(
+                        self.locale,
+                        "This device does not let Spotifast reorder its queue",
+                    )
                 }
             }
         };
@@ -21660,10 +21663,7 @@ mod tests {
         app.intent_track = None;
         app.remote = Some(playing(2_500));
         app.apply(Action::Previous, &ctx);
-        assert_eq!(
-            app.current_track_uri().as_deref(),
-            Some("spotify:track:c")
-        );
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:c"));
 
         app.intent_track = None;
         app.remote = Some(playing(60_000));

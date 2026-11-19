@@ -12073,7 +12073,11 @@ mod tests {
                 "local {local}"
             );
             assert_eq!(app.manual_queue, uris, "local {local}");
-            assert_eq!(app.queue.get().unwrap().queue.len(), rows_before, "local {local}");
+            assert_eq!(
+                app.queue.get().unwrap().queue.len(),
+                rows_before,
+                "local {local}"
+            );
             assert!(
                 app.toasts
                     .iter()

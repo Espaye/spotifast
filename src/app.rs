@@ -7894,15 +7894,147 @@ impl App {
         self.local.is_active() && matches!(self.target(), Target::Local)
     }
 
-    /// Whether the active local queue has rows that can be cleared.
-    pub fn can_clear_queue(&self) -> bool {
-        self.queue_locally_reorderable() && self.queued_rows_len() > 0
+    /// Whether the rows of Next in queue can be dragged into a new order:
+    /// on the local player, or on a device playing elsewhere that takes
+    /// Connect's `set_queue` for it.
+    pub fn queue_reorderable(&self) -> bool {
+        self.queue_locally_reorderable() || self.remote_queue_editable(|view| view.can_reorder)
     }
 
-    /// Whether the queue row at `index` is one of the manually queued
-    /// songs the active local queue lets the user take out.
+    /// Whether the songs queued on the device playing elsewhere can be
+    /// rewritten now: its last cluster push allows the edit, and every
+    /// song shown queued there has reached it.
+    fn remote_queue_editable(&self, allows: fn(&crate::player::RemoteQueueView) -> bool) -> bool {
+        let target = self.target();
+        self.remote_queue_view().is_some_and(allows)
+            && self.pending_queue_adds.is_empty()
+            && !self.pending_queue_batches.values().any(|writing| *writing == target)
+    }
+
+    /// Whether songs can be taken out of Next in queue.
+    fn queue_removable(&self) -> bool {
+        self.queue_locally_reorderable() || self.remote_queue_editable(|view| view.can_remove)
+    }
+
+    /// Whether Next in queue has rows that can be cleared.
+    pub fn can_clear_queue(&self) -> bool {
+        self.queue_removable() && self.queued_rows_len() > 0
+    }
+
+    /// Whether the queue row at `index` is in Next in queue and can be
+    /// taken out of it.
     pub fn can_remove_from_queue(&self, index: usize) -> bool {
-        self.queue_locally_reorderable() && index < self.queued_rows_len()
+        self.queue_removable() && index < self.queued_rows_len()
+    }
+
+    /// Rewrites what the device playing elsewhere has queued by hand to
+    /// `queued`, already on show, with Connect's `set_queue`. Its queue is
+    /// held off like a local reorder's until it catches up: the last
+    /// cluster push still lists the old order, so a fetch shows it too.
+    fn send_remote_queue(&mut self, queued: Vec<String>) {
+        // No addition is pending while it can be edited, so none names a
+        // row of the old list.
+        self.manual_queue = queued.clone();
+        self.session_dirty = true;
+        self.queue_seq += 1;
+        self.queue_stale_retries = 0;
+        self.queue_reorder_pending = Some(Instant::now());
+        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        let device_id = match self.target() {
+            Target::Remote(device_id) => device_id,
+            Target::Local => None,
+        };
+        self.backend.api(ApiRequest::SetQueue { device_id, queued });
+    }
+
+    /// Moves a row of Next in queue on the device playing elsewhere, from
+    /// shown index `from` to the slot before shown index `to`.
+    fn move_in_remote_queue(&mut self, from: usize, to: usize) {
+        if !self.remote_queue_editable(|view| view.can_reorder) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        if from >= queued_len || to > queued_len || from == to || to == from + 1 {
+            return;
+        }
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let item = queue.queue.remove(from);
+        queue.queue.insert(if to > from { to - 1 } else { to }, item);
+        let queued = queue.queue[..queued_len]
+            .iter()
+            .map(|item| item.uri().to_string())
+            .collect();
+        self.send_remote_queue(queued);
+    }
+
+    /// Takes the chosen rows out of Next in queue on the device playing
+    /// elsewhere. A row whose index no longer holds its song is left alone.
+    fn remove_from_remote_queue(&mut self, rows: Vec<(usize, String)>) {
+        if !self.remote_queue_editable(|view| view.can_remove) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let mut indexes: Vec<usize> = rows
+            .into_iter()
+            .filter(|(index, uri)| {
+                *index < queued_len
+                    && queue
+                        .queue
+                        .get(*index)
+                        .is_some_and(|item| item.uri() == uri)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        if indexes.is_empty() {
+            return;
+        }
+        let mut removed = std::collections::HashSet::new();
+        for &index in indexes.iter().rev() {
+            removed.insert(queue.queue.remove(index).uri().to_string());
+        }
+        let queued = queue.queue[..queued_len - indexes.len()]
+            .iter()
+            .map(|item| item.uri().to_string())
+            .collect();
+        if let Some((earlier, at)) = self.queue_removed.take()
+            && at.elapsed() < PLAYBACK_HOLD
+        {
+            removed.extend(earlier);
+        }
+        self.queue_removed = Some((removed, Instant::now()));
+        self.send_remote_queue(queued);
+    }
+
+    /// Clears Next in queue on the device playing elsewhere, keeping the
+    /// rows its context plays next.
+    fn clear_remote_queue(&mut self) {
+        if !self.remote_queue_editable(|view| view.can_remove) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let cleared: std::collections::HashSet<String> = queue
+            .queue
+            .drain(..queued_len)
+            .map(|item| item.uri().to_string())
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        self.pending_album_queues.clear();
+        self.last_album_queue = None;
+        self.queue_cleared = Some((cleared, Instant::now()));
+        self.send_remote_queue(Vec::new());
+        self.toast(gettext(self.locale, "Queue cleared"));
     }
 
     /// Takes the chosen rows out of Playing next. Neither the Web API nor
@@ -7911,6 +8043,7 @@ impl App {
     /// longer holds its song is left alone.
     fn remove_from_queue(&mut self, rows: Vec<(usize, String)>) {
         if !self.queue_locally_reorderable() {
+            self.remove_from_remote_queue(rows);
             return;
         }
         let queued_len = self.queued_rows_len();
@@ -7973,6 +8106,7 @@ impl App {
     /// Clears manually queued tracks while keeping the context's upcoming rows.
     fn clear_queue(&mut self) {
         if !matches!(self.target(), Target::Local) {
+            self.clear_remote_queue();
             return;
         }
         self.pending_album_queues.clear();
@@ -10478,6 +10612,20 @@ impl App {
                     );
                 }
                 self.refresh_queue(true);
+            }
+            ApiResponse::QueueSet { result } => {
+                if let Err(error) = result {
+                    // Spotify's queue is right again: stop holding it off.
+                    self.queue_reorder_pending = None;
+                    self.queue_removed = None;
+                    self.queue_cleared = None;
+                    self.toast_error(
+                        // Translators: {error} is an error message.
+                        gettext(self.locale, "Couldn't change the queue: {error}")
+                            .replace("{error}", &error.to_string()),
+                    );
+                    self.refresh_queue(true);
+                }
             }
         }
     }
@@ -13664,6 +13812,7 @@ impl App {
             }
             Action::MoveInQueue { from, to } => {
                 if !self.queue_locally_reorderable() {
+                    self.move_in_remote_queue(from, to);
                     return;
                 }
                 let queued_len = self.queued_rows_len();

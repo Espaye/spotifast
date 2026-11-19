@@ -341,7 +341,8 @@ pub enum EngineEvent {
         device_id: String,
         volume: u16,
     },
-    /// What the playing device has queued by hand changed.
+    /// What the playing device has queued by hand changed, or which queue
+    /// edits it takes.
     RemoteQueue(RemoteQueueView),
 }
 
@@ -408,7 +409,7 @@ impl ClusterView {
 const QUEUE_PROVIDER: &str = "queue";
 
 /// What the playing device has queued by hand, as a cluster push lists
-/// it. The Web API's queue does
+/// it, and which queue edits the device takes. The Web API's queue does
 /// not tell queued rows from the context's; the cluster does.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RemoteQueueView {
@@ -420,11 +421,17 @@ pub struct RemoteQueueView {
     pub queued: Vec<String>,
     /// Their titles, empty where the push names none.
     pub titles: Vec<String>,
+    /// Whether it takes a `set_queue` that reorders its next tracks.
+    pub can_reorder: bool,
+    /// Whether it takes a `set_queue` that removes some of them.
+    pub can_remove: bool,
 }
 
 impl RemoteQueueView {
     fn of(cluster: &Cluster) -> Self {
         let state = &cluster.player_state;
+        let restrictions = &state.restrictions;
+        let set_queue = restrictions.disallow_set_queue_reasons.is_empty();
         let queued: Vec<&ProvidedTrack> = state
             .next_tracks
             .iter()
@@ -438,8 +445,75 @@ impl RemoteQueueView {
                 .iter()
                 .map(|track| track.metadata.get("title").cloned().unwrap_or_default())
                 .collect(),
+            can_reorder: set_queue
+                && restrictions
+                    .disallow_reordering_in_next_tracks_reasons
+                    .is_empty(),
+            can_remove: set_queue
+                && restrictions
+                    .disallow_removing_from_next_tracks_reasons
+                    .is_empty(),
         }
     }
+}
+
+/// A next or previous track as a Connect command names it. A queued one
+/// is marked queued in its metadata too, which is how a receiver keeps it
+/// queued (librespot's `set_next_tracks` reads `is_queued`).
+fn track_json(track: &ProvidedTrack) -> serde_json::Value {
+    let mut metadata = track.metadata.clone();
+    if track.provider == QUEUE_PROVIDER {
+        metadata.insert("is_queued".to_string(), "true".to_string());
+    }
+    serde_json::json!({
+        "uri": track.uri,
+        "uid": track.uid,
+        "provider": track.provider,
+        "metadata": metadata,
+        "album_uri": track.album_uri,
+        "artist_uri": track.artist_uri,
+    })
+}
+
+/// The `set_queue` command that leaves `state` with `queued`, in order, as
+/// its songs queued by hand, ahead of its other next tracks as they stand.
+/// Each song keeps the row of a copy already queued there, uid and all; a
+/// song not queued there is left out. Also gives how many songs it names.
+fn set_queue_body(state: &PlayerState, queued: &[String]) -> (serde_json::Value, usize) {
+    let mut held: Vec<Option<&ProvidedTrack>> = state
+        .next_tracks
+        .iter()
+        .filter(|track| track.provider == QUEUE_PROVIDER)
+        .map(Some)
+        .collect();
+    let mut next = Vec::with_capacity(state.next_tracks.len());
+    for uri in queued {
+        let row = held
+            .iter_mut()
+            .find(|row| row.is_some_and(|track| track.uri == *uri))
+            .and_then(|row| row.take());
+        if let Some(track) = row {
+            next.push(track_json(track));
+        }
+    }
+    let named = next.len();
+    next.extend(
+        state
+            .next_tracks
+            .iter()
+            .filter(|track| track.provider != QUEUE_PROVIDER)
+            .map(track_json),
+    );
+    let prev: Vec<serde_json::Value> = state.prev_tracks.iter().map(track_json).collect();
+    let body = serde_json::json!({
+        "command": {
+            "endpoint": "set_queue",
+            "next_tracks": next,
+            "prev_tracks": prev,
+            "queue_revision": state.queue_revision,
+        }
+    });
+    (body, named)
 }
 
 /// What the device that plays has coming up, as the latest cluster push
@@ -511,6 +585,14 @@ impl RemoteQueue {
             key,
             at: Instant::now(),
         });
+    }
+
+    /// The `set_queue` command for `device` that leaves it `queued` as its
+    /// songs queued by hand, with how many songs it names. `None` when no
+    /// push has told what `device` has coming up.
+    fn set_queue(&self, device: &str, queued: &[String]) -> Option<(serde_json::Value, usize)> {
+        let state = self.state.as_ref().filter(|_| self.device == device)?;
+        Some(set_queue_body(state, queued))
     }
 
     /// Previous moves the list differently from the row a skip counts
@@ -1076,6 +1158,20 @@ impl Engine {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .row(device, uri, occurrence)
+    }
+
+    /// The `set_queue` command that rewrites what `device`, playing
+    /// elsewhere, has queued by hand to `queued`, and how many songs it
+    /// names. `None` when no cluster push has told what it has coming up.
+    pub fn remote_set_queue(
+        &self,
+        device: &str,
+        queued: &[String],
+    ) -> Option<(serde_json::Value, usize)> {
+        self.remote_queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_queue(device, queued)
     }
 
     /// Notes a Next about to be sent to `device`, playing elsewhere, for a

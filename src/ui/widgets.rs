@@ -2513,7 +2513,7 @@ fn track_row_contents(
                     ..
                 } => Some((id.clone(), row.index as u32)),
                 RowContext::Queue
-                    if row.index < app.queued_rows_len() && app.queue_locally_reorderable() =>
+                    if row.index < app.queued_rows_len() && app.queue_reorderable() =>
                 {
                     Some(("queue".to_string(), row.index as u32))
                 }

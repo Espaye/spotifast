@@ -392,17 +392,28 @@ fn queue_drop(ui: &egui::Ui, rect: egui::Rect) -> Option<Arc<DragTrack>> {
     }
 }
 
+/// Whether the drag in progress is a row of Next in queue.
+fn dragging_queued_row(ui: &egui::Ui) -> bool {
+    let track = egui::DragAndDrop::payload::<DragTrack>(ui.ctx());
+    let from = track.as_ref().and_then(|track| track.from.as_ref());
+    from.is_some_and(|(origin, _)| origin == "queue")
+}
+
 /// Space below the now-playing row and below Playing next, before the next
 /// section's heading.
 const SECTION_GAP: f32 = 14.0;
 
 fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     let palette = app.palette;
-    // Neither the Web API nor librespot can reorder or insert into a live
-    // remote queue, so without local playback active every drop just
-    // appends, same as the "Add to queue" menu item.
+    // Only the local player's queue takes an insert at a chosen row, so
+    // elsewhere a song dropped in just appends, same as "Add to queue". A
+    // device playing elsewhere may still take a move within Next in queue.
     let reorderable = app.queue_locally_reorderable();
-    if !reorderable && let Some(track) = queue_drop(ui, ui.clip_rect()) {
+    let movable = app.queue_reorderable();
+    if !reorderable
+        && !(movable && dragging_queued_row(ui))
+        && let Some(track) = queue_drop(ui, ui.clip_rect())
+    {
         app.actions.push(Action::QueueMany {
             songs: track
                 .items
@@ -549,7 +560,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             });
         });
         ui.add_space(4.0);
-        if reorderable && egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx()) {
+        if movable && egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx()) {
             widgets::scroll_during_drag(ui);
         }
         let gap = ui.spacing().item_spacing.y;
@@ -566,9 +577,12 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
                 list_top + queued_len as f32 * (row_height + gap) + SECTION_GAP,
             ),
         );
-        let move_slot = reorderable
+        let move_slot = movable
             .then(|| {
                 egui::DragAndDrop::payload::<DragTrack>(ui.ctx())?;
+                if !reorderable && !dragging_queued_row(ui) {
+                    return None;
+                }
                 if !ui.rect_contains_pointer(section_rect) {
                     return None;
                 }
@@ -614,7 +628,18 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
                         // names the dragged song, otherwise find where that
                         // song actually sits now. Not there at all means it
                         // left the queue, so there is nothing left to move.
-                        let from = if app.manual_queue.get(from).map(String::as_str) == Some(uri) {
+                        let from = if !reorderable {
+                            // Elsewhere a move names the shown rows.
+                            let shown = |index: usize| {
+                                let queue = app.queue.get()?;
+                                queue.queue.get(index).map(PlayableItem::uri)
+                            };
+                            if shown(from) == Some(uri) {
+                                Some(from)
+                            } else {
+                                (0..queued_len).find(|&index| shown(index) == Some(uri))
+                            }
+                        } else if app.manual_queue.get(from).map(String::as_str) == Some(uri) {
                             Some(from)
                         } else {
                             app.manual_queue.iter().position(|queued| queued == uri)

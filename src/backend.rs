@@ -406,6 +406,12 @@ pub enum ApiRequest {
         uris: Vec<String>,
         device_id: Option<String>,
     },
+    /// Rewrites what another device has queued by hand to `queued`, in
+    /// order, with Connect's `set_queue`. The Web API has no such command.
+    SetQueue {
+        device_id: Option<String>,
+        queued: Vec<String>,
+    },
 }
 
 impl ApiRequest {
@@ -666,6 +672,9 @@ pub enum ApiResponse {
     QueueBatchAdded {
         request: u64,
         added: usize,
+        result: ApiResult<()>,
+    },
+    QueueSet {
         result: ApiResult<()>,
     },
 }
@@ -5255,7 +5264,8 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::Transfer { .. }
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
-        | ApiRequest::AddManyToQueue { .. } => Operation::Playback,
+        | ApiRequest::AddManyToQueue { .. }
+        | ApiRequest::SetQueue { .. } => Operation::Playback,
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
@@ -6274,6 +6284,12 @@ async fn handle(
                 result,
             }
         }
+        // Only the Connect route can send it, and that needs local playback.
+        ApiRequest::SetQueue { .. } => ApiResponse::QueueSet {
+            result: Err(ApiError::Network(
+                "no Connect session to send the queue with".to_string(),
+            )),
+        },
     };
     if let Some(request) = retry
         && refused_as_restricted(&response)
@@ -6306,7 +6322,8 @@ fn command_device(request: &ApiRequest) -> Option<Option<&str>> {
         | ApiRequest::SkipTo { device_id, .. }
         | ApiRequest::ShufflePlay { device_id, .. }
         | ApiRequest::AddToQueue { device_id, .. }
-        | ApiRequest::AddManyToQueue { device_id, .. } => Some(device_id.as_deref()),
+        | ApiRequest::AddManyToQueue { device_id, .. }
+        | ApiRequest::SetQueue { device_id, .. } => Some(device_id.as_deref()),
         ApiRequest::Transfer { device_id, .. } => Some(Some(device_id)),
         _ => None,
     }
@@ -6464,6 +6481,31 @@ async fn over_connect(
                 added,
                 result,
             }
+        }
+        ApiRequest::SetQueue { device_id, queued } => {
+            // Any Connect device takes it, restricted or not.
+            let to = connect
+                .command_target(device_id.as_deref(), playing.as_deref())
+                .or_else(|| device_id.clone())
+                .or_else(|| playing.clone())?;
+            // In turn with skips, so it rewrites the rows they leave.
+            let _turn = connect.queue_skip_turn().await;
+            let result = match engine.remote_set_queue(&to, queued) {
+                Some((body, named)) => {
+                    log::info!(
+                        "queue set on another device: {named} of {} queued songs",
+                        queued.len()
+                    );
+                    crate::sonos::command(session, &to, &body).await
+                }
+                None => Err(ApiError::Network(
+                    "Spotify has not said what that device has queued".to_string(),
+                )),
+            };
+            if let Err(error) = &result {
+                log::info!("queue set on another device failed: {error}");
+            }
+            ApiResponse::QueueSet { result }
         }
         _ => return None,
     })

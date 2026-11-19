@@ -1130,7 +1130,9 @@ impl Dialog {
     pub fn cover_draft(&mut self, id: &str) -> Option<&mut crate::playlist_cover::Draft> {
         match self {
             Self::CreatePlaylist { cover, .. } if id.is_empty() => Some(cover),
-            Self::EditPlaylist { id: current, cover, .. } if current == id => Some(cover),
+            Self::EditPlaylist {
+                id: current, cover, ..
+            } if current == id => Some(cover),
             _ => None,
         }
     }

@@ -5042,8 +5042,10 @@ impl Worker {
                 action: RemoteAction::Play,
                 play: Some(_),
                 ..
-            } | ApiRequest::Remote { action: RemoteAction::Repeat, .. }
-                | ApiRequest::ShufflePlay { .. }
+            } | ApiRequest::Remote {
+                action: RemoteAction::Repeat,
+                ..
+            } | ApiRequest::ShufflePlay { .. }
         );
         if !starts && after.is_none() {
             return (None, None);

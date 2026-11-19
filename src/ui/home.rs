@@ -117,8 +117,18 @@ fn home_shelf(
         );
         let offset = shelf.state.offset.x;
         let buttons = [
-            (Icon::ChevronRight, page, offset < end - 1.0, gettext(locale, "Scroll right")),
-            (Icon::ChevronLeft, -page, offset > 1.0, gettext(locale, "Scroll left")),
+            (
+                Icon::ChevronRight,
+                page,
+                offset < end - 1.0,
+                gettext(locale, "Scroll right"),
+            ),
+            (
+                Icon::ChevronLeft,
+                -page,
+                offset > 1.0,
+                gettext(locale, "Scroll left"),
+            ),
         ];
         for (icon, delta, enabled, label) in buttons {
             let clicked = bar

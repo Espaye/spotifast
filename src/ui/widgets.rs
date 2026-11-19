@@ -1323,8 +1323,10 @@ pub(crate) fn playlist_picker(
         &gettext(locale, "New playlist"),
     ) {
         let uris = items.iter().map(|item| item.uri().to_string()).collect();
-        app.actions
-            .push(Action::ShowDialog(Dialog::new_playlist(String::new(), uris)));
+        app.actions.push(Action::ShowDialog(Dialog::new_playlist(
+            String::new(),
+            uris,
+        )));
     }
     menu_separator(ui, &palette);
     let needle = query.trim().to_lowercase();

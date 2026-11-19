@@ -847,15 +847,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         ),
     };
     let mut cell = centered(ui, slot(widths[4]));
-    if theme::toggle_icon_button(
-        &mut cell,
-        repeat_icon,
-        17.0,
-        repeat_color,
-        &tooltip,
-    )
-    .clicked()
-    {
+    if theme::toggle_icon_button(&mut cell, repeat_icon, 17.0, repeat_color, &tooltip).clicked() {
         app.actions.push(Action::CycleRepeat);
     }
 

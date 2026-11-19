@@ -3212,8 +3212,8 @@ impl App {
                     Err(error) => log::warn!("rootlist unavailable: {error}"),
                 },
                 Event::Lyrics { uri, result } => {
-                    let result = result
-                        .map(|found| found.map(crate::lyrics::Lyrics::without_closing_notes));
+                    let result =
+                        result.map(|found| found.map(crate::lyrics::Lyrics::without_closing_notes));
                     if self.lyrics_uri.as_deref() == Some(uri.as_str()) {
                         self.lyrics = match result {
                             Ok(found) => Loadable::Loaded(found),
@@ -4661,7 +4661,10 @@ impl App {
         }
         let mut prepared = None;
         if self.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
-            prepared = self.adjacent_lyrics.iter().position(|(uri, _)| uri == &now.uri)
+            prepared = self
+                .adjacent_lyrics
+                .iter()
+                .position(|(uri, _)| uri == &now.uri)
                 .map(|at| self.adjacent_lyrics.remove(at).1);
             if let Some(uri) = self.lyrics_uri.take()
                 && matches!(self.lyrics, Loadable::Loaded(_))
@@ -4755,17 +4758,26 @@ impl App {
         }
         if !reading
             || !matches!(self.lyrics, Loadable::Loaded(_))
-            || self.adjacent_lyrics.iter().any(|(uri, state)| {
-                uri == &track.uri || state.is_loading()
-            })
+            || self
+                .adjacent_lyrics
+                .iter()
+                .any(|(uri, state)| uri == &track.uri || state.is_loading())
         {
             return;
         }
         let uri = track.uri.clone();
         let query = crate::lyrics::Query {
-            artist: track.artists.first().map(|artist| artist.name.clone()).unwrap_or_default(),
+            artist: track
+                .artists
+                .first()
+                .map(|artist| artist.name.clone())
+                .unwrap_or_default(),
             title: track.name.clone(),
-            album: track.album.as_ref().map(|album| album.name.clone()).unwrap_or_default(),
+            album: track
+                .album
+                .as_ref()
+                .map(|album| album.name.clone())
+                .unwrap_or_default(),
             duration_ms: track.duration_ms,
         };
         let local_file = self.local_file(&uri).map(std::path::Path::to_path_buf);
@@ -7611,7 +7623,9 @@ impl App {
     /// The queue panel shows a current queue, and its Recent tab loads now
     /// rather than when it is chosen. Both are Web API reads.
     fn open_queue_panel(&mut self) {
-        if self.queue_fetched_at.is_none_or(|at| at.elapsed() > QUEUE_FRESH)
+        if self
+            .queue_fetched_at
+            .is_none_or(|at| at.elapsed() > QUEUE_FRESH)
             || self.queue.needs_load()
         {
             self.refresh_queue(false);
@@ -7908,7 +7922,10 @@ impl App {
         let target = self.target();
         self.remote_queue_view().is_some_and(allows)
             && self.pending_queue_adds.is_empty()
-            && !self.pending_queue_batches.values().any(|writing| *writing == target)
+            && !self
+                .pending_queue_batches
+                .values()
+                .any(|writing| *writing == target)
     }
 
     /// Whether songs can be taken out of Next in queue.
@@ -7961,7 +7978,9 @@ impl App {
             return;
         };
         let item = queue.queue.remove(from);
-        queue.queue.insert(if to > from { to - 1 } else { to }, item);
+        queue
+            .queue
+            .insert(if to > from { to - 1 } else { to }, item);
         let queued = queue.queue[..queued_len]
             .iter()
             .map(|item| item.uri().to_string())
@@ -8192,7 +8211,8 @@ impl App {
             return;
         }
         let name = self.queue_playlist_name();
-        self.actions.push(Action::ShowDialog(Dialog::new_playlist(name, uris)));
+        self.actions
+            .push(Action::ShowDialog(Dialog::new_playlist(name, uris)));
     }
 
     /// Shows the head of Next up as playing before the engine confirms it.
@@ -8606,7 +8626,10 @@ impl App {
         request: u64,
         result: Result<Option<crate::playlist_cover::Cover>, String>,
     ) {
-        if let Some(cover) = self.dialog.as_mut().and_then(|dialog| dialog.cover_draft(id))
+        if let Some(cover) = self
+            .dialog
+            .as_mut()
+            .and_then(|dialog| dialog.cover_draft(id))
             && cover.request == Some(request)
         {
             cover.request = None;
@@ -8941,8 +8964,10 @@ impl App {
                             received_at: Instant::now(),
                         });
                         // Previous shows this song from here once it has passed.
-                        if let Some(PlayableItem::Track(track)) =
-                            self.remote.as_ref().and_then(|remote| remote.state.item.as_ref())
+                        if let Some(PlayableItem::Track(track)) = self
+                            .remote
+                            .as_ref()
+                            .and_then(|remote| remote.state.item.as_ref())
                             && let Some(id) = util::uri_id(&track.uri)
                             && !self.track_cache.contains_key(id)
                         {
@@ -9664,7 +9689,8 @@ impl App {
                         }
                         if let Some((uris, selected)) = creation {
                             if !uris.is_empty() {
-                                self.membership.add(&playlist.id, uris.iter().map(String::as_str));
+                                self.membership
+                                    .add(&playlist.id, uris.iter().map(String::as_str));
                                 self.backend.api(ApiRequest::AddToPlaylist {
                                     playlist_id: playlist.id.clone(),
                                     playlist_name: playlist.name.clone(),
@@ -9676,8 +9702,11 @@ impl App {
                                 self.cover_request = self.cover_request.wrapping_add(1);
                                 self.cover_uploads
                                     .insert(playlist.id.clone(), self.cover_request);
-                                let previous_urls =
-                                    playlist.images.iter().map(|image| image.url.clone()).collect();
+                                let previous_urls = playlist
+                                    .images
+                                    .iter()
+                                    .map(|image| image.url.clone())
+                                    .collect();
                                 self.backend.api(ApiRequest::UploadPlaylistCover {
                                     id: playlist.id.clone(),
                                     request: self.cover_request,
@@ -12860,8 +12889,7 @@ impl App {
         // Only a copy among the queued rows confirms an addition: the
         // playing context may hold the same song further down.
         let queued_len = self.queued_end(&queue.queue, &self.manual_queue);
-        let mut listed: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let mut listed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for item in &queue.queue[..queued_len] {
             *listed.entry(item.uri().to_string()).or_insert(0) += 1;
         }
@@ -14042,7 +14070,10 @@ impl App {
                 if self.cover_uploads.contains_key(&id) {
                     return;
                 }
-                if let Some(cover) = self.dialog.as_mut().and_then(|dialog| dialog.cover_draft(&id))
+                if let Some(cover) = self
+                    .dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.cover_draft(&id))
                     && cover.request.is_none()
                     && cover.uploading.is_none()
                 {
@@ -14136,7 +14167,9 @@ impl App {
                     return;
                 }
                 let (description, cover) = match self.dialog.as_ref() {
-                    Some(Dialog::CreatePlaylist { description, cover, .. }) => {
+                    Some(Dialog::CreatePlaylist {
+                        description, cover, ..
+                    }) => {
                         if cover.request.is_some() {
                             return;
                         }
@@ -14146,7 +14179,11 @@ impl App {
                 };
                 self.creating_playlist = Some((add_uris, cover));
                 self.playlist_busy = true;
-                self.backend.api(ApiRequest::CreatePlaylist { name, public, description });
+                self.backend.api(ApiRequest::CreatePlaylist {
+                    name,
+                    public,
+                    description,
+                });
             }
             Action::UpdatePlaylist {
                 id,
@@ -21506,14 +21543,20 @@ mod tests {
         app.remote = Some(playing(1_000));
         app.apply(Action::Previous, &ctx);
         let shown = app.now_playing().expect("a song shown");
-        assert_eq!(shown.uri, "spotify:track:b", "the song before shows at once");
+        assert_eq!(
+            shown.uri, "spotify:track:b",
+            "the song before shows at once"
+        );
         assert_eq!(shown.position_ms, 0);
 
         app.intent_track = None;
         app.remote = Some(playing(60_000));
         app.apply(Action::Previous, &ctx);
         let shown = app.now_playing().expect("a song shown");
-        assert_eq!(shown.uri, "spotify:track:c", "late in a song, Previous restarts it");
+        assert_eq!(
+            shown.uri, "spotify:track:c",
+            "late in a song, Previous restarts it"
+        );
         assert_eq!(shown.position_ms, 0, "from its start at once");
 
         app.pending_remote_position = None;

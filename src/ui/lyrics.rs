@@ -1067,7 +1067,13 @@ fn sync_button(app: &mut App, ui: &mut egui::Ui, room: Rect, palette: &theme::Pa
             .max_rect(room.shrink2(vec2(0.0, 8.0)))
             .layout(Layout::bottom_up(Align::Center)),
     );
-    if theme::pill_button(&mut button, palette, &gettext(app.locale, "Sync lyrics"), true).clicked()
+    if theme::pill_button(
+        &mut button,
+        palette,
+        &gettext(app.locale, "Sync lyrics"),
+        true,
+    )
+    .clicked()
     {
         app.actions.push(Action::FollowLyrics);
     }

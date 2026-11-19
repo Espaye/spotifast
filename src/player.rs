@@ -3148,8 +3148,10 @@ mod tests {
         }
         let view = ClusterView::of(&pushed);
         assert_eq!(view.previous.as_deref(), Some("spotify:track:b"));
-        assert!(ClusterView::of(&cluster("sonos", "spotify:track:c", true, 30_000))
-            .changed_elsewhere(&view, "this"));
+        assert!(
+            ClusterView::of(&cluster("sonos", "spotify:track:c", true, 30_000))
+                .changed_elsewhere(&view, "this")
+        );
     }
 
     /// The log says which of the ways to no lyrics it was, without the words.

@@ -1608,11 +1608,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 });
             }
             "create" => {
-                app.dialog = Some(Dialog::CreatePlaylist {
-                    name: "Autumn drives".into(),
-                    public: false,
-                    add_uris: vec!["spotify:track:trk1".into()],
-                })
+                app.dialog = Some(Dialog::new_playlist(
+                    "Autumn drives".into(),
+                    vec!["spotify:track:trk1".into()],
+                ))
             }
             "duplicate" => {
                 app.dialog = Some(Dialog::ConfirmPlaylistDuplicates {
@@ -2898,6 +2897,7 @@ mod tests {
                 name,
                 public,
                 add_uris,
+                ..
             }) = &app.dialog
             else {
                 panic!("saving the translated queue must open the existing playlist dialog");
@@ -8780,11 +8780,10 @@ mod tests {
                                 cover: Default::default(),
                             }
                         } else {
-                            Dialog::CreatePlaylist {
-                                name: "Peak Masculinity".into(),
-                                public: false,
-                                add_uris: vec!["spotify:track:trk1".into()],
-                            }
+                            Dialog::new_playlist(
+                                "Peak Masculinity".into(),
+                                vec!["spotify:track:trk1".into()],
+                            )
                         });
                         for _ in 0..3 {
                             let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
@@ -10327,6 +10326,8 @@ mod tests {
                 name: "x".into(),
                 public: true,
                 add_uris: vec![],
+                cover: Default::default(),
+                description: String::new(),
             },
             Dialog::EditPlaylist {
                 cover: Default::default(),

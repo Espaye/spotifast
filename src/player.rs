@@ -658,6 +658,21 @@ async fn watch_cluster(
             continue;
         };
         let queued = RemoteQueueView::of(&cluster);
+        if (queued.can_reorder, queued.can_remove)
+            != (shown_queue.can_reorder, shown_queue.can_remove)
+        {
+            // Why a device refuses queue edits is otherwise invisible.
+            let restrictions = &cluster.player_state.restrictions;
+            log::info!(
+                "queue edits on another device: reorder {}, remove {} \
+                 (set_queue {:?}, reordering {:?}, removing {:?})",
+                queued.can_reorder,
+                queued.can_remove,
+                restrictions.disallow_set_queue_reasons,
+                restrictions.disallow_reordering_in_next_tracks_reasons,
+                restrictions.disallow_removing_from_next_tracks_reasons,
+            );
+        }
         if queued != shown_queue {
             shown_queue = queued.clone();
             notify(EngineEvent::RemoteQueue(queued));

@@ -11951,6 +11951,143 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// Drags `name`'s row of the open queue and drops it on the top edge of
+    /// `onto`'s row, returning the payload the drag carried.
+    fn drag_queue_row_onto(
+        ctx: &egui::Context,
+        app: &mut App,
+        name: &str,
+        onto: &str,
+    ) -> DragTrack {
+        let tree = accessible_frame(ctx, app, vec![]);
+        // The queue panel's own rows: some songs are also on the page
+        // behind it, and the panel opens against the right edge.
+        let row_rect = |name: &str| {
+            let prefix = format!("Play {name},");
+            let bounds = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button
+                        && node.label().is_some_and(|text| text.starts_with(&prefix))
+                        && node
+                            .bounds()
+                            .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
+                })
+                .unwrap_or_else(|| panic!("missing on-screen queue row {name}"))
+                .1
+                .bounds()
+                .unwrap();
+            egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            )
+        };
+        let start_row = row_rect(name);
+        let start = egui::pos2(start_row.left() + 80.0, start_row.center().y);
+        let end_row = row_rect(onto);
+        let end = egui::pos2(end_row.left() + 130.0, end_row.top() + 2.0);
+        frame_events(
+            ctx,
+            app,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame_events(
+            ctx,
+            app,
+            vec![egui::Event::PointerMoved(start + egui::vec2(15.0, -10.0))],
+        );
+        let payload = egui::DragAndDrop::payload::<DragTrack>(ctx)
+            .expect("a queue row drags")
+            .as_ref()
+            .clone();
+        frame_events(ctx, app, vec![egui::Event::PointerMoved(end)]);
+        frame_events(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame_events(ctx, app, vec![]);
+        payload
+    }
+
+    /// A Next up row dropped on Next in queue is not queued again, on this
+    /// computer or on a device playing elsewhere, and the toast says why it
+    /// stayed. Queueing a copy on every such drop once filled the queue
+    /// with the same song.
+    #[test]
+    fn a_next_up_row_dropped_on_next_in_queue_is_not_queued_again() {
+        for local in [true, false] {
+            let (ctx, mut app) = accessible_app(&format!("queue-next-up-no-copy-{local}"));
+            app.show_queue_panel = true;
+            let uris = seed_queued_songs(&mut app);
+            app.local_ready = local;
+            let rows_before = app.queue.get().unwrap().queue.len();
+            for _ in 0..3 {
+                frame_events(&ctx, &mut app, vec![]);
+            }
+            // "Otomo" is the first Next up row, after the three queued ones.
+            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", "Queued 0");
+            assert_eq!(
+                payload.from,
+                Some((crate::model::UPCOMING_ROW.to_string(), 3)),
+                "local {local}"
+            );
+            assert_eq!(app.manual_queue, uris, "local {local}");
+            assert_eq!(app.queue.get().unwrap().queue.len(), rows_before, "local {local}");
+            assert!(
+                app.toasts
+                    .iter()
+                    .any(|toast| toast.message == "Only songs in Next in queue can be moved"),
+                "local {local}: {:?}",
+                app.toasts
+            );
+            app.backend.shutdown();
+        }
+    }
+
+    /// A Next in queue row that cannot be moved right now stays where it
+    /// is, adds no copy, and the toast says why.
+    #[test]
+    fn a_queued_row_that_cannot_move_now_is_not_queued_again() {
+        let (ctx, mut app) = accessible_app("queue-locked-no-copy");
+        app.show_queue_panel = true;
+        let uris = seed_queued_songs(&mut app);
+        app.local_ready = false;
+        assert!(!app.queue_reorderable());
+        let rows_before = app.queue.get().unwrap().queue.len();
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let payload = drag_queue_row_onto(&ctx, &mut app, "Queued 2", "Queued 0");
+        assert_eq!(
+            payload.from,
+            Some((crate::model::QUEUED_ROW.to_string(), 2))
+        );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(app.queue.get().unwrap().queue.len(), rows_before);
+        assert!(
+            app.toasts.iter().any(|toast| toast.message
+                == "Spotifast has not seen this device's queue yet. Try again in a moment."),
+            "{:?}",
+            app.toasts
+        );
+        app.backend.shutdown();
+    }
+
     /// Pins are pins: dropping a pinned row at the top of the block
     /// reorders the pins themselves, and the rest of the shelf stays in
     /// its automatic order.
@@ -12378,7 +12515,10 @@ mod tests {
                     let payload =
                         egui::DragAndDrop::payload::<DragTrack>(&ctx).expect("real source drag");
                     assert_eq!(payload.items[0].uri(), source_item.uri());
-                    assert_eq!(payload.from, None);
+                    assert_eq!(
+                        payload.from,
+                        from_queue.then(|| (crate::model::UPCOMING_ROW.to_string(), 0))
+                    );
                     frame_events(&ctx, &mut app, vec![egui::Event::PointerMoved(end)]);
                     frame_events(
                         &ctx,

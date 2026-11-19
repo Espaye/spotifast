@@ -1045,12 +1045,31 @@ pub struct DragTrack {
     /// Full row data, so dropping can update an open playlist immediately.
     /// A picked table row carries the whole selection in table order.
     pub items: Vec<PlayableItem>,
-    /// Source playlist ID and row index for moves within an editable playlist.
+    /// Source playlist ID and row index for moves within an editable
+    /// playlist, or [`QUEUED_ROW`] or [`UPCOMING_ROW`] and the row's index
+    /// in the whole queue for a row of the open queue.
     pub from: Option<(String, u32)>,
     /// The editable playlist the rows were dragged from, however many there
     /// are. Several rows have no `from`, and dropping them back into their
     /// own playlist must not add copies of them (#669).
     pub source_playlist: Option<String>,
+}
+
+/// The `from` origin of a row dragged out of Next in queue.
+pub const QUEUED_ROW: &str = "queue";
+
+/// The `from` origin of a row dragged out of the queue's rows after Next in
+/// queue, which play from the context in its own order.
+pub const UPCOMING_ROW: &str = "queue-upcoming";
+
+/// Why a song dropped on the open queue stayed where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueRefusal {
+    /// It was a row after Next in queue. The context plays those in its own
+    /// order, and a copy in Next in queue would play the song twice.
+    Upcoming,
+    /// It was a row of Next in queue, which cannot be moved now.
+    Locked,
 }
 
 /// Where the playing songs come from, as the queue's header names it.
@@ -1232,8 +1251,9 @@ pub enum Action {
         items: Vec<PlayableItem>,
     },
     /// Move a row within the manually queued "Playing next" section, from a
-    /// drag dropped back on the queue. Only applied while the local player
-    /// is the active target; see [`crate::app::App::queue_locally_reorderable`].
+    /// drag dropped back on the queue. Applied on the local player, and with
+    /// Connect's `set_queue` on a device playing elsewhere that takes it;
+    /// see [`crate::app::App::queue_reorderable`].
     MoveInQueue {
         from: usize,
         to: usize,
@@ -1252,6 +1272,8 @@ pub enum Action {
     RemoveFromQueue {
         rows: Vec<(usize, String)>,
     },
+    /// Say why a song dropped on the open queue stayed where it was.
+    RefuseQueueDrop(QueueRefusal),
     /// Set saved state for several songs explicitly.
     SetSavedMany {
         uris: Vec<String>,

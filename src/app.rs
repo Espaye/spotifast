@@ -7944,6 +7944,56 @@ impl App {
         self.queue_removable() && index < self.queued_rows_len()
     }
 
+    /// Says why a song dropped on the open queue stayed where it was, and
+    /// logs what held a move of Next in queue back.
+    fn refuse_queue_drop(&mut self, refusal: crate::model::QueueRefusal) {
+        let message = match refusal {
+            crate::model::QueueRefusal::Upcoming => gettext(
+                self.locale,
+                // Translators: Shown when a song from the playlist or album that is playing is dragged within the queue. "Next in queue" is the queue's section of songs added by hand.
+                "Only songs in Next in queue can be moved",
+            ),
+            crate::model::QueueRefusal::Locked => {
+                let target = self.target();
+                let view = self.remote_queue_view();
+                let allowed = view.is_some_and(|view| view.can_reorder);
+                let albums = self
+                    .pending_queue_batches
+                    .values()
+                    .filter(|writing| **writing == target)
+                    .count();
+                log::info!(
+                    "queue move refused: {} device, Connect state {}, reordering {}, \
+                     {} songs and {albums} albums still being added",
+                    if matches!(target, Target::Local) {
+                        "this"
+                    } else {
+                        "another"
+                    },
+                    if view.is_some() { "known" } else { "unknown" },
+                    if allowed { "allowed" } else { "not allowed" },
+                    self.pending_queue_adds.len(),
+                );
+                if matches!(target, Target::Local) {
+                    gettext(self.locale, "Play a song to reorder the queue")
+                } else if view.is_none() {
+                    gettext(
+                        self.locale,
+                        "Spotifast has not seen this device's queue yet. Try again in a moment.",
+                    )
+                } else if allowed {
+                    gettext(
+                        self.locale,
+                        "The songs just added are still on their way. Try again in a moment.",
+                    )
+                } else {
+                    gettext(self.locale, "This device does not let Spotifast reorder its queue")
+                }
+            }
+        };
+        self.toast(message);
+    }
+
     /// Rewrites what the device playing elsewhere has queued by hand to
     /// `queued`, already on show, with Connect's `set_queue`. Its queue is
     /// held off like a local reorder's until it catches up: the last
@@ -13869,6 +13919,7 @@ impl App {
                 self.resync_local_queue();
             }
             Action::RemoveFromQueue { rows } => self.remove_from_queue(rows),
+            Action::RefuseQueueDrop(refusal) => self.refuse_queue_drop(refusal),
             Action::InsertInQueue { items, position } => {
                 if !self.queue_locally_reorderable() {
                     let songs = items

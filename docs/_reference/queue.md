@@ -182,11 +182,16 @@ counts once, and the notification reports only the rows actually added.
     state allows reordering. The app sends the new order with Connect's
     `set_queue` command, which can rearrange and drop the device's queued
     songs but not add new ones. There, a song dragged from elsewhere is
-    added to the end, exactly like **Add to queue**. Rows still being added
-    cannot be moved until Spotify has them. The section after it is never a
-    drop target, because it plays from the current context and is not a
-    list Spotifast can rewrite. While *Next in queue* is empty, drop the
-    song on the player bar's Queue button instead.
+    added to the end, exactly like **Add to queue**. While a song is
+    dragged over the queue, a green line shows where it will land, as in a
+    playlist. A row of the queue dropped back on the queue is never queued
+    again: a row of *Next in queue* moves, and when it cannot move yet
+    (songs just added have not reached the device, or the device does not
+    allow reordering) it stays put and a note says why. Rows of the section
+    after it cannot be moved, because that section plays from the current
+    context and is not a list Spotifast can rewrite, so it is never a drop
+    target either. On this computer, while *Next in queue* is empty, drop
+    the song on the player bar's Queue button instead.
 
 12. **A song you queued can be removed on its own.** Right-click a row
     under *Next in queue*, or open its **…** menu, and choose **Remove

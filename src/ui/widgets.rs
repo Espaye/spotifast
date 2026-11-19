@@ -2506,18 +2506,23 @@ fn track_row_contents(
             } => Some(id.clone()),
             _ => None,
         };
-        // Keep the source index for moves within an editable playlist, or
-        // within the manually queued section while it can be rewritten.
+        // Keep the source index for moves within an editable playlist. A
+        // queue row always names the section it left, whether or not the
+        // queue can be rewritten now, so dropping it back on the queue
+        // never queues another copy of it.
         let from = (items.len() == 1)
             .then(|| match row.context {
                 RowContext::Context {
                     editable_playlist: Some((id, _)),
                     ..
                 } => Some((id.clone(), row.index as u32)),
-                RowContext::Queue
-                    if row.index < app.queued_rows_len() && app.queue_reorderable() =>
-                {
-                    Some(("queue".to_string(), row.index as u32))
+                RowContext::Queue => {
+                    let origin = if row.index < app.queued_rows_len() {
+                        crate::model::QUEUED_ROW
+                    } else {
+                        crate::model::UPCOMING_ROW
+                    };
+                    Some((origin.to_string(), row.index as u32))
                 }
                 _ => None,
             })

@@ -94,6 +94,8 @@ const REMOTE_RECHECK: Duration = Duration::from_millis(1200);
 const REMOTE_PUSH_SPACING: Duration = Duration::from_secs(1);
 /// Delay before checking the queue after a local change.
 const QUEUE_RECHECK: Duration = Duration::from_millis(700);
+/// A queue on show fetched this recently is current enough to keep.
+const QUEUE_FRESH: Duration = Duration::from_secs(20);
 /// How long a Next up click may take to reach its song. This computer's
 /// engine passes each song above it with a Next of its own, and each Next
 /// waits for a Connect state update; another device gets one skip naming
@@ -4939,7 +4941,7 @@ impl App {
                 && !self.queue.is_loading()
                 && self
                     .queue_fetched_at
-                    .is_none_or(|at| at.elapsed() > Duration::from_secs(20))
+                    .is_none_or(|at| at.elapsed() > QUEUE_FRESH)
             {
                 self.refresh_queue(false);
             }
@@ -7590,6 +7592,19 @@ impl App {
         }
         self.devices_loading = true;
         self.backend.api(ApiRequest::Devices);
+    }
+
+    /// The queue panel shows a current queue, and its Recent tab loads now
+    /// rather than when it is chosen. Both are Web API reads.
+    fn open_queue_panel(&mut self) {
+        if self.queue_fetched_at.is_none_or(|at| at.elapsed() > QUEUE_FRESH)
+            || self.queue.needs_load()
+        {
+            self.refresh_queue(false);
+        }
+        if !self.metered() && !self.recents.loaded_once && self.recents.error.is_none() {
+            self.load_recents(false);
+        }
     }
 
     fn refresh_queue(&mut self, force: bool) {
@@ -14044,7 +14059,7 @@ impl App {
                 if self.show_queue_panel {
                     self.show_lyrics_panel = false;
                     self.show_friends_panel = false;
-                    self.refresh_queue(true);
+                    self.open_queue_panel();
                 }
             }
             Action::ToggleLyricsPanel => {

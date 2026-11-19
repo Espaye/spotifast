@@ -775,6 +775,9 @@ pub struct App {
     /// When Spotify pushed a change to another device that no poll since
     /// has asked about.
     remote_pushed_at: Option<Instant>,
+    /// The song playing on another device and the one before it, as
+    /// Spotify's latest push named them, for Previous to show at once.
+    remote_previous: Option<(String, String)>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
     /// The main window's size, position and maximized state: from the
@@ -1512,6 +1515,7 @@ impl App {
             pending_transfer_to: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
+            remote_previous: None,
             seek_preview: None,
             volume_preview: None,
             window_geometry: fastframe_shell::window::Geometry {
@@ -3136,8 +3140,9 @@ impl App {
                     }
                 }
                 Event::Local(state) => self.handle_local(*state),
-                Event::RemoteChanged => {
+                Event::RemoteChanged { track, previous } => {
                     self.remote_pushed_at.get_or_insert_with(Instant::now);
+                    self.remote_previous = previous.map(|previous| (track, previous));
                 }
                 Event::RemoteVolume { device_id, volume } => {
                     self.handle_remote_volume(&device_id, volume);
@@ -8695,6 +8700,15 @@ impl App {
                             state,
                             received_at: Instant::now(),
                         });
+                        // Previous shows this song from here once it has passed.
+                        if let Some(PlayableItem::Track(track)) =
+                            self.remote.as_ref().and_then(|remote| remote.state.item.as_ref())
+                            && let Some(id) = util::uri_id(&track.uri)
+                            && !self.track_cache.contains_key(id)
+                        {
+                            self.track_cache.insert(id.to_owned(), track.clone());
+                            self.track_used.insert(id.to_owned(), Instant::now());
+                        }
                         if let (Some(previous), Some(current)) = (
                             previous_shuffle,
                             self.remote
@@ -11964,16 +11978,28 @@ impl App {
             | Action::PlayFromRow { .. }
             | Action::ShufflePlay(_) => true,
             Action::PlaySearchMatch { serial, .. } => *serial == self.play_search_serial,
-            Action::Previous => {
-                let position = if self.resume_only() {
-                    self.resume_position_ms
-                } else {
-                    self.now_playing().map_or(0, |now| now.position_ms)
-                };
-                position <= RESTART_BEFORE_PREVIOUS
-            }
+            Action::Previous => self.previous_steps_back(),
             _ => false,
         }
+    }
+
+    /// Whether Previous goes to the song before rather than restarting this
+    /// one, by the three-second rule librespot and Spotify's devices follow.
+    fn previous_steps_back(&self) -> bool {
+        let position = if self.resume_only() {
+            self.resume_position_ms
+        } else {
+            self.now_playing().map_or(0, |now| now.position_ms)
+        };
+        position <= RESTART_BEFORE_PREVIOUS
+    }
+
+    /// The song Previous lands on another device, as Spotify's latest push
+    /// named it for the song shown now. A song shown since, by a Next still
+    /// on its way, has no known song before it.
+    fn remote_song_before(&self) -> Option<String> {
+        let (playing, before) = self.remote_previous.as_ref()?;
+        (self.current_track_uri().as_deref() == Some(playing)).then(|| before.clone())
     }
 
     /// Choosing another song ends Repeat One and keeps repeating the rest,
@@ -13411,16 +13437,31 @@ impl App {
             }
             Action::Previous => {
                 self.resume_load = None;
+                let steps_back = self.previous_steps_back();
+                // Read before the expectation below goes: a Next still on
+                // its way shows a song Spotify has not named one before.
+                let before = steps_back.then(|| self.remote_song_before()).flatten();
                 // Next names its expected destination so the row moves before
-                // the engine does. Previous has no forward queue row to name;
-                // discard that expectation or a quick Next, Previous leaves
-                // the row marker stuck on the skipped-to song.
+                // the engine does. Discard that expectation, or a quick Next,
+                // Previous leaves the row marker stuck on the skipped-to song.
                 self.intent_track = None;
                 self.queue_skip = None;
                 self.queue_start_pending = Some(self.target());
                 match self.target() {
                     Target::Local => self.backend.player(PlayerCommand::Previous),
-                    Target::Remote(device_id) => self.remote(RemoteAction::Previous, device_id),
+                    Target::Remote(device_id) => {
+                        // Another device answers late, so show where it
+                        // goes now: the start, or the song before.
+                        if !steps_back {
+                            self.pending_remote_position = Some((0, Instant::now()));
+                        } else if let Some(uri) = before {
+                            if let Some(context) = self.playing_context_uri() {
+                                self.cache_track_from_context(&context, &uri);
+                            }
+                            self.expect_track(uri, 0);
+                        }
+                        self.remote(RemoteAction::Previous, device_id);
+                    }
                 }
             }
             Action::Seek(position_ms) => self.seek(position_ms),
@@ -21146,6 +21187,60 @@ mod tests {
             app.current_track_uri().as_deref(),
             Some("spotify:track:a"),
             "Previous restores the engine's current row instead of holding Next's marker"
+        );
+    }
+
+    /// Previous on another device shows the song it goes back to at once,
+    /// the one Spotify's push names before the playing song, and after
+    /// three seconds the start of this one. Once a Next on its way shows a
+    /// song that push said nothing of, Previous guesses no song.
+    #[test]
+    fn previous_on_another_device_shows_where_it_goes_at_once() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.selected_device = Some("sonos".into());
+        let song = |uri: &str| Track {
+            uri: uri.into(),
+            id: util::uri_id(uri).map(str::to_owned),
+            name: uri.into(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        app.track_cache.insert("b".into(), song("spotify:track:b"));
+        let playing = |progress_ms| RemoteSnapshot {
+            state: PlaybackState {
+                item: Some(PlayableItem::Track(song("spotify:track:c"))),
+                progress_ms: Some(progress_ms),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        };
+        app.remote_previous = Some(("spotify:track:c".into(), "spotify:track:b".into()));
+
+        app.remote = Some(playing(1_000));
+        app.apply(Action::Previous, &ctx);
+        let shown = app.now_playing().expect("a song shown");
+        assert_eq!(shown.uri, "spotify:track:b", "the song before shows at once");
+        assert_eq!(shown.position_ms, 0);
+
+        app.intent_track = None;
+        app.remote = Some(playing(60_000));
+        app.apply(Action::Previous, &ctx);
+        let shown = app.now_playing().expect("a song shown");
+        assert_eq!(shown.uri, "spotify:track:c", "late in a song, Previous restarts it");
+        assert_eq!(shown.position_ms, 0, "from its start at once");
+
+        app.pending_remote_position = None;
+        app.remote = Some(playing(1_000));
+        app.queue = loaded_queue("spotify:track:c", &["spotify:track:d"]);
+        app.apply(Action::Next, &ctx);
+        app.apply(Action::Previous, &ctx);
+        assert_ne!(
+            app.current_track_uri().as_deref(),
+            Some("spotify:track:b"),
+            "Next, Previous lands back on c, not on the song before it"
         );
     }
 

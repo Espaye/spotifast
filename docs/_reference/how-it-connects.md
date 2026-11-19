@@ -573,6 +573,13 @@ Web API controls has no such command and gets one Next per row down to the
 song, the song's own row included (one for the top row), each sent after the
 one before it is answered.
 
+Previous on another device shows where it lands before the device answers.
+In a song's first three seconds that is the song before it, the last of the
+previous tracks the latest Connect cluster push listed for the playing song;
+later it is the start of the song playing. A Next still on its way shows a
+song that push said nothing of, so a Previous right after it shows no song
+until the device reports one. This costs no request.
+
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their
 places, and a failed write stops the remaining songs. Signing out cancels

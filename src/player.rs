@@ -329,8 +329,12 @@ pub enum EngineEvent {
         id: String,
     },
     /// Spotify pushed a change to playback on another device: a switch,
-    /// play or pause, another song or collection, shuffle or repeat.
-    RemoteChanged,
+    /// play or pause, another song or collection, shuffle or repeat. It
+    /// names the song playing there and the one Previous steps back to.
+    RemoteChanged {
+        track: String,
+        previous: Option<String>,
+    },
     /// Spotify pushed a new volume for the device playing elsewhere, and
     /// nothing else changed. It carries the value, so no poll is needed.
     RemoteVolume {
@@ -348,6 +352,8 @@ struct ClusterView {
     active_device: String,
     context: String,
     track: String,
+    /// The song before it, when Spotify lists one that can play.
+    previous: Option<String>,
     playing: bool,
     shuffle: bool,
     repeat_context: bool,
@@ -358,10 +364,14 @@ struct ClusterView {
 impl ClusterView {
     fn of(cluster: &Cluster) -> Self {
         let state = &cluster.player_state;
+        let previous = state.prev_tracks.last().map(|track| track.uri.as_str());
         Self {
             active_device: cluster.active_device_id.clone(),
             context: state.context_uri.clone(),
             track: state.track.uri.clone(),
+            previous: previous
+                .filter(|uri| uri.starts_with("spotify:track:"))
+                .map(str::to_owned),
             playing: state.is_playing && !state.is_paused,
             shuffle: state.options.shuffling_context,
             repeat_context: state.options.repeating_context,
@@ -531,7 +541,10 @@ async fn watch_cluster(
                     device_id: view.active_device.clone(),
                     volume,
                 },
-                None => EngineEvent::RemoteChanged,
+                None => EngineEvent::RemoteChanged {
+                    track: view.track.clone(),
+                    previous: view.previous.clone(),
+                },
             });
         }
         shown = view;
@@ -2977,6 +2990,24 @@ mod tests {
         let elsewhere = ClusterView::of(&cluster("sonos", "spotify:track:b", true, 20_000));
         assert!(ours.changed_elsewhere(&elsewhere, "this"));
         assert!(elsewhere.changed_elsewhere(&ours, "this"));
+    }
+
+    /// A push names the song Previous steps back to: the last one Spotify
+    /// lists before the playing song, when it is a song.
+    #[test]
+    fn a_push_names_the_song_before_the_playing_one() {
+        let mut pushed = cluster("sonos", "spotify:track:c", true, 30_000);
+        assert_eq!(ClusterView::of(&pushed).previous, None, "the first song");
+        let state = pushed.player_state.mut_or_insert_default();
+        for uri in ["spotify:track:a", "spotify:track:b"] {
+            let mut track = ProvidedTrack::new();
+            track.uri = uri.into();
+            state.prev_tracks.push(track);
+        }
+        let view = ClusterView::of(&pushed);
+        assert_eq!(view.previous.as_deref(), Some("spotify:track:b"));
+        assert!(ClusterView::of(&cluster("sonos", "spotify:track:c", true, 30_000))
+            .changed_elsewhere(&view, "this"));
     }
 
     /// The log says which of the ways to no lyrics it was, without the words.

@@ -188,11 +188,14 @@ counts once, and the notification reports only the rows actually added.
     again: a row of *Next in queue* moves, and when it cannot move yet
     (songs just added have not reached the device, or the device does not
     allow reordering) it stays put and a note says why. The Now playing row
-    is not queued again either, nor is a queue row dropped on the player
-    bar's Queue button. Rows of the section after it cannot be moved, because that section plays from the current
-    context and is not a list Spotifast can rewrite, so it is never a drop
-    target either. On this computer, while *Next in queue* is empty, drop
-    the song on the player bar's Queue button instead.
+    is not queued again either, nor is a row of *Next in queue* dropped on
+    the player bar's Queue button. A row of the section after it can be
+    dragged into *Next in queue* or onto the Queue button, and is queued
+    like a song from elsewhere. Its row also stays where it was, because
+    that section plays from the current context and is not a list
+    Spotifast can rewrite, so the song plays again when the context
+    reaches it. While *Next in queue* is empty, a drop anywhere on the
+    queue starts it.
 
 12. **A song you queued can be removed on its own.** Right-click a row
     under *Next in queue*, or open its **…** menu, and choose **Remove

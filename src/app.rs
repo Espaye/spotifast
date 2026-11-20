@@ -7983,10 +7983,10 @@ impl App {
     /// logs what held a move of Next in queue back.
     fn refuse_queue_drop(&mut self, refusal: crate::model::QueueRefusal) {
         let message = match refusal {
-            crate::model::QueueRefusal::Upcoming => gettext(
+            crate::model::QueueRefusal::NowPlaying => gettext(
                 self.locale,
-                // Translators: Shown when a song from the playlist or album that is playing is dragged within the queue. "Next in queue" is the queue's section of songs added by hand.
-                "Only songs in Next in queue can be moved",
+                // Translators: Shown when the playing song is dragged from the queue's Now playing row onto the queue.
+                "This song is already playing",
             ),
             crate::model::QueueRefusal::Locked => {
                 let target = self.target();

@@ -1067,21 +1067,20 @@ pub const UPCOMING_ROW: &str = "queue-upcoming";
 pub const NOW_PLAYING_ROW: &str = "queue-now-playing";
 
 impl DragTrack {
-    /// Whether the rows were dragged out of the open queue, which never
-    /// queues them again.
-    pub fn is_from_queue(&self) -> bool {
-        self.from.as_ref().is_some_and(|(origin, _)| {
-            [QUEUED_ROW, UPCOMING_ROW, NOW_PLAYING_ROW].contains(&origin.as_str())
-        })
+    /// Whether the row was dragged out of Next in queue or Now playing,
+    /// which never queues it again. A row of Next up can be queued.
+    pub fn is_queued_or_playing(&self) -> bool {
+        self.from
+            .as_ref()
+            .is_some_and(|(origin, _)| [QUEUED_ROW, NOW_PLAYING_ROW].contains(&origin.as_str()))
     }
 }
 
 /// Why a song dropped on the open queue stayed where it was.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueueRefusal {
-    /// It was a row after Next in queue. The context plays those in its own
-    /// order, and a copy in Next in queue would play the song twice.
-    Upcoming,
+    /// It was the Now playing row: the song is already playing.
+    NowPlaying,
     /// It was a row of Next in queue, which cannot be moved now.
     Locked,
 }

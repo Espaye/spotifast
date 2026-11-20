@@ -2508,8 +2508,8 @@ fn track_row_contents(
         };
         // Keep the source index for moves within an editable playlist. A
         // queue row always names the section it left, whether or not the
-        // queue can be rewritten now, so dropping it back on the queue
-        // never queues another copy of it.
+        // queue can be rewritten now, so a row of Next in queue dropped
+        // back on the queue never queues another copy of it.
         let from = (items.len() == 1)
             .then(|| match row.context {
                 RowContext::Context {

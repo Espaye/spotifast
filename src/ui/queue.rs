@@ -9,7 +9,6 @@ use crate::app::App;
 use crate::i18n::{Locale, gettext};
 use crate::model::{
     Action, DragTrack, Loadable, NOW_PLAYING_ROW, QUEUED_ROW, QueueRefusal, QueueTab, RowContext,
-    UPCOMING_ROW,
 };
 use crate::theme::{self, Icon};
 
@@ -391,10 +390,12 @@ enum Landing {
 }
 
 /// What the song being dragged would do if dropped on the queue now. A row
-/// of the queue itself is never queued again: it moves, or nothing happens.
+/// of Next in queue moves or stays put, and the playing song is not queued
+/// again. A row of Next up is queued like a song from elsewhere; the context
+/// still plays it in its own place too.
 fn landing_of(app: &App, track: &DragTrack) -> Landing {
     match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
-        Some(UPCOMING_ROW | NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::Upcoming),
+        Some(NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::NowPlaying),
         Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
         Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked),
         _ if app.queue_locally_reorderable() => Landing::Insert,
@@ -683,12 +684,10 @@ fn rows(
         }
         ui.add_space(SECTION_GAP);
     }
-    // With Next in queue empty, this computer's player has no row to insert
-    // at, so the panel takes no drop: every row on it belongs to Next up,
-    // which plays from the context and is never rewritten. The player bar's
-    // Queue button still takes the drop. A device playing elsewhere adds a
-    // dropped song at the end, which is where Next in queue will start.
-    if queued_len == 0 && landing == Some(Landing::Append) {
+    // With Next in queue empty, a drop anywhere on the panel starts it, under
+    // Now playing: the rows below belong to Next up, which plays from the
+    // context and is never rewritten.
+    if queued_len == 0 && matches!(landing, Some(Landing::Insert | Landing::Append)) {
         slot = Some(0);
         drop_line(ui, palette.accent, start_line);
     }

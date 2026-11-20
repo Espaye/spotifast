@@ -1049,9 +1049,10 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         app.actions.push(Action::ToggleQueuePanel);
     }
     // A dragged song dropped on the queue button queues it, same as the
-    // "Add to queue" menu item. A row of the open queue is not queued again.
+    // "Add to queue" menu item. A row of Next in queue or Now playing is not
+    // queued again.
     if let Some(track) = queue_button.dnd_release_payload::<DragTrack>()
-        && !track.is_from_queue()
+        && !track.is_queued_or_playing()
     {
         app.actions.push(Action::QueueMany {
             songs: track

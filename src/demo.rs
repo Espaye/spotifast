@@ -12050,43 +12050,61 @@ mod tests {
         payload
     }
 
-    /// A Next up row dropped on Next in queue is not queued again, on this
-    /// computer or on a device playing elsewhere, and the toast says why it
-    /// stayed. Queueing a copy on every such drop once filled the queue
-    /// with the same song.
+    /// A Next up row dropped on Next in queue is queued there, like a song
+    /// from elsewhere: at the drop line on this computer, at the end on a
+    /// device playing elsewhere.
     #[test]
-    fn a_next_up_row_dropped_on_next_in_queue_is_not_queued_again() {
+    fn a_next_up_row_dropped_on_next_in_queue_is_queued_there() {
         for local in [true, false] {
-            let (ctx, mut app) = accessible_app(&format!("queue-next-up-no-copy-{local}"));
+            let (ctx, mut app) = accessible_app(&format!("queue-next-up-drop-{local}"));
             app.show_queue_panel = true;
             let uris = seed_queued_songs(&mut app);
             app.local_ready = local;
-            let rows_before = app.queue.get().unwrap().queue.len();
             for _ in 0..3 {
                 frame_events(&ctx, &mut app, vec![]);
             }
             // "Otomo" is the first Next up row, after the three queued ones.
-            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 0"));
+            let otomo = app.queue.get().unwrap().queue[3].uri().to_string();
+            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 1"));
             assert_eq!(
                 payload.from,
                 Some((crate::model::UPCOMING_ROW.to_string(), 3)),
                 "local {local}"
             );
-            assert_eq!(app.manual_queue, uris, "local {local}");
-            assert_eq!(
-                app.queue.get().unwrap().queue.len(),
-                rows_before,
-                "local {local}"
-            );
-            assert!(
-                app.toasts
-                    .iter()
-                    .any(|toast| toast.message == "Only songs in Next in queue can be moved"),
-                "local {local}: {:?}",
-                app.toasts
-            );
+            let expected = if local {
+                vec![uris[0].clone(), otomo, uris[1].clone(), uris[2].clone()]
+            } else {
+                vec![uris[0].clone(), uris[1].clone(), uris[2].clone(), otomo]
+            };
+            assert_eq!(app.manual_queue, expected, "local {local}");
             app.backend.shutdown();
         }
+    }
+
+    /// With Next in queue empty, a Next up row dropped on the panel starts
+    /// Next in queue on this computer's player too.
+    #[test]
+    fn a_next_up_row_dropped_on_an_empty_next_in_queue_starts_it() {
+        let (ctx, mut app) = accessible_app("queue-next-up-drop-empty");
+        app.show_queue_panel = true;
+        seed_queued_songs(&mut app);
+        if let Loadable::Loaded(queue) = &mut app.queue {
+            queue.queue.drain(..3);
+        }
+        app.manual_queue.clear();
+        assert!(app.queue_locally_reorderable());
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let first = app.queue.get().unwrap().queue[0].name().to_string();
+        let dragged = app.queue.get().unwrap().queue[1].clone();
+        let payload = drag_queue_row_onto(&ctx, &mut app, dragged.name(), Some(&first));
+        assert_eq!(
+            payload.from,
+            Some((crate::model::UPCOMING_ROW.to_string(), 1))
+        );
+        assert_eq!(app.manual_queue, vec![dragged.uri().to_string()]);
+        app.backend.shutdown();
     }
 
     /// A Next in queue row that cannot be moved right now stays where it
@@ -12140,29 +12158,34 @@ mod tests {
         assert!(
             app.toasts
                 .iter()
-                .any(|toast| toast.message == "Only songs in Next in queue can be moved"),
+                .any(|toast| toast.message == "This song is already playing"),
             "{:?}",
             app.toasts
         );
         app.backend.shutdown();
     }
 
-    /// A queue row dropped on the player bar's Queue button is not queued
-    /// again, from Next in queue or from Next up.
+    /// A Next in queue row dropped on the player bar's Queue button is not
+    /// queued again. A Next up row is, like Add to queue.
     #[test]
-    fn a_queue_row_dropped_on_the_queue_button_is_not_queued_again() {
+    fn queue_rows_dropped_on_the_queue_button() {
         for (index, name) in ["Queued 1", "Otomo"].into_iter().enumerate() {
-            let (ctx, mut app) = accessible_app(&format!("queue-button-no-copy-{index}"));
+            let (ctx, mut app) = accessible_app(&format!("queue-button-drop-{index}"));
             app.show_queue_panel = true;
             let uris = seed_queued_songs(&mut app);
-            let rows_before = app.queue.get().unwrap().queue.len();
+            let otomo = app.queue.get().unwrap().queue[3].uri().to_string();
             for _ in 0..3 {
                 frame_events(&ctx, &mut app, vec![]);
             }
             let payload = drag_queue_row_onto(&ctx, &mut app, name, None);
-            assert!(payload.is_from_queue(), "{name}");
-            assert_eq!(app.manual_queue, uris, "{name}");
-            assert_eq!(app.queue.get().unwrap().queue.len(), rows_before, "{name}");
+            let mut expected = uris;
+            if name == "Otomo" {
+                assert!(!payload.is_queued_or_playing(), "{name}");
+                expected.push(otomo);
+            } else {
+                assert!(payload.is_queued_or_playing(), "{name}");
+            }
+            assert_eq!(app.manual_queue, expected, "{name}");
             app.backend.shutdown();
         }
     }

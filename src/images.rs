@@ -189,6 +189,21 @@ impl ArtLoader {
         )
     }
 
+    /// Whether artwork has finished loading or failed to, or is not art
+    /// this loader fetches, so covers further down the list may be asked for.
+    pub fn is_settled(&self, url: &str) -> bool {
+        !is_art(url)
+            || self.is_coverless(url)
+            || matches!(
+                self.inner
+                    .entries
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(url),
+                Some(Entry::Ready { .. } | Entry::Failed(_))
+            )
+    }
+
     /// Marks artwork as visible so size-based eviction keeps it stable.
     pub fn touch(&self, url: &str) {
         if let Some(Entry::Ready { last_used, .. }) = self
@@ -1845,6 +1860,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Covers further down a list wait for those on screen to settle:
+    /// arrived or failed, never still on their way.
+    #[test]
+    fn artwork_is_settled_once_it_arrives_or_fails() {
+        let dir = std::env::temp_dir().join(format!("spotifast-settled-{}", std::process::id()));
+        let runtime = artwork_test_runtime();
+        let loader = artwork_test_loader(&runtime, dir.clone());
+        let ctx = egui::Context::default();
+        let url = "https://i.scdn.co/image/on-screen";
+        assert!(!loader.is_settled(url), "never asked for");
+        assert!(loader.prefetch(&ctx, url));
+        assert!(!loader.is_settled(url), "still on its way");
+        let entry = |state| {
+            loader
+                .inner
+                .entries
+                .lock()
+                .expect("the entries")
+                .insert(url.to_string(), state);
+        };
+        entry(Entry::Failed("gone".into()));
+        assert!(loader.is_settled(url), "failed");
+        entry(Entry::Ready {
+            bytes: None,
+            last_used: Instant::now(),
+            retained: 0,
+        });
+        assert!(loader.is_settled(url), "arrived");
+        assert!(
+            loader.is_settled("file:///tmp/cover.jpg"),
+            "not art this loader fetches"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn prefetching_starts_one_download_and_not_another() {
         let dir = std::env::temp_dir().join(format!("spotifast-prefetch-{}", std::process::id()));
@@ -2513,6 +2563,61 @@ mod tests {
         paint_until_made(&runtime, &ctx, &[scaled_uri(next, 64)], |ui| {
             cover(ui, next)
         });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The frame a new song's cover is made in is drawn again, so a place
+    /// laid out for the last song's cover never shows the new one.
+    #[test]
+    fn a_new_songs_cover_shows_only_in_its_own_place() {
+        use crate::ui::widgets::{playing_cover_stands_in, settle_playing_cover};
+        let runtime = artwork_test_runtime();
+        let dir = std::env::temp_dir().join(format!("spotifast-own-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let loader = artwork_test_loader(&runtime, dir.clone());
+        let ctx = egui::Context::default();
+        ctx.add_bytes_loader(Arc::new(loader.clone()));
+        ctx.add_image_loader(Arc::new(loader.scaler()));
+        let [first, next] = [
+            "https://i.scdn.co/image/before",
+            "https://i.scdn.co/image/after",
+        ];
+        cached_png(&loader, first, [20, 30, 40]);
+        cached_png(&loader, next, [200, 30, 40]);
+        let palette = crate::theme::Palette::dark();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(56.0, 56.0));
+        let cover = |ui: &mut egui::Ui, url: &str| {
+            crate::ui::widgets::playing_cover(ui, &palette, &loader, "big", Some(url), rect, 6.0);
+        };
+        paint_until_made(&runtime, &ctx, &[scaled_uri(first, 64)], |ui| {
+            cover(ui, first)
+        });
+        let made = scaled_uri(next, 64);
+        let mut stood_in = false;
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while texture_named(&ctx, &made).is_none() {
+                    let mut held = false;
+                    let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                        held = playing_cover_stands_in(ui, &loader, "big", Some(next));
+                        cover(ui, next);
+                        settle_playing_cover(ui, &loader, Some(next), held);
+                    });
+                    output.textures_delta.clear();
+                    stood_in |= held;
+                    let painted = painted_textures(&output.shapes);
+                    let new = texture_named(&ctx, &made);
+                    assert!(
+                        !held || new.is_none_or(|new| !painted.contains(&new)),
+                        "in the last one's place"
+                    );
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the copy is made");
+        });
+        assert!(stood_in, "the last song's cover stood in");
         let _ = std::fs::remove_dir_all(dir);
     }
 

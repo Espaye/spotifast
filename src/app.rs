@@ -66,6 +66,11 @@ const ROOTLIST_REFRESH: Duration = Duration::from_secs(5);
 /// How far into a song Previous restarts it rather than stepping back,
 /// matching what librespot does during playback.
 const RESTART_BEFORE_PREVIOUS: u32 = 3_000;
+/// How far under [`RESTART_BEFORE_PREVIOUS`] Previous on another device must
+/// be pressed to show the song before at once: the command reaches the
+/// device a moment later, when a song just under the mark may have passed it
+/// and restart instead.
+const REMOTE_PREVIOUS_MARGIN: u32 = 1_000;
 
 const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// Match other interface animations. egui subtracts the predicted frame time
@@ -94,6 +99,13 @@ const REMOTE_RECHECK: Duration = Duration::from_millis(1200);
 const REMOTE_PUSH_SPACING: Duration = Duration::from_secs(1);
 /// Delay before checking the queue after a local change.
 const QUEUE_RECHECK: Duration = Duration::from_millis(700);
+/// A queue on show fetched this recently is current enough to keep.
+const QUEUE_FRESH: Duration = Duration::from_secs(20);
+/// How long a Next up click may take to reach its song. This computer's
+/// engine passes each song above it with a Next of its own, and each Next
+/// waits for a Connect state update; another device gets one skip naming
+/// the song, or a Next per row where only the Web API reaches it.
+const QUEUE_SKIP_HOLD: Duration = Duration::from_secs(12);
 /// Delay before reading a playlist's metadata again while Spotify still
 /// reports the snapshot from before a write.
 const PLAYLIST_SNAPSHOT_RECHECK: Duration = Duration::from_secs(1);
@@ -129,6 +141,41 @@ impl PendingRemoteVolume {
     /// this volume was set on. It reports a Sonos without an id.
     fn may_be_on(&self, device: Option<&Device>) -> bool {
         device.is_some_and(|device| device.id.is_none() || device.id == self.device_id)
+    }
+}
+
+/// A volume set here that the device then reported. A speaker may report
+/// its level one step from what was set: a Sonos turned to 1% reports 0%
+/// a moment later while it still plays. A report that close keeps the
+/// chosen volume on screen, so the slider does not slip and the icon does
+/// not read muted.
+struct SettledRemoteVolume {
+    percent: u8,
+    device_id: Option<String>,
+}
+
+impl SettledRemoteVolume {
+    /// Whether `device` may be the one the volume was set on, as
+    /// `PendingRemoteVolume::may_be_on` decides.
+    fn may_be_on(&self, device: &Device) -> bool {
+        device.id.is_none() || device.id == self.device_id
+    }
+
+    /// The chosen volume, while `device` reports one this close to it.
+    fn shown_for(&self, device: Option<&Device>) -> Option<u8> {
+        let device = device.filter(|device| self.may_be_on(device))?;
+        let reported = device.volume_percent?;
+        (reported.abs_diff(self.percent) <= 1).then_some(self.percent)
+    }
+
+    /// Whether `device` reports another device or a volume set elsewhere.
+    fn contradicted_by(&self, device: Option<&Device>) -> bool {
+        device.is_some_and(|device| {
+            !self.may_be_on(device)
+                || device
+                    .volume_percent
+                    .is_some_and(|reported| reported.abs_diff(self.percent) > 1)
+        })
     }
 }
 
@@ -569,6 +616,12 @@ pub struct App {
     /// Songs taken out of Playing next one by one, and when, used to
     /// reject a fetch that still has one right after the queued rows.
     queue_removed: Option<(std::collections::HashSet<String>, Instant)>,
+    /// What the device playing elsewhere has queued by hand, as Spotify
+    /// last pushed it over the Connect session.
+    remote_queue: Option<crate::player::RemoteQueueView>,
+    /// The last mismatch between that push and the Web API's queue that was
+    /// logged, so each is logged once.
+    remote_queue_logged: Option<(usize, usize, bool)>,
     /// What the window's title bar says, as last set.
     window_title: String,
 
@@ -588,10 +641,22 @@ pub struct App {
     /// either side changes rather than every frame, and shared so that
     /// drawing it never copies the list.
     pub recents_view: std::sync::Arc<[crate::api::models::PlayHistory]>,
+    /// The Recent row of the song playing now, dated when it started.
+    recent_playing: Option<crate::api::models::PlayHistory>,
+    /// The play that row stands for: its song and, on this computer, the
+    /// engine's count of loaded tracks, so a song played again is new.
+    recent_play: Option<(String, Option<u64>)>,
+    /// When the request that dated that row was made, so a song chosen
+    /// again on another device is dated anew.
+    recent_request: Option<Instant>,
     pub recents_generation: u64,
     pub queue_tab: QueueTab,
     pub search: SearchState,
     pub playlist_pages: HashMap<String, PlaylistPage>,
+    /// Which of the account's own playlists hold each song, for the hearts.
+    pub(crate) membership: crate::playlist_membership::Membership,
+    /// When the index last looked for playlists to read.
+    membership_checked_at: Option<Instant>,
     /// One checkpoint snapshot at a time, including pages evicted while it writes.
     playlist_cache_write_in_flight: bool,
     load_generation: u64,
@@ -602,6 +667,8 @@ pub struct App {
     pub show_pages: HashMap<String, ShowPage>,
     /// Radio pages by the seed's URI.
     pub radio_pages: HashMap<String, RadioPage>,
+    /// A lone song for a remote device, held a moment for its radio.
+    song_radio: Option<radio::SongRadio>,
     /// Songs the account hid in Spotify's playlists, by playlist URI, as
     /// Spotify's apps hide them with "Hide in this playlist" (#779).
     pub hidden_songs: HashMap<String, HashSet<String>>,
@@ -684,6 +751,8 @@ pub struct App {
     pub softened_covers: crate::images::SoftenedCovers,
     /// The track the lyrics below are for.
     pub lyrics_uri: Option<String>,
+    /// Lyrics on either side of the playing song, including an outstanding read.
+    adjacent_lyrics: Vec<(String, Loadable<Option<crate::lyrics::Lyrics>>)>,
     /// How many of `LYRICS_RETRIES` this song has used.
     lyrics_retries: usize,
     /// When to ask again for lyrics a busy service didn't answer for.
@@ -717,6 +786,10 @@ pub struct App {
     /// When Spotify pushed a change to another device that no poll since
     /// has asked about.
     remote_pushed_at: Option<Instant>,
+    /// The song playing on another device and the songs before it, oldest
+    /// first, as Spotify's latest push named them, for Previous to show at
+    /// once.
+    remote_previous: Option<(String, Vec<String>)>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
     /// The main window's size, position and maximized state: from the
@@ -760,6 +833,7 @@ pub struct App {
     pub shared_grant: bool,
     pending_remote_position: Option<(u32, Instant)>,
     pending_remote_volume: Option<PendingRemoteVolume>,
+    settled_remote_volume: Option<SettledRemoteVolume>,
     soloist_volume_preview: Option<Instant>,
     remote_volume_request: u64,
     /// A volume Spotify pushed for the remote device. A poll already on
@@ -788,6 +862,8 @@ pub struct App {
     /// The repeat mode saved by the last run, which the first local load
     /// starts with: the engine starts at off.
     repeat_wanted: RepeatMode,
+    /// The choice shown while this player catches up with a repeat command.
+    pending_repeat: Option<(Target, RepeatMode, Instant)>,
     /// Last local shuffle change, used to ignore its echo from the engine.
     shuffle_set_at: Option<Instant>,
     /// When tracks recently came up unavailable, to spot a key-service
@@ -817,7 +893,25 @@ pub struct App {
     /// A requested start whose effect on the manual queue is already applied.
     /// Context loads keep it; explicit skips consume their rows immediately.
     queue_start_pending: Option<Target>,
+    /// The song a Next up click skips the player to, here or on another
+    /// device, and when. The songs above it play for a moment at most on
+    /// the way, and show nowhere.
+    queue_skip: Option<(String, Instant)>,
+    /// That skip, on another device, goes to a later copy of its song, or
+    /// to the song that played when it was sent: the Next answers still to
+    /// come, its own the last of them. Until then an answer naming the
+    /// song may be a copy passed on the way, or the one from before.
+    queue_skip_unanswered: usize,
+    /// Nexts and Next up skips sent to another device and not answered
+    /// yet. Each is answered as a `Next`.
+    next_answers_due: usize,
+    /// That skip, on this computer, goes to a later copy of its song, or to
+    /// the song playing again: the reports of the song still to come, the
+    /// chosen copy's included. The engine reports each earlier copy as it
+    /// passes it.
+    queue_skip_copies: usize,
     pub playlist_busy: bool,
+    creating_playlist: Option<(Vec<String>, Option<crate::playlist_cover::Cover>)>,
     pub quit_requested: bool,
     /// Wheel step, Linux touchpad scale and glide, and the axis a gesture
     /// holds, for the window on screen.
@@ -1339,6 +1433,8 @@ impl App {
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
             queue_removed: None,
+            remote_queue: None,
+            remote_queue_logged: None,
             window_title: String::new(),
             library: Library::default(),
             liked_songs: crate::liked::LikedSongs::default(),
@@ -1349,6 +1445,9 @@ impl App {
             listening: None,
             recents: crate::model::CursorList::default(),
             recents_view: std::sync::Arc::from([]),
+            recent_playing: None,
+            recent_play: None,
+            recent_request: None,
             recents_generation: 0,
             queue_tab: session
                 .queue_tab
@@ -1357,6 +1456,8 @@ impl App {
                 .unwrap_or_default(),
             search: SearchState::default(),
             playlist_pages: HashMap::new(),
+            membership: Default::default(),
+            membership_checked_at: None,
             playlist_cache_write_in_flight: false,
             load_generation: 0,
             album_pages: HashMap::new(),
@@ -1364,6 +1465,7 @@ impl App {
             artist_top_tracks_generation: 0,
             show_pages: HashMap::new(),
             radio_pages: HashMap::new(),
+            song_radio: None,
             hidden_songs: HashMap::new(),
             hidden_songs_revision: 0,
             hidden_songs_generation: 0,
@@ -1410,6 +1512,7 @@ impl App {
             lyrics_backdrop: Default::default(),
             softened_covers: Default::default(),
             lyrics_uri: None,
+            adjacent_lyrics: Vec::new(),
             lyrics_retries: 0,
             lyrics_retry_at: None,
             lyrics: Loadable::NotLoaded,
@@ -1426,6 +1529,7 @@ impl App {
             pending_transfer_to: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
+            remote_previous: None,
             seek_preview: None,
             volume_preview: None,
             window_geometry: fastframe_shell::window::Geometry {
@@ -1452,6 +1556,7 @@ impl App {
             shared_grant: false,
             pending_remote_position: None,
             pending_remote_volume: None,
+            settled_remote_volume: None,
             soloist_volume_preview: None,
             remote_volume_request: 0,
             pushed_remote_volume: None,
@@ -1463,6 +1568,7 @@ impl App {
             local_files: None,
             shuffle_wanted: session.shuffle_on,
             repeat_wanted: RepeatMode::from_api(&session.repeat),
+            pending_repeat: None,
             shuffle_set_at: None,
             unavailable_at: Vec::new(),
             last_unavailable_reconnect: None,
@@ -1476,7 +1582,12 @@ impl App {
             last_now_playing_uri: None,
             last_now_playing_sequence: 0,
             queue_start_pending: None,
+            queue_skip: None,
+            queue_skip_unanswered: 0,
+            next_answers_due: 0,
+            queue_skip_copies: 0,
             playlist_busy: false,
+            creating_playlist: None,
             quit_requested: false,
             scrolling: fastframe_scroll::Scrolling::default(),
             autoscroll: crate::autoscroll::Autoscroll::default(),
@@ -1931,7 +2042,7 @@ impl App {
         }
     }
 
-    fn saved_toggle_targets(&self, uri: &str) -> Vec<String> {
+    pub(crate) fn saved_toggle_targets(&self, uri: &str) -> Vec<String> {
         let Some(key) = self.track_recordings.get(uri) else {
             return vec![uri.to_string()];
         };
@@ -2099,7 +2210,9 @@ impl App {
     /// Track shown as current, including a recent unconfirmed play request.
     pub fn current_track_uri(&self) -> Option<String> {
         if let Some(intent) = &self.intent_track
-            && (intent.at.elapsed() < PLAYBACK_HOLD || self.queued_play.is_some())
+            && (intent.at.elapsed() < PLAYBACK_HOLD
+                || self.queued_play.is_some()
+                || self.queue_skip_in_flight())
         {
             return Some(intent.uri.clone());
         }
@@ -2214,6 +2327,8 @@ impl App {
     /// Shows a user-requested track until the responsible playback surface
     /// has had a chance to report what really started.
     fn expect_track(&mut self, uri: String, position_ms: u32) {
+        // Another song asked for: no skip is on its way anymore.
+        self.queue_skip = None;
         let confirmation = match self.target() {
             Target::Local => TrackConfirmation::Local,
             Target::Remote(_) => TrackConfirmation::Remote {
@@ -2241,25 +2356,45 @@ impl App {
         }
     }
 
+    /// A Next up click's skip is still passing the songs above its own.
+    fn queue_skip_in_flight(&self) -> bool {
+        self.queue_skip
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < QUEUE_SKIP_HOLD)
+    }
+
     /// A poll issued before the command cannot settle its intent. Spotify's
     /// first later answer may still describe the old track, so a mismatch is
     /// held and checked once more. Agreement, or two later mismatches, settles
-    /// on the reported state.
-    fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) {
+    /// on the reported state. A Next up click's skip has its own time to
+    /// land: until then an answer naming another song, the old one or one
+    /// passed on the way, is only a reason to ask again, and so is one
+    /// naming its song before a skip to a later copy is answered. Returns
+    /// whether the answer is the one that confirms such a skip has landed.
+    fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) -> bool {
+        let skipping = self.queue_skip_in_flight();
+        let unanswered = skipping && self.queue_skip_unanswered > 0;
         let mut settled = false;
+        let mut arrived = false;
         let mut recheck = false;
+        // A song held for its radio has not been asked of the device yet.
+        let held = self.song_radio.as_ref().map(|wait| wait.seed.as_str());
         if let Some(intent) = &mut self.intent_track
+            && held != Some(intent.uri.as_str())
             && let TrackConfirmation::Remote {
                 after_poll,
                 mismatches,
             } = &mut intent.confirmation
             && poll > *after_poll
         {
-            if reported == Some(intent.uri.as_str()) || *mismatches > 0 {
+            arrived = !unanswered && reported == Some(intent.uri.as_str());
+            if arrived || (*mismatches > 0 && !skipping) {
                 settled = true;
             } else {
                 *after_poll = poll;
-                *mismatches += 1;
+                if !skipping {
+                    *mismatches += 1;
+                }
                 recheck = true;
             }
         }
@@ -2267,6 +2402,23 @@ impl App {
             self.intent_track = None;
         } else if recheck {
             self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
+        }
+        let landed = arrived && self.queue_skip.take().is_some();
+        if landed {
+            // It plays. Spotify's copy of the queue gets its own tries to
+            // catch up.
+            self.clear_play_pending();
+            self.queue_stale_retries = 0;
+        }
+        landed
+    }
+
+    /// Leaves the remote track intent to a poll sent from now on.
+    fn confirm_after_next_poll(&mut self) {
+        if let Some(intent) = &mut self.intent_track
+            && let TrackConfirmation::Remote { after_poll, .. } = &mut intent.confirmation
+        {
+            *after_poll = self.remote_poll_seq;
         }
     }
 
@@ -2346,7 +2498,10 @@ impl App {
     /// while the responsible playback surface catches up.
     fn requested_track_preview(&self) -> Option<NowPlaying> {
         let intent = self.intent_track.as_ref()?;
-        if intent.at.elapsed() >= PLAYBACK_HOLD && self.queued_play.is_none() {
+        if intent.at.elapsed() >= PLAYBACK_HOLD
+            && self.queued_play.is_none()
+            && !self.queue_skip_in_flight()
+        {
             return None;
         }
         let mut now = self.cached_track_preview(&intent.uri, intent.position_ms)?;
@@ -2431,7 +2586,7 @@ impl App {
                 // what the spinner follows.
                 loading: self.local.loading,
                 shuffle: self.shuffle_wanted,
-                repeat: self.local.repeat,
+                repeat: self.shown_repeat(self.local.repeat),
                 volume_percent: volume_to_percent(self.local.volume),
                 can_control: true,
                 can_set_volume: true,
@@ -2479,8 +2634,11 @@ impl App {
         } else {
             match &self.pending_remote_volume {
                 Some(pending) if pending.may_be_on(device) => pending.percent,
-                _ => device
-                    .and_then(|device| device.volume_percent)
+                _ => self
+                    .settled_remote_volume
+                    .as_ref()
+                    .and_then(|settled| settled.shown_for(device))
+                    .or_else(|| device.and_then(|device| device.volume_percent))
                     .unwrap_or(50),
             }
         };
@@ -2527,7 +2685,7 @@ impl App {
             playing,
             loading: false,
             shuffle: self.shuffle_wanted,
-            repeat: RepeatMode::from_api(&remote.state.repeat_state),
+            repeat: self.shown_repeat(RepeatMode::from_api(&remote.state.repeat_state)),
             volume_percent: volume,
             // A restricted device is driven over the playback session's
             // Connect link instead, see `crate::sonos`.
@@ -2996,12 +3154,14 @@ impl App {
                     }
                 }
                 Event::Local(state) => self.handle_local(*state),
-                Event::RemoteChanged => {
+                Event::RemoteChanged { track, previous } => {
                     self.remote_pushed_at.get_or_insert_with(Instant::now);
+                    self.remote_previous = (!previous.is_empty()).then_some((track, previous));
                 }
                 Event::RemoteVolume { device_id, volume } => {
                     self.handle_remote_volume(&device_id, volume);
                 }
+                Event::RemoteQueue(view) => self.note_remote_queue(view),
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent {
                     url,
@@ -3058,11 +3218,17 @@ impl App {
                     Err(error) => log::warn!("rootlist unavailable: {error}"),
                 },
                 Event::Lyrics { uri, result } => {
+                    let result =
+                        result.map(|found| found.map(crate::lyrics::Lyrics::without_closing_notes));
                     if self.lyrics_uri.as_deref() == Some(uri.as_str()) {
                         self.lyrics = match result {
                             Ok(found) => Loadable::Loaded(found),
                             Err(error) => self.lyrics_failed(error, Instant::now()),
                         };
+                    } else if let Some((_, state)) =
+                        self.adjacent_lyrics.iter_mut().find(|(id, _)| id == &uri)
+                    {
+                        *state = Loadable::from_result(result);
                     }
                 }
                 Event::PlaylistCache {
@@ -3717,9 +3883,20 @@ impl App {
 
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
+        self.pending_repeat = None;
+        self.adjacent_lyrics.clear();
+        self.lyrics_uri = None;
+        self.lyrics = Loadable::NotLoaded;
+        self.lyrics_retry_at = None;
         self.pending_remote_volume = None;
+        self.settled_remote_volume = None;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
+        self.queue_skip = None;
+        self.queue_skip_unanswered = 0;
+        self.next_answers_due = 0;
+        // A song held for its radio was asked by the signed-out account.
+        self.song_radio = None;
         self.pending_album_queues.clear();
         self.pending_queue_batches.clear();
         self.last_album_queue = None;
@@ -3727,6 +3904,8 @@ impl App {
         self.uploaded_covers.clear();
         // Questions about the signed-out account's playlists go with it.
         self.duplicate_prompts.clear();
+        self.membership = Default::default();
+        self.membership_checked_at = None;
         if matches!(self.dialog, Some(Dialog::ConfirmPlaylistDuplicates { .. })) {
             self.dialog = None;
         }
@@ -3873,6 +4052,36 @@ impl App {
         }
         let track_changed =
             state.track != self.local.track || state.track_sequence != self.local.track_sequence;
+        // Next passes a song found unavailable, so a skip to one ends on
+        // the song after it.
+        if let Some(error) = &state.error
+            && self.local.error.as_deref() != Some(error.as_str())
+            && self
+                .queue_skip
+                .as_ref()
+                .is_some_and(|(uri, _)| error.ends_with(uri.as_str()))
+        {
+            self.queue_skip = None;
+        }
+        // A song a Next up click passes on its way to its own is not the
+        // song playing: it changes nothing on screen or in the queue.
+        let skipping_to = self
+            .queue_skip
+            .as_ref()
+            .filter(|_| self.queue_skip_in_flight())
+            .map(|(uri, _)| uri.clone());
+        let mut passing = track_changed
+            && skipping_to.is_some()
+            && state.track.as_ref().map(|track| &track.uri) != skipping_to.as_ref();
+        // So is an earlier copy of its song, on the way to a later one.
+        if track_changed && skipping_to.is_some() && !passing && self.queue_skip_copies > 1 {
+            self.queue_skip_copies -= 1;
+            passing = true;
+        }
+        if track_changed && !passing && self.queue_skip.take().is_some() {
+            // Spotify's copy of the queue gets its own tries to catch up.
+            self.queue_stale_retries = 0;
+        }
         let reconnected = state.connected && !self.local.connected;
         if state.shuffle != self.local.shuffle
             && self
@@ -3884,16 +4093,25 @@ impl App {
         }
         if state.playback != self.local.playback {
             self.optimistic_playing = None;
-            if matches!(state.playback, Playback::Playing | Playback::Loading) {
+            if matches!(state.playback, Playback::Playing | Playback::Loading)
+                && skipping_to.is_none()
+            {
                 self.clear_play_pending();
             }
         }
-        if state.track != self.local.track {
+        if state.track != self.local.track && !passing {
             self.clear_play_pending();
         }
+        // A copy passed on the way does not settle what was asked for, and
+        // while the skip goes on, nor does a report that only moves a song
+        // on.
+        let settles_on = state
+            .track
+            .as_ref()
+            .filter(|_| !passing && (track_changed || skipping_to.is_none()));
         self.reconcile_local_track_intent(
-            track_changed,
-            state.track.as_ref().map(|track| track.uri.as_str()),
+            track_changed && !passing,
+            settles_on.map(|track| track.uri.as_str()),
         );
         let held_volume = self.held_local_volume(state.volume);
         if held_volume.is_none() && state.volume != self.settings.volume {
@@ -3973,7 +4191,7 @@ impl App {
         if let Some(volume) = held_volume {
             self.local.volume = volume;
         }
-        if track_changed {
+        if track_changed && !passing {
             self.on_now_playing_changed();
         }
         if reconnected {
@@ -4361,10 +4579,7 @@ impl App {
         if let Some(url) = now.art_small.or(now.art_url) {
             self.tint_for(Some(&url));
         }
-        if matches!(self.page(), Page::Queue)
-            || self.show_queue_panel
-            || (self.settings.winamp_window && self.settings.playlist_open)
-        {
+        if self.queue_on_show() {
             self.refresh_queue(true);
         }
         if self.show_lyrics_panel || self.lyrics_fullscreen.is_some() {
@@ -4446,13 +4661,29 @@ impl App {
         {
             return;
         }
+        let mut prepared = None;
         if self.lyrics_uri.as_deref() != Some(now.uri.as_str()) {
+            prepared = self
+                .adjacent_lyrics
+                .iter()
+                .position(|(uri, _)| uri == &now.uri)
+                .map(|at| self.adjacent_lyrics.remove(at).1);
+            if let Some(uri) = self.lyrics_uri.take()
+                && matches!(self.lyrics, Loadable::Loaded(_))
+            {
+                let lyrics = std::mem::take(&mut self.lyrics);
+                self.remember_adjacent_lyrics(uri, lyrics);
+            }
             self.lyrics_retries = 0;
             self.lyrics_retry_at = None;
         }
         self.lyrics_uri = Some(now.uri.clone());
         self.lyrics_following = true;
         self.lyrics_line_shown = None;
+        if let Some(state @ (Loadable::Loaded(_) | Loadable::Loading)) = prepared {
+            self.lyrics = state;
+            return;
+        }
         if now.is_episode || self.offline {
             self.lyrics = Loadable::Loaded(None);
             return;
@@ -4475,6 +4706,91 @@ impl App {
         })));
     }
 
+    fn remember_adjacent_lyrics(
+        &mut self,
+        uri: String,
+        state: Loadable<Option<crate::lyrics::Lyrics>>,
+    ) {
+        if self.adjacent_lyrics.len() == 2 {
+            self.adjacent_lyrics.remove(0);
+        }
+        self.adjacent_lyrics.push((uri, state));
+    }
+
+    fn prepare_next_song(&mut self, ui: &egui::Ui) {
+        let reading = self.show_lyrics_panel || self.lyrics_fullscreen.is_some();
+        let Some(now) = &self.frame_now else {
+            return;
+        };
+        if reading
+            && self.intent_track.is_some()
+            && self.lyrics_uri.as_deref() != Some(now.uri.as_str())
+        {
+            self.request_lyrics();
+            return;
+        }
+        if now.loading || now.resuming || self.offline || self.metered() || !self.network_reachable
+        {
+            return;
+        }
+        let Some(queue) = self.queue.get() else {
+            return;
+        };
+        if queue.currently_playing.as_ref().map(PlayableItem::uri) != Some(now.uri.as_str()) {
+            return;
+        }
+        let Some(item @ PlayableItem::Track(track)) = queue.queue.first() else {
+            return;
+        };
+        if track.uri == now.uri || !self.row_playable(item) {
+            return;
+        }
+        let art = self.backend.art();
+        let fullscreen = self.lyrics_fullscreen.is_some();
+        let size = if fullscreen { 320.0 } else { 56.0 };
+        let current_art = self.small_art(now, size);
+        if current_art.is_some_and(|url| !art.is_settled(url)) {
+            return;
+        }
+        let pixels = if fullscreen { 640 } else { self.art_px(size) };
+        if let Some(url) = self.item_image(item, pixels)
+            && !art.has_copy(&url)
+        {
+            crate::ui::widgets::cover_copy(ui, &url, egui::Vec2::splat(size), Some(art));
+        }
+        if !reading
+            || !matches!(self.lyrics, Loadable::Loaded(_))
+            || self
+                .adjacent_lyrics
+                .iter()
+                .any(|(uri, state)| uri == &track.uri || state.is_loading())
+        {
+            return;
+        }
+        let uri = track.uri.clone();
+        let query = crate::lyrics::Query {
+            artist: track
+                .artists
+                .first()
+                .map(|artist| artist.name.clone())
+                .unwrap_or_default(),
+            title: track.name.clone(),
+            album: track
+                .album
+                .as_ref()
+                .map(|album| album.name.clone())
+                .unwrap_or_default(),
+            duration_ms: track.duration_ms,
+        };
+        let local_file = self.local_file(&uri).map(std::path::Path::to_path_buf);
+        self.remember_adjacent_lyrics(uri.clone(), Loadable::Loading);
+        self.backend.send(Command::Lyrics(Box::new(LyricsRequest {
+            uri,
+            query,
+            local_file,
+        })));
+    }
+
     /// Pushes the Winamp window's always-on-top level to the live window.
     fn push_winamp_level(&self, ctx: &egui::Context) {
         if self.window_level_supported
@@ -4488,6 +4804,9 @@ impl App {
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_custom_themes(ctx);
         self.retry_soloist_when_due(ctx);
+        if let Some(wait) = self.send_song_radio_when_due() {
+            ctx.request_repaint_after(wait);
+        }
         if self.queued_play.is_some() && self.soloist_waiting() && !self.soloist_recovering() {
             self.soloist_give_up();
         }
@@ -4641,11 +4960,16 @@ impl App {
                 self.refresh_devices();
             }
             let playlist_open = self.settings.winamp_window && self.settings.playlist_open;
-            if (self.show_queue_panel || matches!(self.page(), Page::Queue) || playlist_open)
+            let reading =
+                !self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some());
+            if (self.show_queue_panel
+                || matches!(self.page(), Page::Queue)
+                || playlist_open
+                || reading)
                 && !self.queue.is_loading()
                 && self
                     .queue_fetched_at
-                    .is_none_or(|at| at.elapsed() > Duration::from_secs(20))
+                    .is_none_or(|at| at.elapsed() > QUEUE_FRESH)
             {
                 self.refresh_queue(false);
             }
@@ -4666,6 +4990,23 @@ impl App {
                         due.saturating_duration_since(Instant::now())
                             .max(Duration::from_millis(100)),
                     );
+                }
+            }
+            if let Some((_, at)) = &self.queue_skip {
+                let left = QUEUE_SKIP_HOLD.saturating_sub(at.elapsed());
+                if left.is_zero() {
+                    // The skip ended on another song: show what plays.
+                    self.queue_skip = None;
+                    self.intent_track = None;
+                    self.clear_play_pending();
+                    self.on_now_playing_changed();
+                    if matches!(self.target(), Target::Remote(_)) {
+                        // The rows consumed for it may still be coming up.
+                        self.poll_remote_soon();
+                        self.refresh_queue(true);
+                    }
+                } else {
+                    ctx.request_repaint_after(left);
                 }
             }
             if let Some(due) = self.queue_recheck_at {
@@ -7281,6 +7622,31 @@ impl App {
         self.backend.api(ApiRequest::Devices);
     }
 
+    /// Whether something on show reads the queue: its page or panel, the
+    /// classic playlist window, or lyrics when the connection is not
+    /// metered.
+    fn queue_on_show(&self) -> bool {
+        matches!(self.page(), Page::Queue)
+            || self.show_queue_panel
+            || (!self.metered() && (self.show_lyrics_panel || self.lyrics_fullscreen.is_some()))
+            || (self.settings.winamp_window && self.settings.playlist_open)
+    }
+
+    /// The queue panel shows a current queue, and its Recent tab loads now
+    /// rather than when it is chosen. Both are Web API reads.
+    fn open_queue_panel(&mut self) {
+        if self
+            .queue_fetched_at
+            .is_none_or(|at| at.elapsed() > QUEUE_FRESH)
+            || self.queue.needs_load()
+        {
+            self.refresh_queue(false);
+        }
+        if !self.metered() && !self.recents.loaded_once && self.recents.error.is_none() {
+            self.load_recents(false);
+        }
+    }
+
     fn refresh_queue(&mut self, force: bool) {
         if !self.is_connected() || !self.network_reachable {
             return;
@@ -7309,6 +7675,8 @@ impl App {
     /// rows as a fresh list instead used to take seconds, threw the
     /// context away, and left Spotify's copy of the queue to reappear.
     fn play_queue_item(&mut self, index: usize, uri: String) {
+        // A newer choice outranks a song still waiting for its radio.
+        self.song_radio = None;
         self.resume_load = None;
         if self.resume_only() {
             // Nothing is playing anywhere, so there is no live queue to
@@ -7331,7 +7699,11 @@ impl App {
             self.play_request(PlayRequest::tracks(uris).starting_at_index(index), false);
             return;
         }
+        // A report of the song playing now names the chosen song too.
+        let replays = self.current_track_uri().as_deref() == Some(uri.as_str())
+            || self.now_playing().is_some_and(|now| now.uri == uri);
         let mut skips = index + 1;
+        let mut occurrence = 0;
         let mut consumed: Vec<String> = Vec::new();
         if let Loadable::Loaded(queue) = &mut self.queue {
             // The click names a song; if the rows shifted under the
@@ -7345,10 +7717,23 @@ impl App {
                 return;
             };
             skips = position + 1;
+            occurrence = queue.queue[..position]
+                .iter()
+                .filter(|item| item.uri() == uri)
+                .count();
             let mut items: Vec<_> = queue.queue.drain(..=position).collect();
             let chosen = items.pop().expect("the chosen row was just drained");
             consumed = items.iter().map(|item| item.uri().to_string()).collect();
             consumed.push(chosen.uri().to_string());
+            // The row already has the song's details, so the player bar
+            // names it now, and none of the songs on the way to it.
+            if let PlayableItem::Track(track) = &chosen
+                && let Some(id) = util::uri_id(&uri)
+            {
+                self.track_cache
+                    .entry(id.to_owned())
+                    .or_insert_with(|| track.clone());
+            }
             queue.currently_playing = Some(chosen);
         }
         for gone in &consumed {
@@ -7358,13 +7743,26 @@ impl App {
         }
         self.expect_track(uri.clone(), 0);
         self.queue_start_pending = Some(self.target());
-        self.set_play_pending(vec![uri]);
+        self.set_play_pending(vec![uri.clone()]);
         self.optimistic_playing = Some((true, Instant::now()));
         match self.target() {
             Target::Local => {
-                for _ in 0..skips {
-                    self.backend.player(PlayerCommand::Next);
-                }
+                // The engine counts the way in its own list. These rows are
+                // Spotify's copy of it, which lags behind, lists songs its
+                // Next passes over, and cannot show where a skip still on
+                // its way lands.
+                self.queue_skip = Some((uri.clone(), Instant::now()));
+                self.queue_skip_unanswered = 0;
+                self.queue_skip_copies = if occurrence > 0 || replays {
+                    occurrence + 1
+                } else {
+                    0
+                };
+                self.backend.player(PlayerCommand::SkipTo {
+                    uri,
+                    occurrence,
+                    skips,
+                });
             }
             Target::Remote(device_id) => {
                 // With nothing to act on, one call earns the "pick
@@ -7373,9 +7771,24 @@ impl App {
                     self.remote(RemoteAction::Next, None);
                     return;
                 }
-                for _ in 0..skips {
-                    self.remote(RemoteAction::Next, device_id.clone());
-                }
+                // One request for the whole way. A Next per row raced
+                // each other to the device, and the answers between them
+                // showed the songs on the way as the song playing, with
+                // the chosen one back in Next up.
+                self.queue_skip = Some((uri.clone(), Instant::now()));
+                self.next_answers_due += 1;
+                self.queue_skip_unanswered = if occurrence > 0 || replays {
+                    self.next_answers_due
+                } else {
+                    0
+                };
+                self.queue_skip_copies = 0;
+                self.backend.api(ApiRequest::SkipTo {
+                    device_id,
+                    uri,
+                    occurrence,
+                    skips,
+                });
             }
         }
     }
@@ -7384,11 +7797,131 @@ impl App {
     /// so the view can give them their own section.
     pub fn queued_rows_len(&self) -> usize {
         match &self.queue {
-            Loadable::Loaded(queue) => {
-                Self::end_of_queued_rows(&queue.queue, self.queued_by_hand())
-            }
+            Loadable::Loaded(queue) => self.queued_end(&queue.queue, self.queued_by_hand()),
             _ => 0,
         }
+    }
+
+    /// Index after the rows queued by hand, counting both the songs queued
+    /// here, `manual`, and those the device playing elsewhere lists as
+    /// queued, which include songs queued from another app.
+    fn queued_end(&self, rows: &[PlayableItem], manual: &[String]) -> usize {
+        Self::end_of_queued_rows_of(rows, &[manual, self.remote_queued()])
+    }
+
+    /// The songs the device playing elsewhere lists as queued by hand. A
+    /// song shown playing since its last push (Next took it, or it came up
+    /// on its own) has left them, and the rest stay on show while the
+    /// device catches up rather than drop under Next from for a moment.
+    fn remote_queued(&self) -> &[String] {
+        let Some(view) = self.remote_queue_seen() else {
+            return &[];
+        };
+        let Some(shown) = self.current_track_uri() else {
+            return &[];
+        };
+        if shown == view.track {
+            return &view.queued;
+        }
+        match view.queued.iter().position(|uri| *uri == shown) {
+            Some(at) => &view.queued[at + 1..],
+            None => &view.queued,
+        }
+    }
+
+    /// The last cluster push about the device this app controls elsewhere.
+    fn remote_queue_seen(&self) -> Option<&crate::player::RemoteQueueView> {
+        let Target::Remote(device) = self.target() else {
+            return None;
+        };
+        if self.targets_own_soloist() {
+            return None;
+        }
+        let view = self.remote_queue.as_ref()?;
+        let named = device.as_deref().is_none_or(|id| id == view.device);
+        let elsewhere = self.local_device_id.as_deref() != Some(view.device.as_str());
+        (named && elsewhere && !view.device.is_empty()).then_some(view)
+    }
+
+    /// The last cluster push about the device this app controls elsewhere,
+    /// while it still describes the song shown playing there. Edits wait
+    /// for it: Connect's set_queue rewrites the list that push holds.
+    fn remote_queue_view(&self) -> Option<&crate::player::RemoteQueueView> {
+        let view = self.remote_queue_seen()?;
+        let current = self.current_track_uri();
+        (current.as_deref() == Some(view.track.as_str())).then_some(view)
+    }
+
+    /// Keeps a cluster push and asks for the queue again when what the
+    /// device has queued changed, so Next in queue follows another app.
+    fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
+        let changed = self
+            .remote_queue
+            .as_ref()
+            .is_none_or(|shown| shown.queued != view.queued || shown.track != view.track);
+        self.remote_queue = Some(view);
+        if changed && self.remote_queue_view().is_some() {
+            if !self.queue_on_show() {
+                // Read when a queue shows again.
+                self.queue_fetched_at = None;
+            } else if self.queue_recheck_at.is_none() {
+                self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+            }
+        }
+    }
+
+    /// Puts the songs the device playing elsewhere lists as queued by hand
+    /// at the front of its fetched queue, in the device's order. The Web
+    /// API's list does not mark them, and a song it lists only further down
+    /// would otherwise fall out of Next in queue. A song it leaves out is
+    /// added.
+    fn follow_remote_queue(&mut self, fetched: &mut Queue) {
+        let Some(view) = self.remote_queue_view() else {
+            return;
+        };
+        let playing = fetched.currently_playing.as_ref().map(PlayableItem::uri);
+        if playing != Some(view.track.as_str()) || view.queued.is_empty() {
+            return;
+        }
+        let queued = view.queued.clone();
+        let titles = view.titles.clone();
+        let in_order = fetched
+            .queue
+            .iter()
+            .map(PlayableItem::uri)
+            .take(queued.len())
+            .eq(queued.iter().map(String::as_str));
+        let mut rows: Vec<Option<PlayableItem>> = std::mem::take(&mut fetched.queue)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut front = Vec::with_capacity(queued.len());
+        let mut missing = 0;
+        for (index, uri) in queued.iter().enumerate() {
+            let row = rows
+                .iter_mut()
+                .find(|row| row.as_ref().is_some_and(|item| item.uri() == uri))
+                .and_then(Option::take);
+            match row {
+                Some(item) => front.push(item),
+                None => {
+                    missing += 1;
+                    let title = titles.get(index).filter(|title| !title.is_empty());
+                    front.push(self.optimistic_queue_item(uri, title.unwrap_or(uri)));
+                }
+            }
+        }
+        front.extend(rows.into_iter().flatten());
+        fetched.queue = front;
+        let seen = (queued.len(), missing, in_order);
+        if (missing > 0 || !in_order) && self.remote_queue_logged != Some(seen) {
+            log::info!(
+                "queue on another device: {} queued, {missing} missing from the Web API, \
+                 in order {in_order}",
+                queued.len()
+            );
+        }
+        self.remote_queue_logged = Some(seen);
     }
 
     /// The songs the user queued here. Before resume, the saved manual
@@ -7410,15 +7943,205 @@ impl App {
         self.local.is_active() && matches!(self.target(), Target::Local)
     }
 
-    /// Whether the active local queue has rows that can be cleared.
-    pub fn can_clear_queue(&self) -> bool {
-        self.queue_locally_reorderable() && self.queued_rows_len() > 0
+    /// Whether the rows of Next in queue can be dragged into a new order:
+    /// on the local player, or on a device playing elsewhere that takes
+    /// Connect's `set_queue` for it.
+    pub fn queue_reorderable(&self) -> bool {
+        self.queue_locally_reorderable() || self.remote_queue_editable(|view| view.can_reorder)
     }
 
-    /// Whether the queue row at `index` is one of the manually queued
-    /// songs the active local queue lets the user take out.
+    /// Whether the songs queued on the device playing elsewhere can be
+    /// rewritten now: its last cluster push allows the edit, and every
+    /// song shown queued there has reached it.
+    fn remote_queue_editable(&self, allows: fn(&crate::player::RemoteQueueView) -> bool) -> bool {
+        let target = self.target();
+        self.remote_queue_view().is_some_and(allows)
+            && self.pending_queue_adds.is_empty()
+            && !self
+                .pending_queue_batches
+                .values()
+                .any(|writing| *writing == target)
+    }
+
+    /// Whether songs can be taken out of Next in queue.
+    fn queue_removable(&self) -> bool {
+        self.queue_locally_reorderable() || self.remote_queue_editable(|view| view.can_remove)
+    }
+
+    /// Whether Next in queue has rows that can be cleared.
+    pub fn can_clear_queue(&self) -> bool {
+        self.queue_removable() && self.queued_rows_len() > 0
+    }
+
+    /// Whether the queue row at `index` is in Next in queue and can be
+    /// taken out of it.
     pub fn can_remove_from_queue(&self, index: usize) -> bool {
-        self.queue_locally_reorderable() && index < self.queued_rows_len()
+        self.queue_removable() && index < self.queued_rows_len()
+    }
+
+    /// Says why a song dropped on the open queue stayed where it was, and
+    /// logs what held a move of Next in queue back.
+    fn refuse_queue_drop(&mut self, refusal: crate::model::QueueRefusal) {
+        let message = match refusal {
+            crate::model::QueueRefusal::NowPlaying => gettext(
+                self.locale,
+                // Translators: Shown when the playing song is dragged from the queue's Now playing row onto the queue.
+                "This song is already playing",
+            ),
+            crate::model::QueueRefusal::Locked => {
+                let target = self.target();
+                let view = self.remote_queue_view();
+                let allowed = view.is_some_and(|view| view.can_reorder);
+                let albums = self
+                    .pending_queue_batches
+                    .values()
+                    .filter(|writing| **writing == target)
+                    .count();
+                log::info!(
+                    "queue move refused: {} device, Connect state {}, reordering {}, \
+                     {} songs and {albums} albums still being added",
+                    if matches!(target, Target::Local) {
+                        "this"
+                    } else {
+                        "another"
+                    },
+                    if view.is_some() { "known" } else { "unknown" },
+                    if allowed { "allowed" } else { "not allowed" },
+                    self.pending_queue_adds.len(),
+                );
+                if matches!(target, Target::Local) {
+                    gettext(self.locale, "Play a song to reorder the queue")
+                } else if view.is_none() {
+                    gettext(
+                        self.locale,
+                        "Spotifast has not seen this device's queue yet. Try again in a moment.",
+                    )
+                } else if allowed {
+                    gettext(
+                        self.locale,
+                        "The songs just added are still on their way. Try again in a moment.",
+                    )
+                } else {
+                    gettext(
+                        self.locale,
+                        "This device does not let Spotifast reorder its queue",
+                    )
+                }
+            }
+        };
+        self.toast(message);
+    }
+
+    /// Rewrites what the device playing elsewhere has queued by hand to
+    /// `queued`, already on show, with Connect's `set_queue`. Its queue is
+    /// held off like a local reorder's until it catches up: the last
+    /// cluster push still lists the old order, so a fetch shows it too.
+    fn send_remote_queue(&mut self, queued: Vec<String>) {
+        // No addition is pending while it can be edited, so none names a
+        // row of the old list.
+        self.manual_queue = queued.clone();
+        self.session_dirty = true;
+        self.queue_seq += 1;
+        self.queue_stale_retries = 0;
+        self.queue_reorder_pending = Some(Instant::now());
+        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        let device_id = match self.target() {
+            Target::Remote(device_id) => device_id,
+            Target::Local => None,
+        };
+        self.backend.api(ApiRequest::SetQueue { device_id, queued });
+    }
+
+    /// Moves a row of Next in queue on the device playing elsewhere, from
+    /// shown index `from` to the slot before shown index `to`.
+    fn move_in_remote_queue(&mut self, from: usize, to: usize) {
+        if !self.remote_queue_editable(|view| view.can_reorder) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        if from >= queued_len || to > queued_len || from == to || to == from + 1 {
+            return;
+        }
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let item = queue.queue.remove(from);
+        queue
+            .queue
+            .insert(if to > from { to - 1 } else { to }, item);
+        let queued = queue.queue[..queued_len]
+            .iter()
+            .map(|item| item.uri().to_string())
+            .collect();
+        self.send_remote_queue(queued);
+    }
+
+    /// Takes the chosen rows out of Next in queue on the device playing
+    /// elsewhere. A row whose index no longer holds its song is left alone.
+    fn remove_from_remote_queue(&mut self, rows: Vec<(usize, String)>) {
+        if !self.remote_queue_editable(|view| view.can_remove) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let mut indexes: Vec<usize> = rows
+            .into_iter()
+            .filter(|(index, uri)| {
+                *index < queued_len
+                    && queue
+                        .queue
+                        .get(*index)
+                        .is_some_and(|item| item.uri() == uri)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        if indexes.is_empty() {
+            return;
+        }
+        let mut removed = std::collections::HashSet::new();
+        for &index in indexes.iter().rev() {
+            removed.insert(queue.queue.remove(index).uri().to_string());
+        }
+        let queued = queue.queue[..queued_len - indexes.len()]
+            .iter()
+            .map(|item| item.uri().to_string())
+            .collect();
+        if let Some((earlier, at)) = self.queue_removed.take()
+            && at.elapsed() < PLAYBACK_HOLD
+        {
+            removed.extend(earlier);
+        }
+        self.queue_removed = Some((removed, Instant::now()));
+        self.send_remote_queue(queued);
+    }
+
+    /// Clears Next in queue on the device playing elsewhere, keeping the
+    /// rows its context plays next.
+    fn clear_remote_queue(&mut self) {
+        if !self.remote_queue_editable(|view| view.can_remove) {
+            return;
+        }
+        let queued_len = self.queued_rows_len();
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let cleared: std::collections::HashSet<String> = queue
+            .queue
+            .drain(..queued_len)
+            .map(|item| item.uri().to_string())
+            .collect();
+        if cleared.is_empty() {
+            return;
+        }
+        self.pending_album_queues.clear();
+        self.last_album_queue = None;
+        self.queue_cleared = Some((cleared, Instant::now()));
+        self.send_remote_queue(Vec::new());
+        self.toast(gettext(self.locale, "Queue cleared"));
     }
 
     /// Takes the chosen rows out of Playing next. Neither the Web API nor
@@ -7427,6 +8150,7 @@ impl App {
     /// longer holds its song is left alone.
     fn remove_from_queue(&mut self, rows: Vec<(usize, String)>) {
         if !self.queue_locally_reorderable() {
+            self.remove_from_remote_queue(rows);
             return;
         }
         let queued_len = self.queued_rows_len();
@@ -7489,6 +8213,7 @@ impl App {
     /// Clears manually queued tracks while keeping the context's upcoming rows.
     fn clear_queue(&mut self) {
         if !matches!(self.target(), Target::Local) {
+            self.clear_remote_queue();
             return;
         }
         self.pending_album_queues.clear();
@@ -7574,11 +8299,8 @@ impl App {
             return;
         }
         let name = self.queue_playlist_name();
-        self.actions.push(Action::CreatePlaylist {
-            name,
-            public: false,
-            add_uris: uris,
-        });
+        self.actions
+            .push(Action::ShowDialog(Dialog::new_playlist(name, uris)));
     }
 
     /// Shows the head of Next up as playing before the engine confirms it.
@@ -7637,6 +8359,21 @@ impl App {
 
     /// Whether a fetched queue predates the latest local change.
     fn queue_fetch_is_stale(&self, fetched: &Queue) -> bool {
+        // While a Next up click's skip is on its way, Spotify's copy shows
+        // the songs it passes, the chosen one listed again under each, for
+        // as long as the skip takes. Only its own song ends the wait, and
+        // not an earlier copy of it while a skip to a later one goes on.
+        if let Some((uri, _)) = &self.queue_skip
+            && self.queue_skip_in_flight()
+            && (self.queue_skip_unanswered > 0
+                || self.queue_skip_copies > 0
+                || fetched
+                    .currently_playing
+                    .as_ref()
+                    .is_none_or(|item| item.uri() != uri.as_str()))
+        {
+            return true;
+        }
         if self.queue_stale_retries >= QUEUE_STALE_RETRIES {
             return false;
         }
@@ -7678,7 +8415,7 @@ impl App {
             && fetched.currently_playing.as_ref().map(|item| item.uri())
                 == pending.current_uri.as_deref()
         {
-            let at = Self::end_of_queued_rows(&fetched.queue, &self.manual_queue);
+            let at = self.queued_end(&fetched.queue, &self.manual_queue);
             let fetched_context = &fetched.queue[at..];
             if fetched_context.len() == pending.context_uris.len()
                 && fetched_context
@@ -7977,10 +8714,10 @@ impl App {
         request: u64,
         result: Result<Option<crate::playlist_cover::Cover>, String>,
     ) {
-        if let Some(Dialog::EditPlaylist {
-            id: current, cover, ..
-        }) = &mut self.dialog
-            && current == id
+        if let Some(cover) = self
+            .dialog
+            .as_mut()
+            .and_then(|dialog| dialog.cover_draft(id))
             && cover.request == Some(request)
         {
             cover.request = None;
@@ -8314,6 +9051,17 @@ impl App {
                             state,
                             received_at: Instant::now(),
                         });
+                        // Previous shows this song from here once it has passed.
+                        if let Some(PlayableItem::Track(track)) = self
+                            .remote
+                            .as_ref()
+                            .and_then(|remote| remote.state.item.as_ref())
+                            && let Some(id) = util::uri_id(&track.uri)
+                            && !self.track_cache.contains_key(id)
+                        {
+                            self.track_cache.insert(id.to_owned(), track.clone());
+                            self.track_used.insert(id.to_owned(), Instant::now());
+                        }
                         if let (Some(previous), Some(current)) = (
                             previous_shuffle,
                             self.remote
@@ -8349,7 +9097,7 @@ impl App {
                                 .as_ref()
                                 .map(|item| item.uri().to_string())
                         });
-                        self.reconcile_remote_track_intent(seq, uri.as_deref());
+                        let skip_landed = self.reconcile_remote_track_intent(seq, uri.as_deref());
                         if let Some(remote) = &self.remote
                             && let Some(device) = &remote.state.device
                             && device.id.is_some()
@@ -8367,7 +9115,12 @@ impl App {
                         {
                             self.optimistic_playing = None;
                         }
-                        if uri != previous_uri {
+                        // A song a Next up click passes on its way to its
+                        // own is not the song playing: it changes nothing
+                        // on screen or in the queue. The answer confirming
+                        // the skip is the change, even when an earlier one
+                        // already named its song.
+                        if (uri != previous_uri || skip_landed) && !self.queue_skip_in_flight() {
                             self.on_now_playing_changed();
                         }
                     }
@@ -8380,6 +9133,7 @@ impl App {
                     return;
                 }
                 if let Ok(fetched) = &mut result {
+                    self.follow_remote_queue(fetched);
                     self.drop_queue_padding(fetched);
                 }
                 // Partial reads and read failures must preserve optimistic
@@ -8807,6 +9561,9 @@ impl App {
                     return;
                 }
                 if let Ok(playlist) = &mut result {
+                    // A page read at a snapshot the playlist index has not
+                    // seen means the playlist changed since its read.
+                    self.membership.seen(&id, playlist.snapshot_id.as_deref());
                     // A header read over the streaming session lacks what
                     // the Web API gave: the account's own name, and the
                     // library list's public flag, owner name, and cover.
@@ -8998,6 +9755,7 @@ impl App {
                 self.request_user_names(adders);
             }
             ApiResponse::PlaylistCreated(result) => {
+                let creation = self.creating_playlist.take();
                 self.playlist_busy = false;
                 match result {
                     Ok(playlist) => {
@@ -9014,15 +9772,36 @@ impl App {
                         });
                         self.saved.insert(playlist.uri.clone(), true);
                         self.store_library_cache();
-                        if let Some(Dialog::CreatePlaylist { add_uris, .. }) = self.dialog.take()
-                            && !add_uris.is_empty()
-                        {
-                            self.backend.api(ApiRequest::AddToPlaylist {
-                                playlist_id: playlist.id.clone(),
-                                playlist_name: playlist.name.clone(),
-                                uris: add_uris,
-                                position: None,
-                            });
+                        if matches!(self.dialog, Some(Dialog::CreatePlaylist { .. })) {
+                            self.dialog = None;
+                        }
+                        if let Some((uris, selected)) = creation {
+                            if !uris.is_empty() {
+                                self.membership
+                                    .add(&playlist.id, uris.iter().map(String::as_str));
+                                self.backend.api(ApiRequest::AddToPlaylist {
+                                    playlist_id: playlist.id.clone(),
+                                    playlist_name: playlist.name.clone(),
+                                    uris,
+                                    position: None,
+                                });
+                            }
+                            if let Some(cover) = selected {
+                                self.cover_request = self.cover_request.wrapping_add(1);
+                                self.cover_uploads
+                                    .insert(playlist.id.clone(), self.cover_request);
+                                let previous_urls = playlist
+                                    .images
+                                    .iter()
+                                    .map(|image| image.url.clone())
+                                    .collect();
+                                self.backend.api(ApiRequest::UploadPlaylistCover {
+                                    id: playlist.id.clone(),
+                                    request: self.cover_request,
+                                    previous_urls,
+                                    cover,
+                                });
+                            }
                         }
                         self.open(Page::Playlist(playlist.id));
                     }
@@ -9108,6 +9887,12 @@ impl App {
                     }
                 }
             }
+            ApiResponse::PlaylistUris { id, result } => {
+                self.membership
+                    .receive(&id, result.map_err(|error| error.to_string()));
+                // The next read may start at once.
+                self.membership_checked_at = None;
+            }
             ApiResponse::PlaylistDuplicatesChecked {
                 playlist_id,
                 playlist_name,
@@ -9143,6 +9928,10 @@ impl App {
                 self.playlist_busy = false;
                 if let Some(page) = self.playlist_pages.get_mut(&id) {
                     page.pending_writes = page.pending_writes.saturating_sub(1);
+                }
+                match &result {
+                    Ok(snapshot) => self.membership.edit_confirmed(&id, snapshot.clone()),
+                    Err(_) => self.membership.edit_failed(&id),
                 }
                 match result {
                     Ok(snapshot) => {
@@ -9201,16 +9990,35 @@ impl App {
                 result,
             } => match result {
                 Ok(()) => {
-                    self.settle_playlist_edit(&format!("spotify:playlist:{id}"), true);
-                    self.saved
-                        .insert(format!("spotify:playlist:{id}"), followed);
+                    let uri = format!("spotify:playlist:{id}");
+                    // A deleted playlist has nothing left to show. One only
+                    // taken out of the library still plays and can be added
+                    // back from its page, so the page stays. Delete is
+                    // offered only on the listener's own playlists, and its
+                    // removal edit tells so even before the page has loaded.
+                    let deleted_here = self
+                        .library
+                        .playlists_edits
+                        .iter()
+                        .any(|edit| edit.uri == uri && edit.added.is_none());
+                    let owned = self
+                        .playlist_pages
+                        .get(&id)
+                        .and_then(|page| page.playlist.get())
+                        .is_some_and(|playlist| {
+                            self.user_id().is_some_and(|user| playlist.owned_by(user))
+                        });
+                    self.settle_playlist_edit(&uri, true);
+                    self.saved.insert(uri, followed);
                     self.toast(if followed {
                         gettext(self.locale, "Added to Your Library")
                     } else {
                         gettext(self.locale, "Removed from Your Library")
                     });
                     self.load_playlists();
-                    if !followed && matches!(self.page(), Page::Playlist(current) if *current == id)
+                    if !followed
+                        && (deleted_here || owned)
+                        && matches!(self.page(), Page::Playlist(current) if *current == id)
                     {
                         self.open(Page::Home);
                     }
@@ -9805,6 +10613,16 @@ impl App {
                 if matches!(action, RemoteAction::Play | RemoteAction::Pause) {
                     self.clear_play_pending();
                 }
+                if action == RemoteAction::Next {
+                    self.next_answers_due = self.next_answers_due.saturating_sub(1);
+                    if self.queue_skip_unanswered == 1 {
+                        // A skip's Nexts are all sent: its song is the one
+                        // meant, in a poll sent from now on. One sent before
+                        // may have caught an earlier copy on the way.
+                        self.confirm_after_next_poll();
+                    }
+                    self.queue_skip_unanswered = self.queue_skip_unanswered.saturating_sub(1);
+                }
                 match result {
                     Ok(()) => {
                         self.remote_recheck_at = Some(Instant::now() + REMOTE_RECHECK);
@@ -9821,8 +10639,12 @@ impl App {
                     Err(error) => {
                         self.optimistic_playing = None;
                         self.pending_remote_position = None;
+                        if action == RemoteAction::Repeat {
+                            self.pending_repeat = None;
+                        }
                         if matches!(action, RemoteAction::Volume { .. }) {
                             self.pending_remote_volume = None;
+                            self.settled_remote_volume = None;
                         }
                         if matches!(
                             action,
@@ -9830,7 +10652,13 @@ impl App {
                         ) && self.intent_track.as_ref().is_some_and(|intent| {
                             matches!(intent.confirmation, TrackConfirmation::Remote { .. })
                         }) {
-                            self.intent_track = None;
+                            self.drop_failed_request();
+                            if self.queue_skip.take().is_some() {
+                                // A Next up click that went nowhere: its
+                                // spinner goes and its rows come back.
+                                self.clear_play_pending();
+                                self.refresh_queue(true);
+                            }
                         }
                         let hint = if error.status() == Some(404) {
                             format!(
@@ -9902,6 +10730,20 @@ impl App {
                 }
                 self.refresh_queue(true);
             }
+            ApiResponse::QueueSet { result } => {
+                if let Err(error) = result {
+                    // Spotify's queue is right again: stop holding it off.
+                    self.queue_reorder_pending = None;
+                    self.queue_removed = None;
+                    self.queue_cleared = None;
+                    self.toast_error(
+                        // Translators: {error} is an error message.
+                        gettext(self.locale, "Couldn't change the queue: {error}")
+                            .replace("{error}", &error.to_string()),
+                    );
+                    self.refresh_queue(true);
+                }
+            }
         }
     }
 
@@ -9923,21 +10765,39 @@ impl App {
         }
         let percent = volume_to_percent(volume);
         device.volume_percent = Some(percent);
+        // Whether the push may come from the device a volume was set on.
+        let pushed_by = |id: Option<&str>| id.is_none_or(|id| id == device_id);
+        // A push from another device, or of a level further off, ends a
+        // settled volume, as a poll's does.
+        if self.settled_remote_volume.as_ref().is_some_and(|settled| {
+            !pushed_by(settled.device_id.as_deref()) || settled.percent.abs_diff(percent) > 1
+        }) {
+            self.settled_remote_volume = None;
+        }
         self.pushed_remote_volume = Some(PushedVolume {
             percent,
             device_id: device_id.to_owned(),
             poll_seq: self.remote_poll_seq,
         });
         // Once the hold has run out, a pushed volume is as current as a
-        // fresh poll's, and ends it without waiting for one.
-        let held = self
-            .pending_remote_volume
-            .as_ref()
-            .and_then(|pending| pending.written_at)
+        // fresh poll's, and ends it without waiting for one. One a step or
+        // less from the volume set here confirms it, as a poll's does.
+        let Some(pending) = &self.pending_remote_volume else {
+            return;
+        };
+        let held = pending
+            .written_at
             .is_none_or(|at| at.elapsed() < PLAYBACK_HOLD);
-        if !held {
-            self.pending_remote_volume = None;
+        if held {
+            return;
         }
+        if pushed_by(pending.device_id.as_deref()) && pending.percent.abs_diff(percent) <= 1 {
+            self.settled_remote_volume = Some(SettledRemoteVolume {
+                percent: pending.percent,
+                device_id: pending.device_id.clone(),
+            });
+        }
+        self.pending_remote_volume = None;
     }
 
     /// When to poll for a change Spotify pushed: after a pending poll
@@ -10221,6 +11081,10 @@ impl App {
             }
             _ => {}
         }
+        // A song waiting for its radio keeps the radio it waits for.
+        if let Some(wait) = &self.song_radio {
+            protected_radios.insert(wait.seed.clone());
+        }
         if let Some(uri) = self.playing_context_uri()
             && let Some(kind) = util::uri_kind(&uri)
             && let Some(id) = util::uri_id(&uri)
@@ -10318,6 +11182,9 @@ impl App {
             ));
             return;
         }
+        if action == RemoteAction::Next {
+            self.next_answers_due += 1;
+        }
         self.backend.api(ApiRequest::Remote {
             action,
             device_id,
@@ -10380,7 +11247,71 @@ impl App {
 
     /// Merges local and Spotify history for the Recent tab.
     fn rebuild_recents(&mut self) {
-        self.recents_view = crate::history::merged(self.plays.plays(), &self.recents.items).into();
+        self.recents_view = crate::history::recent_rows(
+            self.plays.plays(),
+            &self.recents.items,
+            self.recent_playing.as_ref(),
+        )
+        .into();
+    }
+
+    /// Leads the Recent tab with the song playing now, as the queue
+    /// shows it, from the moment it is chosen. The history records it only
+    /// once it has played long enough to count.
+    fn show_playing_in_recents(&mut self) {
+        let requested = self.requested_track_preview();
+        // On another device a song chosen again plays under the same name,
+        // so its request is what makes it a new play.
+        let request = requested
+            .as_ref()
+            .and(self.intent_track.as_ref())
+            .map(|intent| intent.at);
+        let chosen = request.is_some() && request != self.recent_request;
+        let playing = requested
+            .or_else(|| self.now_playing_live())
+            .filter(|now| !now.uri.is_empty());
+        let play = playing.as_ref().map(|now| {
+            (
+                now.uri.clone(),
+                now.local.then_some(self.local.track_sequence),
+            )
+        });
+        if play == self.recent_play && !chosen {
+            return;
+        }
+        // A song held paused since before is not played now: only one that
+        // plays, or one just chosen, leads with a new date.
+        if playing
+            .as_ref()
+            .is_some_and(|now| !now.playing && !now.loading)
+        {
+            return;
+        }
+        self.recent_play = play;
+        self.recent_request = request.or(self.recent_request);
+        self.recent_playing = playing.map(|now| crate::api::models::PlayHistory {
+            track: crate::history::played_track(&now),
+            played_at: Some(jiff::Timestamp::now().to_string()),
+            context: None,
+        });
+        self.rebuild_recents();
+    }
+
+    /// Drops a play request that failed, and with it the Recent row of the
+    /// song that never started.
+    fn drop_failed_request(&mut self) {
+        let Some(failed) = self.intent_track.take() else {
+            return;
+        };
+        if self
+            .recent_play
+            .as_ref()
+            .is_some_and(|(uri, _)| *uri == failed.uri)
+        {
+            self.recent_play = None;
+            self.recent_playing = None;
+            self.rebuild_recents();
+        }
     }
 
     /// Adds a page of play history to the Recents tab.
@@ -10600,6 +11531,8 @@ impl App {
     }
 
     fn start_play(&mut self, request: PlayRequest, shuffle_first: bool) {
+        // A newer play outranks a song still waiting for its radio.
+        self.song_radio = None;
         if self.soloist_waiting() && !self.soloist_recovering() {
             self.clear_play_pending();
             return;
@@ -10725,24 +11658,26 @@ impl App {
             // playing, which a Sonos is.
             Target::Remote(device_id) => {
                 self.queued_play = None;
-                if shuffle {
-                    self.backend.api(ApiRequest::ShufflePlay {
-                        device_id,
-                        play: request,
-                    });
-                } else {
-                    self.backend.api(ApiRequest::Remote {
-                        action: RemoteAction::Play,
-                        device_id,
-                        play: Some(request),
-                        position_ms: 0,
-                        percent: 0,
-                        flag: false,
-                        repeat: String::new(),
-                    });
-                }
+                self.play_remote(device_id, request, shuffle);
                 self.optimistic_playing = Some((true, Instant::now()));
             }
+        }
+    }
+
+    fn send_remote_play(&mut self, device_id: Option<String>, play: PlayRequest, shuffle: bool) {
+        if shuffle {
+            self.backend
+                .api(ApiRequest::ShufflePlay { device_id, play });
+        } else {
+            self.backend.api(ApiRequest::Remote {
+                action: RemoteAction::Play,
+                device_id,
+                play: Some(play),
+                position_ms: 0,
+                percent: 0,
+                flag: false,
+                repeat: String::new(),
+            });
         }
     }
 
@@ -11248,6 +12183,7 @@ impl App {
             Target::Remote(_) if !settle && !self.previews_remote_volume() => {}
             Target::Remote(device_id) => {
                 self.soloist_volume_preview = Some(Instant::now());
+                self.settled_remote_volume = None;
                 self.remote_volume_request += 1;
                 self.pending_remote_volume = Some(PendingRemoteVolume {
                     percent,
@@ -11283,6 +12219,11 @@ impl App {
     }
 
     fn reconcile_remote_volume(&mut self, seq: u64, state: Option<&PlaybackState>) {
+        if self.settled_remote_volume.as_ref().is_some_and(|settled| {
+            settled.contradicted_by(state.and_then(|state| state.device.as_ref()))
+        }) {
+            self.settled_remote_volume = None;
+        }
         let Some(pending) = &mut self.pending_remote_volume else {
             return;
         };
@@ -11312,7 +12253,14 @@ impl App {
             }
             return;
         };
-        if reported == pending.percent || (pending.mismatches > 0 && !held) {
+        if reported.abs_diff(pending.percent) <= 1 {
+            // Confirmed, give or take the device's own rounding.
+            self.settled_remote_volume = Some(SettledRemoteVolume {
+                percent: pending.percent,
+                device_id: pending.device_id.clone(),
+            });
+            self.pending_remote_volume = None;
+        } else if pending.mismatches > 0 && !held {
             self.pending_remote_volume = None;
         } else {
             if pending.mismatches == 0 {
@@ -11325,7 +12273,7 @@ impl App {
 
     fn note_shuffle_pending(&mut self) {
         if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let at = self.queued_end(&queue.queue, &self.manual_queue);
             let context_uris: Vec<String> = queue.queue[at..]
                 .iter()
                 .map(|item| item.uri().to_string())
@@ -11386,6 +12334,10 @@ impl App {
         }
     }
 
+    pub(crate) fn playback_repeat(&self, now: Option<&NowPlaying>) -> RepeatMode {
+        now.map_or_else(|| self.shown_repeat(self.local_repeat()), |now| now.repeat)
+    }
+
     /// Whether `action` is the listener choosing another song: Next, a
     /// Previous that steps back rather than restarting, or starting
     /// something to play. A play-search only counts once its match plays.
@@ -11398,16 +12350,35 @@ impl App {
             | Action::PlayFromRow { .. }
             | Action::ShufflePlay(_) => true,
             Action::PlaySearchMatch { serial, .. } => *serial == self.play_search_serial,
-            Action::Previous => {
-                let position = if self.resume_only() {
-                    self.resume_position_ms
-                } else {
-                    self.now_playing().map_or(0, |now| now.position_ms)
-                };
-                position <= RESTART_BEFORE_PREVIOUS
-            }
+            Action::Previous => self.previous_steps_back(),
             _ => false,
         }
+    }
+
+    /// Whether Previous goes to the song before rather than restarting this
+    /// one, by the three-second rule librespot and Spotify's devices follow.
+    fn previous_steps_back(&self) -> bool {
+        let position = if self.resume_only() {
+            self.resume_position_ms
+        } else {
+            self.now_playing().map_or(0, |now| now.position_ms)
+        };
+        position <= RESTART_BEFORE_PREVIOUS
+    }
+
+    /// The song Previous lands on another device, as Spotify's latest push
+    /// named it for the song shown now. A Previous pressed again before the
+    /// device answers steps back from the song the first one shows. A song
+    /// shown by a Next still on its way has no known song before it.
+    fn remote_song_before(&self) -> Option<String> {
+        let (playing, before) = self.remote_previous.as_ref()?;
+        let shown = self.current_track_uri()?;
+        let at = if shown == *playing {
+            before.len()
+        } else {
+            before.iter().rposition(|uri| *uri == shown)?
+        };
+        at.checked_sub(1).map(|index| before[index].clone())
     }
 
     /// Choosing another song ends Repeat One and keeps repeating the rest,
@@ -11424,10 +12395,19 @@ impl App {
         }
     }
 
+    fn shown_repeat(&self, actual: RepeatMode) -> RepeatMode {
+        self.pending_repeat
+            .as_ref()
+            .filter(|(player, _, at)| at.elapsed() < PLAYBACK_HOLD && *player == self.target())
+            .map_or(actual, |(_, mode, _)| *mode)
+    }
+
     fn set_repeat(&mut self, mode: RepeatMode) {
+        let target = self.target();
+        self.pending_repeat = Some((target.clone(), mode, Instant::now()));
         // Next up leaves Spotify's padding out only with Repeat off.
         self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-        match self.target() {
+        match target {
             Target::Local => {
                 self.local.repeat = mode;
                 self.repeat_wanted = mode;
@@ -11466,6 +12446,13 @@ impl App {
             .is_some_and(|pending| pending.device_id.as_deref() != Some(device_id.as_str()))
         {
             self.pending_remote_volume = None;
+        }
+        if self
+            .settled_remote_volume
+            .as_ref()
+            .is_some_and(|settled| settled.device_id.as_deref() != Some(device_id.as_str()))
+        {
+            self.settled_remote_volume = None;
         }
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
             self.selected_device = None;
@@ -11765,7 +12752,7 @@ impl App {
             write: None,
         });
         if let Loadable::Loaded(queue) = &self.queue {
-            let at = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
+            let at = self.queued_end(&queue.queue, &self.manual_queue);
             if let Loadable::Loaded(queue) = &mut self.queue {
                 queue.queue.insert(at, item);
             }
@@ -11818,8 +12805,11 @@ impl App {
                 .iter()
                 .filter(|other| *other == uri)
                 .count();
+            let queued_len = match &self.queue {
+                Loadable::Loaded(queue) => self.queued_end(&queue.queue, &self.manual_queue),
+                _ => 0,
+            };
             if let Loadable::Loaded(queue) = &mut self.queue {
-                let queued_len = Self::end_of_queued_rows(&queue.queue, &self.manual_queue);
                 if let Some(row) = queue.queue[..queued_len]
                     .iter()
                     .enumerate()
@@ -11862,9 +12852,22 @@ impl App {
 
     /// Index after manual queue rows and before context rows.
     fn end_of_queued_rows(rows: &[PlayableItem], manual: &[String]) -> usize {
+        Self::end_of_queued_rows_of(rows, &[manual])
+    }
+
+    /// Index after the leading rows each list accounts for: a song counts
+    /// as often as the list that holds it most often has it.
+    fn end_of_queued_rows_of(rows: &[PlayableItem], lists: &[&[String]]) -> usize {
         let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for uri in manual {
-            *counts.entry(uri.as_str()).or_insert(0) += 1;
+        for &list in lists {
+            let mut own: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+            for uri in list {
+                *own.entry(uri.as_str()).or_insert(0) += 1;
+            }
+            for (uri, count) in own {
+                let held = counts.entry(uri).or_insert(0);
+                *held = (*held).max(count);
+            }
         }
         let mut at = 0;
         for item in rows {
@@ -11892,7 +12895,7 @@ impl App {
         let Some(current) = &fetched.currently_playing else {
             return;
         };
-        let queued = Self::end_of_queued_rows(&fetched.queue, self.queued_by_hand());
+        let queued = self.queued_end(&fetched.queue, self.queued_by_hand());
         Self::drop_wraparound(&mut fetched.queue, queued, current.uri());
     }
 
@@ -11975,19 +12978,30 @@ impl App {
         if self.pending_queue_adds.is_empty() {
             return;
         }
-        let Loadable::Loaded(queue) = &mut self.queue else {
+        let Loadable::Loaded(queue) = &self.queue else {
             return;
         };
-        let fetched: std::collections::HashSet<String> = queue
-            .queue
-            .iter()
-            .map(|item| item.uri().to_string())
-            .collect();
+        // Only a copy among the queued rows confirms an addition: the
+        // playing context may hold the same song further down.
+        let queued_len = self.queued_end(&queue.queue, &self.manual_queue);
+        let mut listed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for item in &queue.queue[..queued_len] {
+            *listed.entry(item.uri().to_string()).or_insert(0) += 1;
+        }
         // A fetched or currently playing addition is no longer pending.
         let current = self.current_track_uri();
         self.pending_queue_adds.retain(|addition| {
-            !fetched.contains(addition.item.uri())
-                && current.as_deref() != Some(addition.item.uri())
+            let uri = addition.item.uri();
+            if current.as_deref() == Some(uri) {
+                return false;
+            }
+            match listed.get_mut(uri) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    false
+                }
+                _ => true,
+            }
         });
         let missing: Vec<PlayableItem> = self
             .pending_queue_adds
@@ -11995,7 +13009,7 @@ impl App {
             .map(|addition| addition.item.clone())
             .collect();
         let at = match &self.queue {
-            Loadable::Loaded(queue) => Self::end_of_queued_rows(&queue.queue, &self.manual_queue),
+            Loadable::Loaded(queue) => self.queued_end(&queue.queue, &self.manual_queue),
             _ => 0,
         };
         if let Loadable::Loaded(queue) = &mut self.queue {
@@ -12145,6 +13159,8 @@ impl App {
     ) {
         rows.sort_by_key(|row| std::cmp::Reverse(row.position));
         rows.dedup_by_key(|row| row.position);
+        self.membership
+            .remove_rows(&playlist_id, rows.iter().map(|row| row.uri.as_str()));
         self.prepare_playlist_mutation(&playlist_id);
         if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
             for row in &rows {
@@ -12257,6 +13273,8 @@ impl App {
             }
         }
 
+        self.membership
+            .add(&playlist_id, items.iter().map(|item| item.uri()));
         self.prepare_playlist_mutation(&playlist_id);
         let added = items.len().try_into().unwrap_or(u32::MAX);
         let added_by = self.user_id().map(|id| UserRef {
@@ -12571,6 +13589,32 @@ impl App {
         if self.changes_song_by_hand(&action) {
             self.leave_repeat_one();
         }
+        // A control used while a song waits for its radio acts on that
+        // song, so the song goes out first.
+        if matches!(
+            &action,
+            Action::TogglePlay
+                | Action::Next
+                | Action::Previous
+                | Action::Seek(_)
+                | Action::SeekBy(_)
+                | Action::ToggleShuffle
+                | Action::CycleRepeat
+                | Action::SetShuffle(_)
+                | Action::SetRepeat(_)
+                | Action::AddToQueue { .. }
+                | Action::QueueMany { .. }
+                | Action::PlayNext { .. }
+                | Action::MoveInQueue { .. }
+                | Action::InsertInQueue { .. }
+                | Action::RemoveFromQueue { .. }
+                | Action::ClearQueue
+                | Action::Transfer(_)
+                | Action::ActivateReceiver(_)
+                | Action::PlayOnAnotherDevice
+        ) {
+            self.send_song_radio();
+        }
         // Pausing or skipping while a play-search is in flight is a newer
         // choice; seeking and volume leave the search to play its match.
         if matches!(
@@ -12765,12 +13809,26 @@ impl App {
                 // Move the queue head to the playing row immediately. Do not
                 // pop when there is no active playback target.
                 let target = self.target();
+                let skipping = self.queue_skip_in_flight();
                 if !matches!(target, Target::Remote(None)) || self.remote_fresh().is_some() {
                     self.pop_queue_head();
                 }
+                if skipping && let Some(intent) = &self.intent_track {
+                    // One more song for the skip to pass.
+                    self.queue_skip = Some((intent.uri.clone(), Instant::now()));
+                    self.queue_skip_copies = 0;
+                }
                 match target {
                     Target::Local => self.backend.player(PlayerCommand::Next),
-                    Target::Remote(device_id) => self.remote(RemoteAction::Next, device_id),
+                    Target::Remote(device_id) => {
+                        self.remote(RemoteAction::Next, device_id);
+                        if skipping {
+                            // Its new song may be a later copy of one the
+                            // skip passes, and the Web API may answer this
+                            // Next before the skip: it waits for both.
+                            self.queue_skip_unanswered = self.next_answers_due;
+                        }
+                    }
                 }
             }
             // Previous restarts after three seconds and otherwise steps back,
@@ -12785,15 +13843,34 @@ impl App {
             }
             Action::Previous => {
                 self.resume_load = None;
+                let steps_back = self.previous_steps_back();
+                // Read before the expectation below goes: a Next still on
+                // its way shows a song Spotify has not named one before.
+                let position = self.now_playing().map_or(0, |now| now.position_ms);
+                let before = (position <= RESTART_BEFORE_PREVIOUS - REMOTE_PREVIOUS_MARGIN)
+                    .then(|| self.remote_song_before())
+                    .flatten();
                 // Next names its expected destination so the row moves before
-                // the engine does. Previous has no forward queue row to name;
-                // discard that expectation or a quick Next, Previous leaves
-                // the row marker stuck on the skipped-to song.
+                // the engine does. Discard that expectation, or a quick Next,
+                // Previous leaves the row marker stuck on the skipped-to song.
                 self.intent_track = None;
+                self.queue_skip = None;
                 self.queue_start_pending = Some(self.target());
                 match self.target() {
                     Target::Local => self.backend.player(PlayerCommand::Previous),
-                    Target::Remote(device_id) => self.remote(RemoteAction::Previous, device_id),
+                    Target::Remote(device_id) => {
+                        // Another device answers late, so show where it
+                        // goes now: the start, or the song before.
+                        if !steps_back {
+                            self.pending_remote_position = Some((0, Instant::now()));
+                        } else if let Some(uri) = before {
+                            if let Some(context) = self.playing_context_uri() {
+                                self.cache_track_from_context(&context, &uri);
+                            }
+                            self.expect_track(uri, 0);
+                        }
+                        self.remote(RemoteAction::Previous, device_id);
+                    }
                 }
             }
             Action::Seek(position_ms) => self.seek(position_ms),
@@ -12846,7 +13923,7 @@ impl App {
             }
             Action::SetShuffle(shuffle) => self.set_shuffle(shuffle),
             Action::CycleRepeat => {
-                let mode = self.now_playing().map(|now| now.repeat).unwrap_or_default();
+                let mode = self.playback_repeat(self.now_playing().as_ref());
                 self.set_repeat(mode.next());
             }
             Action::SetRepeat(mode) => self.set_repeat(mode),
@@ -12861,6 +13938,7 @@ impl App {
             }
             Action::MoveInQueue { from, to } => {
                 if !self.queue_locally_reorderable() {
+                    self.move_in_remote_queue(from, to);
                     return;
                 }
                 let queued_len = self.queued_rows_len();
@@ -12889,6 +13967,7 @@ impl App {
                 self.resync_local_queue();
             }
             Action::RemoveFromQueue { rows } => self.remove_from_queue(rows),
+            Action::RefuseQueueDrop(refusal) => self.refuse_queue_drop(refusal),
             Action::InsertInQueue { items, position } => {
                 if !self.queue_locally_reorderable() {
                     let songs = items
@@ -13028,6 +14107,8 @@ impl App {
                     .get(&playlist_id)
                     .and_then(|page| page.playlist.get())
                     .and_then(|playlist| playlist.snapshot_id.clone());
+                self.membership
+                    .remove_all(&playlist_id, uris.iter().map(String::as_str));
                 self.prepare_playlist_mutation(&playlist_id);
                 if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
                     page.local_additions
@@ -13067,6 +14148,7 @@ impl App {
                     .get(&playlist_id)
                     .and_then(|page| page.playlist.get())
                     .and_then(|playlist| playlist.snapshot_id.clone());
+                self.membership.edit_started(&playlist_id);
                 self.prepare_playlist_mutation(&playlist_id);
                 if let Some(page) = self.playlist_pages.get_mut(&playlist_id) {
                     let base = page.items.base_offset;
@@ -13087,10 +14169,10 @@ impl App {
                 if self.cover_uploads.contains_key(&id) {
                     return;
                 }
-                if let Some(Dialog::EditPlaylist {
-                    id: current, cover, ..
-                }) = &mut self.dialog
-                    && *current == id
+                if let Some(cover) = self
+                    .dialog
+                    .as_mut()
+                    .and_then(|dialog| dialog.cover_draft(&id))
                     && cover.request.is_none()
                     && cover.uploading.is_none()
                 {
@@ -13180,16 +14262,26 @@ impl App {
                 public,
                 add_uris,
             } => {
+                if self.creating_playlist.is_some() {
+                    return;
+                }
+                let (description, cover) = match self.dialog.as_ref() {
+                    Some(Dialog::CreatePlaylist {
+                        description, cover, ..
+                    }) => {
+                        if cover.request.is_some() {
+                            return;
+                        }
+                        (description.clone(), cover.selection.clone())
+                    }
+                    _ => (String::new(), None),
+                };
+                self.creating_playlist = Some((add_uris, cover));
                 self.playlist_busy = true;
-                self.dialog = Some(Dialog::CreatePlaylist {
-                    name: name.clone(),
-                    public,
-                    add_uris,
-                });
                 self.backend.api(ApiRequest::CreatePlaylist {
                     name,
                     public,
-                    description: String::new(),
+                    description,
                 });
             }
             Action::UpdatePlaylist {
@@ -13413,6 +14505,7 @@ impl App {
                 });
             }
             Action::SignOut => {
+                self.song_radio = None;
                 self.backend.send(Command::SignOut);
                 self.show_friends_panel = false;
                 self.history = vec![Page::Home];
@@ -13427,12 +14520,16 @@ impl App {
                 if self.show_queue_panel {
                     self.show_lyrics_panel = false;
                     self.show_friends_panel = false;
-                    self.refresh_queue(true);
+                    self.open_queue_panel();
                 }
             }
             Action::ToggleLyricsPanel => {
+                // Full screen lyrics are lit as lyrics, also while the queue
+                // column holds the side panel, so the button closes them and
+                // leaves that queue where it was.
+                let leaving = self.lyrics_fullscreen.is_some();
                 self.leave_lyrics_fullscreen(ctx);
-                self.show_lyrics_panel = !self.show_lyrics_panel;
+                self.show_lyrics_panel = !leaving && !self.show_lyrics_panel;
                 if self.show_lyrics_panel {
                     self.show_queue_panel = false;
                     self.show_friends_panel = false;
@@ -13562,6 +14659,10 @@ impl App {
             }
             Action::SetLibraryGrid(grid) => {
                 self.settings.sidebar_grid = grid;
+                self.mark_settings_dirty();
+            }
+            Action::SetTrackColumns(columns) => {
+                self.settings.track_columns = columns;
                 self.mark_settings_dirty();
             }
             Action::ToggleLibraryFolder(id) => {
@@ -14477,6 +15578,44 @@ impl App {
         })
     }
 
+    /// Reads the account's own playlists the hearts' index lacks or holds
+    /// at an older snapshot, a few at a time, while the session is up.
+    fn sync_playlist_membership(&mut self) {
+        if !self.local_ready || !self.network_reachable || self.user_id().is_none() {
+            return;
+        }
+        if self
+            .membership_checked_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(500))
+        {
+            return;
+        }
+        self.membership_checked_at = Some(Instant::now());
+        let Some(playlists) = self.library.playlists.get() else {
+            return;
+        };
+        let editable: Vec<(String, Option<String>)> = playlists
+            .iter()
+            .filter(|playlist| self.can_edit_playlist(playlist))
+            .map(|playlist| (playlist.id.clone(), playlist.snapshot_id.clone()))
+            .collect();
+        for id in self.membership.start_reads(&editable) {
+            self.backend.api(ApiRequest::PlaylistUris { id });
+        }
+    }
+
+    /// Whether `uri` is in Liked Songs or any of the account's own
+    /// playlists, which turns its heart green.
+    pub fn saved_anywhere(&self, uri: &str) -> bool {
+        self.is_saved(uri) == Some(true) || self.membership.holds_anywhere(uri)
+    }
+
+    /// Whether the account's playlist `id` holds `uri`; `None` while the
+    /// index has not read it.
+    pub fn playlist_holds(&self, id: &str, uri: &str) -> Option<bool> {
+        self.membership.holds(id, uri)
+    }
+
     /// The library's playlists that take songs, as id and name pairs.
     pub fn editable_playlists(&self) -> Vec<(String, String)> {
         if self.user_id().is_none() {
@@ -14523,6 +15662,8 @@ impl App {
             self.sync_milkdrop_pane();
         }
         self.apply_actions(ctx);
+        self.show_playing_in_recents();
+        self.sync_playlist_membership();
         self.sync_media_controls(ctx);
         self.sync_window_title(ctx);
         self.remember_geometry(ctx);
@@ -14846,6 +15987,7 @@ impl App {
         let ctx = &ctx;
         self.pixels_per_point = ctx.pixels_per_point();
         self.refresh_frame_now();
+        self.prepare_next_song(ui);
         self.apply_theme(ctx);
         let autoscroll_on = crate::autoscroll::enabled(self.settings.middle_click_autoscroll);
         self.autoscroll.begin(ctx, autoscroll_on);
@@ -14855,6 +15997,7 @@ impl App {
         } else {
             self.scrolling.apply(ctx);
         }
+        crate::ui::widgets::hold_wheel_for_heart_menu(ctx);
         if self.lyrics_fullscreen_restoring.is_some()
             && self.lyrics_fullscreen_restoring == ctx.input(|input| input.viewport().fullscreen)
             && (!self.lyrics_restore_maximized
@@ -14870,6 +16013,7 @@ impl App {
                 self.leave_lyrics_fullscreen(ctx);
             }
         }
+        crate::window::keep_shadow_out_of_fullscreen(ctx, fastframe_titlebar::enabled());
         // Switch to the main window when sign-in is required.
         let needs_sign_in = !(self.is_connected() && self.user.is_some())
             && !matches!(self.auth, AuthStatus::Connecting | AuthStatus::Starting)
@@ -16106,7 +17250,7 @@ mod tests {
         }
         for (role, label) in [
             (Role::Link, None),
-            (Role::Button, Some("Save to Liked Songs")),
+            (Role::Button, Some("Add to playlist")),
             (Role::Button, Some("More")),
         ] {
             let ctx = egui::Context::default();
@@ -18026,6 +19170,67 @@ mod tests {
             app.library.playlists_generation, reread,
             "a whole list is not read again"
         );
+    }
+
+    /// A playlist taken out of the library keeps its page open, since it
+    /// still plays and can be added back there. Deleting one's own leaves
+    /// it, with nothing left to show.
+    #[test]
+    fn a_playlist_taken_out_of_the_library_stays_open() {
+        for (owner, stays) in [("bob", true), ("alice", false)] {
+            let mut app = listener_app();
+            app.open(Page::Playlist("pl".into()));
+            app.playlist_pages.insert(
+                "pl".into(),
+                PlaylistPage {
+                    playlist: Loadable::Loaded(Playlist {
+                        id: "pl".into(),
+                        owner: crate::api::models::Owner {
+                            id: Some(owner.into()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            );
+            app.handle_api(ApiResponse::PlaylistFollowChanged {
+                id: "pl".into(),
+                followed: false,
+                result: Ok(()),
+            });
+            let expected = if stays {
+                Page::Playlist("pl".into())
+            } else {
+                Page::Home
+            };
+            assert_eq!(app.page(), &expected, "a playlist {owner} owns");
+        }
+    }
+
+    /// Deleting one's own playlist leaves its page even while the page is
+    /// still loading or failed to load, with no header to name the owner.
+    #[test]
+    fn a_deleted_playlist_leaves_a_page_that_has_not_loaded() {
+        for playlist in [Loadable::Loading, Loadable::Failed("offline".into())] {
+            let mut app = listener_app();
+            let ctx = egui::Context::default();
+            app.open(Page::Playlist("pl".into()));
+            app.playlist_pages.insert(
+                "pl".into(),
+                PlaylistPage {
+                    playlist,
+                    ..Default::default()
+                },
+            );
+            app.apply(Action::DeletePlaylist("pl".into()), &ctx);
+            app.handle_api(ApiResponse::PlaylistFollowChanged {
+                id: "pl".into(),
+                followed: false,
+                result: Ok(()),
+            });
+            assert_eq!(app.page(), &Page::Home);
+        }
     }
 
     /// A deletion Spotify refused is forgotten: the next list shows the
@@ -20187,6 +21392,29 @@ mod tests {
         )
     }
 
+    /// What Spotify reports while a Sonos plays `uri`. The Web API names a
+    /// Sonos without a device id.
+    fn sonos_playing(uri: &str) -> PlaybackState {
+        PlaybackState {
+            device: Some(crate::api::models::Device {
+                is_restricted: true,
+                ..Default::default()
+            }),
+            item: Some(queued_song(uri)),
+            is_playing: true,
+            ..Default::default()
+        }
+    }
+
+    /// The answer to a poll sent after everything asked so far.
+    fn report_sonos_playing(app: &mut App, uri: &str) {
+        app.remote_poll_seq += 1;
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(sonos_playing(uri))),
+        });
+    }
+
     /// Next moves the queue head to the playing row immediately.
     #[test]
     fn next_pops_the_queue_head_into_now_playing() {
@@ -20379,6 +21607,83 @@ mod tests {
             app.current_track_uri().as_deref(),
             Some("spotify:track:a"),
             "Previous restores the engine's current row instead of holding Next's marker"
+        );
+    }
+
+    /// Previous on another device shows the song it goes back to at once,
+    /// the one Spotify's push names before the playing song, and after
+    /// three seconds the start of this one. Once a Next on its way shows a
+    /// song that push said nothing of, Previous guesses no song.
+    #[test]
+    fn previous_on_another_device_shows_where_it_goes_at_once() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.selected_device = Some("sonos".into());
+        let song = |uri: &str| Track {
+            uri: uri.into(),
+            id: util::uri_id(uri).map(str::to_owned),
+            name: uri.into(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        app.track_cache.insert("a".into(), song("spotify:track:a"));
+        app.track_cache.insert("b".into(), song("spotify:track:b"));
+        let playing = |progress_ms| RemoteSnapshot {
+            state: PlaybackState {
+                item: Some(PlayableItem::Track(song("spotify:track:c"))),
+                progress_ms: Some(progress_ms),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        };
+        app.remote_previous = Some((
+            "spotify:track:c".into(),
+            vec!["spotify:track:a".into(), "spotify:track:b".into()],
+        ));
+
+        app.remote = Some(playing(1_000));
+        app.apply(Action::Previous, &ctx);
+        let shown = app.now_playing().expect("a song shown");
+        assert_eq!(
+            shown.uri, "spotify:track:b",
+            "the song before shows at once"
+        );
+        assert_eq!(shown.position_ms, 0);
+        // Pressed again before the device answers, Previous steps back from
+        // the song it shows; b never gives way to c in between.
+        app.apply(Action::Previous, &ctx);
+        let shown = app.now_playing().expect("a song shown");
+        assert_eq!(shown.uri, "spotify:track:a", "a second quick Previous");
+        assert_eq!(shown.position_ms, 0);
+
+        // Just under three seconds the device may get the command past the
+        // mark and restart the song, so no song before is guessed.
+        app.intent_track = None;
+        app.remote = Some(playing(2_500));
+        app.apply(Action::Previous, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:c"));
+
+        app.intent_track = None;
+        app.remote = Some(playing(60_000));
+        app.apply(Action::Previous, &ctx);
+        let shown = app.now_playing().expect("a song shown");
+        assert_eq!(
+            shown.uri, "spotify:track:c",
+            "late in a song, Previous restarts it"
+        );
+        assert_eq!(shown.position_ms, 0, "from its start at once");
+
+        app.pending_remote_position = None;
+        app.remote = Some(playing(1_000));
+        app.queue = loaded_queue("spotify:track:c", &["spotify:track:d"]);
+        app.apply(Action::Next, &ctx);
+        app.apply(Action::Previous, &ctx);
+        assert_ne!(
+            app.current_track_uri().as_deref(),
+            Some("spotify:track:b"),
+            "Next, Previous lands back on c, not on the song before it"
         );
     }
 
@@ -20610,6 +21915,816 @@ mod tests {
             "hand-queued songs consumed by the jump are let go"
         );
         assert!(app.play_pending("spotify:track:c"));
+    }
+
+    /// A Next up click on this computer is one skip naming the song, which
+    /// the engine counts in its own list: these rows are Spotify's copy of
+    /// it, which lags behind and lists songs its Next passes over.
+    #[test]
+    fn a_chosen_queue_row_skips_the_engine_to_its_song() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:a".into(),
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.backend.take_player_commands();
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        assert_eq!(
+            app.backend.take_player_commands(),
+            vec![PlayerCommand::SkipTo {
+                uri: "spotify:track:b".into(),
+                occurrence: 1,
+                skips: 3,
+            }],
+            "the second copy of b, three rows down"
+        );
+    }
+
+    /// The songs a skip passes on its way to the chosen one play for a
+    /// moment at most. They take over neither the screen nor the queue, and
+    /// Spotify's copy from halfway, which lists the chosen song again under
+    /// the one before it, is not shown however long the skip takes.
+    #[test]
+    fn songs_a_queue_skip_passes_on_its_way_do_not_show() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        let track = |uri: &str| {
+            Some(crate::player::LocalTrack {
+                uri: uri.into(),
+                ..Default::default()
+            })
+        };
+        app.local.track = track("spotify:track:a");
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &["spotify:track:b", "spotify:track:c", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:c".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let chosen = (
+            Some("spotify:track:c".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+
+        let mut passing = app.local.clone();
+        passing.track = track("spotify:track:b");
+        passing.track_sequence += 1;
+        app.handle_local(passing.clone());
+        assert_eq!(
+            app.current_track_uri().as_deref(),
+            Some("spotify:track:c"),
+            "the song passed on the way does not show as playing"
+        );
+        assert!(
+            app.play_pending("spotify:track:c"),
+            "the chosen song still loads"
+        );
+        assert_eq!(queue_uris(&app), chosen);
+
+        let halfway = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        for _ in 0..=QUEUE_STALE_RETRIES {
+            app.handle_api(ApiResponse::Queue {
+                seq: app.queue_seq,
+                result: Ok(halfway.clone()),
+            });
+        }
+        assert_eq!(
+            queue_uris(&app),
+            chosen,
+            "no second copy of the chosen song under the one passed"
+        );
+
+        let mut landed = passing;
+        landed.track = track("spotify:track:c");
+        landed.track_sequence += 1;
+        app.handle_local(landed);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:c"));
+        assert!(!app.play_pending("spotify:track:c"), "it plays");
+        assert!(app.queue_skip.is_none());
+        assert_eq!(app.queue_stale_retries, 0, "Spotify's copy may catch up");
+    }
+
+    /// A skip on this computer to a later copy of a song passes the earlier
+    /// copy, and the engine reports it. It is one of the songs on the way:
+    /// neither it nor the song after it shows as playing, and Spotify's
+    /// copy of the queue from there is not shown.
+    #[test]
+    fn a_local_skip_to_a_later_copy_passes_the_earlier_one() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        let track = |uri: &str| {
+            Some(crate::player::LocalTrack {
+                uri: uri.into(),
+                ..Default::default()
+            })
+        };
+        app.local.track = track("spotify:track:a");
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        let chosen = (
+            Some("spotify:track:b".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+
+        let mut state = app.local.clone();
+        for passed in ["spotify:track:b", "spotify:track:c"] {
+            state.track = track(passed);
+            state.track_sequence += 1;
+            app.handle_local(state.clone());
+            // A report of its progress alone settles nothing either.
+            state.position_ms += 1_000;
+            app.handle_local(state.clone());
+            assert!(app.queue_skip.is_some(), "{passed} is on the way");
+            assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+            assert!(app.play_pending("spotify:track:b"));
+        }
+        let halfway = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:b"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(halfway),
+        });
+        assert_eq!(queue_uris(&app), chosen, "the rows passed stay gone");
+
+        state.track = track("spotify:track:b");
+        state.track_sequence += 1;
+        app.handle_local(state);
+        assert!(app.queue_skip.is_none(), "it plays");
+        assert!(!app.play_pending("spotify:track:b"));
+    }
+
+    /// Songs queued on another device, from any app, stay under Next in
+    /// queue right after Next, before the device says the first of them
+    /// plays. They dropped under Next from until its push came.
+    #[test]
+    fn songs_queued_on_another_device_stay_queued_after_next() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:x",
+                "spotify:track:y",
+                "spotify:track:z",
+                "spotify:track:c",
+            ],
+        );
+        app.remote_queue = Some(crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: "spotify:track:a".into(),
+            queued: vec![
+                "spotify:track:x".into(),
+                "spotify:track:y".into(),
+                "spotify:track:z".into(),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(app.queued_rows_len(), 3);
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:x"));
+        assert_eq!(app.queued_rows_len(), 2, "y and z are still queued");
+    }
+
+    /// On another device a Next up click is one request naming the song. A
+    /// Next per row raced each other there, and what Spotify reported
+    /// between them showed a song on the way as the one playing, with the
+    /// chosen song back in Next up.
+    #[test]
+    fn a_chosen_queue_row_on_another_device_is_one_skip_naming_its_song() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.backend.take_queue_skip_requests();
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        let sent = app.backend.take_queue_skip_requests();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ApiRequest::SkipTo {
+                    device_id: None,
+                    uri,
+                    occurrence: 1,
+                    skips: 3,
+                }] if uri == "spotify:track:b"
+            ),
+            "one skip to the second copy of b, three rows down: {sent:?}"
+        );
+    }
+
+    /// The other device passes the songs above the chosen one, and Spotify
+    /// reports them for as long as that takes. None of it shows: no song on
+    /// the way as the one playing, no second copy of the chosen song in
+    /// Next up with a spinner of its own. A second click meanwhile counts
+    /// its rows on the list as shown, and is the song that plays.
+    #[test]
+    fn a_queue_skip_on_another_device_holds_what_was_chosen() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:d",
+                "spotify:track:e",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:c".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let chosen = (
+            Some("spotify:track:c".to_string()),
+            vec!["spotify:track:d".to_string(), "spotify:track:e".to_string()],
+        );
+
+        for passed in ["spotify:track:a", "spotify:track:b", "spotify:track:b"] {
+            report_sonos_playing(&mut app, passed);
+            assert_eq!(
+                app.current_track_uri().as_deref(),
+                Some("spotify:track:c"),
+                "a song on the way does not show as playing"
+            );
+            assert_eq!(
+                app.now_playing().map(|now| now.uri).as_deref(),
+                Some("spotify:track:c"),
+                "nor in the player bar"
+            );
+            assert!(
+                app.play_pending("spotify:track:c"),
+                "the chosen song still loads"
+            );
+        }
+        let halfway = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:d"),
+                queued_song("spotify:track:e"),
+            ],
+        };
+        for _ in 0..=QUEUE_STALE_RETRIES {
+            app.handle_api(ApiResponse::Queue {
+                seq: app.queue_seq,
+                result: Ok(halfway.clone()),
+            });
+        }
+        assert_eq!(
+            queue_uris(&app),
+            chosen,
+            "no second copy of the chosen song under the one passed"
+        );
+
+        app.backend.take_queue_skip_requests();
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:e".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let sent = app.backend.take_queue_skip_requests();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ApiRequest::SkipTo {
+                    uri,
+                    occurrence: 0,
+                    skips: 2,
+                    ..
+                }] if uri == "spotify:track:e"
+            ),
+            "counted on the rows as shown, not on Spotify's halfway copy: {sent:?}"
+        );
+
+        // The first click's song is one more on the way to the second's.
+        report_sonos_playing(&mut app, "spotify:track:c");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:e"));
+        assert!(app.play_pending("spotify:track:e"));
+
+        report_sonos_playing(&mut app, "spotify:track:e");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:e"));
+        assert!(!app.play_pending("spotify:track:e"), "it plays");
+        assert!(app.queue_skip.is_none());
+        assert_eq!(app.queue_stale_retries, 0, "Spotify's copy may catch up");
+        assert_eq!(
+            queue_uris(&app),
+            (Some("spotify:track:e".to_string()), Vec::new())
+        );
+    }
+
+    /// A skip to a later copy of a song, on a device whose rows have no
+    /// uid, goes a Next per row and passes the earlier copy. An answer
+    /// naming the song before the skip is answered may be that copy, so it
+    /// neither ends the skip nor brings back the rows passed.
+    #[test]
+    fn a_skip_to_a_later_copy_waits_for_its_answer() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        let sent = app.backend.take_queue_skip_requests();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [ApiRequest::SkipTo {
+                    occurrence: 1,
+                    skips: 3,
+                    ..
+                }]
+            ),
+            "{sent:?}"
+        );
+        let chosen = (
+            Some("spotify:track:b".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+
+        // The first copy, passed on the way.
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_some(), "its Nexts are still going");
+        let passed = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:b"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(passed),
+        });
+        assert_eq!(queue_uris(&app), chosen, "the rows passed stay gone");
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+        assert_eq!(queue_uris(&app), chosen);
+    }
+
+    /// A second click to a later copy, while the first click's skip is
+    /// still on its way, waits for its own answer, not the first one's.
+    #[test]
+    fn a_second_skip_to_a_later_copy_waits_for_its_own_answer() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:x",
+                "spotify:track:b",
+            ],
+        );
+        for (uri, index) in [("spotify:track:c", 0), ("spotify:track:b", 2)] {
+            app.apply(
+                Action::PlayFromRow {
+                    context: RowContext::Queue,
+                    uri: uri.into(),
+                    index,
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(app.backend.take_queue_skip_requests().len(), 2);
+
+        // The first click's answer.
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_some(), "an earlier copy");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// Next pressed while a skip is on its way moves the skip one song on,
+    /// to a later copy of the song it passes first. Until both are answered,
+    /// that copy playing is the skip on its way.
+    #[test]
+    fn a_next_after_a_skip_to_a_first_copy_waits_for_both_answers() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &["spotify:track:d", "spotify:track:b", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:d"));
+
+        report_sonos_playing(&mut app, "spotify:track:d");
+        assert!(app.queue_skip.is_some(), "the first d, passed on the way");
+
+        for _ in 0..2 {
+            app.handle_api(ApiResponse::Remote {
+                action: RemoteAction::Next,
+                result: Ok(()),
+            });
+        }
+        report_sonos_playing(&mut app, "spotify:track:d");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// Next pressed while a skip to a later copy is on its way moves the
+    /// skip one song on. The Web API may answer that Next first, and the
+    /// skip still waits for its own answer.
+    #[test]
+    fn a_next_answered_before_the_skip_it_follows_does_not_end_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:d",
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 3,
+            },
+            &ctx,
+        );
+        app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:d"));
+
+        // The Next's answer, then the first d, passed on the way.
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:d");
+        assert!(app.queue_skip.is_some(), "its Nexts are still going");
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:d");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// A poll sent before a skip to a later copy is answered may have
+    /// caught the earlier copy on the way, even when it comes back after
+    /// the answer. Only a poll sent after the answer confirms the skip.
+    #[test]
+    fn a_poll_sent_before_a_skip_is_answered_does_not_confirm_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &[
+                "spotify:track:b",
+                "spotify:track:c",
+                "spotify:track:b",
+                "spotify:track:d",
+            ],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 2,
+            },
+            &ctx,
+        );
+        app.remote_poll_seq += 1;
+        let early = app.remote_poll_seq;
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: early,
+            result: Ok(Some(sonos_playing("spotify:track:b"))),
+        });
+        assert!(app.queue_skip.is_some(), "it may be the earlier copy");
+
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// A click on a later copy of the song playing waits for its answer:
+    /// until then a report of the song may be the copy from before.
+    #[test]
+    fn a_skip_to_the_song_playing_again_waits_for_its_answer() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:b"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:b",
+            &["spotify:track:c", "spotify:track:b", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_some(), "it may be the song from before");
+        report_sonos_playing(&mut app, "spotify:track:c");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Next,
+            result: Ok(()),
+        });
+        report_sonos_playing(&mut app, "spotify:track:b");
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// On this computer too, a click on a later copy of the song playing
+    /// waits for the engine to report that copy, and Spotify's copy of the
+    /// queue from before it is not shown.
+    #[test]
+    fn a_local_skip_to_the_song_playing_again_waits_for_it() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        let track = |uri: &str| {
+            Some(crate::player::LocalTrack {
+                uri: uri.into(),
+                ..Default::default()
+            })
+        };
+        app.local.track = track("spotify:track:b");
+        app.local.playback = Playback::Playing;
+        app.queue = loaded_queue(
+            "spotify:track:b",
+            &["spotify:track:c", "spotify:track:b", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:b".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let chosen = (
+            Some("spotify:track:b".to_string()),
+            vec!["spotify:track:d".to_string()],
+        );
+        let before = Queue {
+            currently_playing: Some(queued_song("spotify:track:b")),
+            queue: vec![
+                queued_song("spotify:track:c"),
+                queued_song("spotify:track:b"),
+                queued_song("spotify:track:d"),
+            ],
+        };
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(before),
+        });
+        assert_eq!(queue_uris(&app), chosen, "the song from before");
+
+        let mut state = app.local.clone();
+        state.track = track("spotify:track:c");
+        state.track_sequence += 1;
+        app.handle_local(state.clone());
+        assert!(app.queue_skip.is_some(), "c is on the way");
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
+
+        state.track = track("spotify:track:b");
+        state.track_sequence += 1;
+        app.handle_local(state);
+        assert!(app.queue_skip.is_none(), "it plays");
+    }
+
+    /// A skip that never lands does not hold the screen for good: once its
+    /// time is up, Spotify's answers count again.
+    #[test]
+    fn a_queue_skip_that_never_lands_gives_way_to_what_plays() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue("spotify:track:a", &["spotify:track:b", "spotify:track:c"]);
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:c".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+        let (_, asked_at) = app.queue_skip.as_mut().expect("a skip on its way");
+        *asked_at = Instant::now() - QUEUE_SKIP_HOLD;
+
+        report_sonos_playing(&mut app, "spotify:track:a");
+        assert!(app.intent_track.is_some(), "one lagging answer is retried");
+        report_sonos_playing(&mut app, "spotify:track:a");
+        assert!(app.intent_track.is_none(), "the second one is believed");
+    }
+
+    /// An answer to a poll sent before the click may already name the
+    /// chosen song without confirming it. The answer that does confirm it
+    /// names the same song again, and the arrival is still taken in: the
+    /// queue row it consumed is not consumed a second time later.
+    #[test]
+    fn a_queue_skip_confirmed_by_a_repeated_answer_still_arrives() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:a"),
+            received_at: Instant::now(),
+        });
+        app.queue = loaded_queue(
+            "spotify:track:a",
+            &["spotify:track:b", "spotify:track:c", "spotify:track:d"],
+        );
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:c".into(),
+                index: 1,
+            },
+            &ctx,
+        );
+
+        app.handle_api(ApiResponse::PlaybackState {
+            seq: app.remote_poll_seq,
+            result: Ok(Some(sonos_playing("spotify:track:c"))),
+        });
+        assert!(app.queue_skip.is_some(), "a poll from before the click");
+        assert!(app.queue_start_pending.is_some());
+
+        report_sonos_playing(&mut app, "spotify:track:c");
+        assert!(app.queue_skip.is_none(), "it plays");
+        assert_eq!(
+            app.last_now_playing_uri.as_deref(),
+            Some("spotify:track:c"),
+            "lyrics and tint follow the song"
+        );
+        assert!(
+            app.queue_start_pending.is_none(),
+            "the arrival took in the row the click consumed"
+        );
     }
 
     /// The click names a song: when the rows have shifted under the
@@ -24057,8 +26172,9 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// The Listening activity button sits in the player bar beside Lyrics,
-    /// and gives way in a narrow window before it crowds Repeat.
+    /// The Listening activity button sits in the top bar beside Settings,
+    /// out of the player bar, and the full screen button keeps clear of
+    /// Repeat as the window narrows.
     #[cfg(feature = "demo")]
     #[test]
     fn the_listening_activity_button_never_crowds_the_transport() {
@@ -24096,8 +26212,8 @@ mod tests {
             };
             let repeat = button("Repeat").expect("Repeat");
             let lyrics = button("Lyrics").expect("Lyrics");
-            // The full screen button is the last on the right, keeps clear
-            // of Repeat, and outlasts Listening activity as it narrows.
+            // The full screen button is the last on the right and keeps
+            // clear of Repeat.
             if let Some(full) = button("Full screen lyrics") {
                 button_at.get_or_insert(width);
                 assert!(full.x1 <= f64::from(width), "inside the bar at {width}");
@@ -24108,15 +26224,80 @@ mod tests {
             }
             if let Some(friends) = button("Listening activity") {
                 shown_at.get_or_insert(width);
-                assert!(friends.y0 > 700.0, "in the player bar at {width}");
-                assert!(friends.x1 <= lyrics.x0, "before Lyrics at {width}");
-                assert!(friends.x0 - repeat.x1 >= 10.0, "clear of Repeat at {width}");
+                let settings = button("Settings").expect("Settings");
+                assert!(friends.y1 < 100.0, "in the top bar at {width}");
+                assert!(friends.x1 <= settings.x0, "left of Settings at {width}");
+                if let Some(milkdrop) = button("MilkDrop") {
+                    assert!(milkdrop.x1 <= friends.x0, "right of MilkDrop at {width}");
+                }
             } else {
                 assert!(shown_at.is_none(), "it stays once shown, gone at {width}");
             }
         }
         assert!(button_at.is_some_and(|width| width > 760.0 && width <= 840.0));
-        assert!(shown_at.is_some_and(|width| Some(width) > button_at && width <= 920.0));
+        assert!(shown_at.is_some());
+        app.backend.shutdown();
+    }
+
+    /// A second click on the top bar's Settings closes them, back to the
+    /// page the first click came from.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn a_second_click_on_settings_closes_them() {
+        use egui::accesskit::{Action as AccessibleAction, ActionRequest, Role, TreeId};
+        fn draw(
+            ctx: &egui::Context,
+            app: &mut App,
+            events: Vec<egui::Event>,
+        ) -> egui::accesskit::TreeUpdate {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.frame_ui(ui),
+            );
+            output.textures_delta.clear();
+            output.platform_output.accesskit_update.unwrap()
+        }
+        fn click_settings(ctx: &egui::Context, app: &mut App) {
+            let tree = draw(ctx, app, Vec::new());
+            let id = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == Role::Button
+                        && node
+                            .label()
+                            .is_some_and(|text| text.starts_with("Settings"))
+                })
+                .expect("the Settings button")
+                .0;
+            draw(
+                ctx,
+                app,
+                vec![egui::Event::AccessKitActionRequest(ActionRequest {
+                    target_tree: TreeId::ROOT,
+                    target_node: id,
+                    action: AccessibleAction::Click,
+                    data: None,
+                })],
+            );
+        }
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let mut app = test_app("settings-second-click");
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        app.apply(Action::Open(Page::Playlist("pl0".into())), &ctx);
+        click_settings(&ctx, &mut app);
+        assert_eq!(app.page(), &Page::Settings);
+        click_settings(&ctx, &mut app);
+        assert_eq!(app.page(), &Page::Playlist("pl0".into()));
         app.backend.shutdown();
     }
 
@@ -26515,6 +28696,7 @@ mod tests {
                 name,
                 public: false,
                 add_uris,
+                ..
             }) => {
                 assert_eq!(name, "Song 3JA9Jsuxr4xgHXEawAdCp4 Radio");
                 assert_eq!(add_uris, &expected);
@@ -26789,7 +28971,7 @@ mod tests {
         assert!(
             app.actions.iter().any(|action| matches!(
                 action,
-                Action::CreatePlaylist { name, public: false, add_uris }
+                Action::ShowDialog(Dialog::CreatePlaylist { name, public: false, add_uris, .. })
                     if name == "Wish You Were Here Radio"
                         && add_uris == &["spotify:track:b".to_string(), "spotify:track:a".into()]
             )),
@@ -27664,6 +29846,29 @@ mod tests {
             app.lyrics_line_shown, None,
             "the fullscreen line cannot stop the returning panel from positioning itself"
         );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn the_lyrics_button_closes_fullscreen_beside_the_queue() {
+        let mut app = headless_app();
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            app.apply(Action::ToggleQueuePanel, ui.ctx());
+            app.apply(Action::SetLyricsFullscreen(true), ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert!(app.show_queue_panel);
+        assert!(!app.show_lyrics_panel, "the queue keeps the side panel");
+        assert!(crate::ui::player_bar::lyrics_lit(&app));
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            app.apply(Action::ToggleLyricsPanel, ui.ctx());
+        });
+        output.textures_delta.clear();
+        assert_eq!(app.lyrics_fullscreen, None);
+        assert!(!app.show_lyrics_panel, "closing lyrics does not open them");
+        assert!(app.show_queue_panel, "the queue stays where it was");
+        assert!(!crate::ui::player_bar::lyrics_lit(&app));
         app.backend.shutdown();
     }
 
@@ -30520,6 +32725,32 @@ mod tests {
     }
 
     #[test]
+    fn unliking_in_a_hearts_checklist_takes_out_every_saved_copy() {
+        let mut app = headless_app();
+        let recording = |uri: &str| Track {
+            uri: uri.into(),
+            external_ids: crate::api::models::ExternalIds {
+                isrc: Some("GBUM71029604".into()),
+            },
+            ..Default::default()
+        };
+        let saved_uri = "spotify:track:original";
+        let playing = recording("spotify:track:playable");
+        app.remember_track_recording(&recording(saved_uri));
+        app.set_saved_state(saved_uri.into(), true);
+        app.remember_track_recording(&playing);
+        let item = PlayableItem::Track(playing);
+
+        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
+        assert!(checks.liked, "liked through the other copy");
+        checks.liked = false;
+        assert!(matches!(
+            checks.done(&app, &item).as_slice(),
+            [Action::SetSavedMany { uris, saved: false }] if *uris == [saved_uri]
+        ));
+    }
+
+    #[test]
     fn a_recording_follows_its_uris_when_they_move_or_change() {
         let mut app = headless_app();
         let recording = |uri: &str, isrc: &str| Track {
@@ -30738,11 +32969,10 @@ mod tests {
             .playable()
             .unwrap()
             .clone();
-        app.dialog = Some(Dialog::CreatePlaylist {
-            name: "Road trip".into(),
-            public: false,
-            add_uris: vec!["spotify:track:new".into()],
-        });
+        app.dialog = Some(Dialog::new_playlist(
+            "Road trip".into(),
+            vec!["spotify:track:new".into()],
+        ));
 
         app.handle_api(ApiResponse::PlaylistDuplicatesChecked {
             position: None,
@@ -32204,6 +34434,53 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// The queue beside full screen lyrics lays no shade along the edges of
+    /// its list, which would show as a square band on the glass: its rows
+    /// fade out there on their own.
+    #[test]
+    fn the_queue_beside_full_screen_lyrics_shades_no_edge() {
+        use egui::{Rect, pos2, vec2};
+
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        app.attach(&ctx);
+        crate::demo::populate(&mut app);
+        app.show_queue_panel = true;
+        // egui's shade is a rectangle of four untextured corners, two of
+        // them see-through.
+        let is_shade = |shape: &egui::Shape| {
+            let egui::Shape::Mesh(mesh) = shape else {
+                return false;
+            };
+            mesh.texture_id == egui::TextureId::default()
+                && mesh.vertices.len() == 4
+                && mesh.vertices.iter().any(|vertex| vertex.color.a() == 0)
+        };
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(1280.0, 800.0));
+        // Short enough that the demo queue runs on past its bottom.
+        let column = Rect::from_min_size(pos2(900.0, 40.0), vec2(340.0, 260.0));
+        let mut shades = usize::MAX;
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(column));
+                crate::ui::queue::fullscreen_column(&mut app, &mut pane, 1.0);
+            });
+            output.textures_delta.clear();
+            app.apply_actions(&ctx);
+            shades = output
+                .shapes
+                .iter()
+                .filter(|shape| is_shade(&shape.shape))
+                .count();
+        }
+        assert_eq!(shades, 0, "a shade along the list's edge");
+        app.backend.shutdown();
+    }
+
     /// A row in the Recent tab plays its own song. Each row plays a list
     /// holding only that song, but it hands over its place in the whole
     /// tab, which is past the end of that list for every row but the top.
@@ -32321,19 +34598,37 @@ mod tests {
             Some(2),
             "the second copy of a repeated song plays from its own place"
         );
-        // The same row sends a valid one-song request to a Connect device,
-        // with either shuffle setting, while its optimistic title stays visible.
+        // The same row sends a valid request to a Connect device, with
+        // either shuffle setting, while its optimistic title stays visible.
+        // The song waits a moment for its radio, so the device does not
+        // stop after it, then plays first with the radio after it.
         app.selected_device = Some("speaker".into());
+        let seed = "spotify:track:middle";
+        let radio = |id: &str| Track {
+            id: Some(id.into()),
+            uri: format!("spotify:track:{id}"),
+            name: format!("Radio {id}"),
+            ..Default::default()
+        };
         for shuffle in [false, true] {
             app.shuffle_wanted = shuffle;
             app.apply(
                 Action::PlayFromRow {
-                    context: RowContext::Uris(vec!["spotify:track:middle".into()].into()),
-                    uri: "spotify:track:middle".into(),
+                    context: RowContext::Uris(vec![seed.into()].into()),
+                    uri: seed.into(),
                     index: 73,
                 },
                 &ctx,
             );
+            // The first play asks for the radio; the second already has it.
+            if !shuffle {
+                assert!(
+                    app.backend.take_remote_play_requests().is_empty(),
+                    "the song waits for its radio"
+                );
+                let generation = app.radio_pages[seed].generation;
+                app.receive_radio(seed, generation, Ok(vec![radio("middle"), radio("after")]));
+            }
             let requests = app.backend.take_remote_play_requests();
             assert_eq!(requests.len(), 1);
             let (device, play) = match &requests[0] {
@@ -32347,13 +34642,32 @@ mod tests {
                 other => panic!("unexpected playback request: {other:?}"),
             };
             assert_eq!(device.as_deref(), Some("speaker"));
-            assert_eq!(play.uris, ["spotify:track:middle"]);
+            assert_eq!(
+                play.uris,
+                [seed, "spotify:track:after"],
+                "the song once, then its radio"
+            );
             assert_eq!(play.offset_position, Some(0));
             assert_eq!(
                 app.intent_track.as_ref().map(|intent| intent.uri.as_str()),
-                Some("spotify:track:middle")
+                Some(seed)
             );
         }
+        // With Autoplay off the song plays alone, at once.
+        app.settings.autoplay = false;
+        app.shuffle_wanted = false;
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Uris(vec![seed.into()].into()),
+                uri: seed.into(),
+                index: 0,
+            },
+            &ctx,
+        );
+        assert!(matches!(
+            app.backend.take_remote_play_requests().as_slice(),
+            [ApiRequest::Remote { play: Some(play), .. }] if play.uris == [seed]
+        ));
         app.backend.shutdown();
     }
 
@@ -32596,6 +34910,221 @@ mod tests {
                 ..
             }]
         ));
+        app.backend.shutdown();
+    }
+
+    /// A lone song would stop a speaker after it, so its radio follows it.
+    /// The song waits for the radio only briefly, and a control used
+    /// meanwhile sends it at once.
+    #[test]
+    fn a_lone_song_on_a_speaker_is_followed_by_its_radio() {
+        let ctx = egui::Context::default();
+        let mut app = headless_app();
+        crate::demo::populate(&mut app);
+        app.local.connected = false;
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = false;
+        assert!(matches!(app.target(), Target::Remote(Some(_))));
+        let song = |uri: &str| PlayRequest::tracks(vec![uri.into()]).starting_at_index(0);
+        let sent = |app: &App| -> Vec<Vec<String>> {
+            app.backend
+                .take_remote_play_requests()
+                .into_iter()
+                .filter_map(|request| match request {
+                    ApiRequest::Remote {
+                        play: Some(play), ..
+                    } => Some(play.uris),
+                    _ => None,
+                })
+                .collect()
+        };
+        let radio = |id: &str| crate::api::models::Track {
+            id: Some(id.into()),
+            uri: format!("spotify:track:{id}"),
+            ..Default::default()
+        };
+
+        // A radio that fails lets the song go alone.
+        let one = "spotify:track:one";
+        app.play_request(song(one), false);
+        assert!(sent(&app).is_empty(), "the song waits for its radio");
+        let generation = app.radio_pages[one].generation;
+        app.receive_radio(one, generation, Err("no radio".into()));
+        assert_eq!(sent(&app), [vec![one.to_string()]]);
+
+        // A radio slower than the wait lets the song go alone.
+        let two = "spotify:track:two";
+        app.play_request(song(two), false);
+        assert!(app.send_song_radio_when_due().is_some(), "still waiting");
+        let wait = app.song_radio.as_mut().expect("the song waits");
+        wait.asked = Instant::now().checked_sub(Duration::from_secs(3)).unwrap();
+        assert!(app.send_song_radio_when_due().is_none());
+        assert_eq!(sent(&app), [vec![two.to_string()]]);
+
+        // A control used while the song waits sends the song first.
+        let three = "spotify:track:three";
+        app.play_request(song(three), false);
+        app.apply(Action::TogglePlay, &ctx);
+        assert_eq!(sent(&app).first(), Some(&vec![three.to_string()]));
+        assert!(app.song_radio.is_none());
+
+        // A newer play outranks the song still waiting, even once its
+        // radio comes.
+        let four = "spotify:track:four";
+        app.play_request(song(four), false);
+        app.play_request(PlayRequest::context("spotify:playlist:pl0"), false);
+        assert_eq!(sent(&app), [Vec::<String>::new()]);
+        let generation = app.radio_pages[four].generation;
+        app.receive_radio(four, generation, Ok(vec![radio("four"), radio("five")]));
+        assert!(sent(&app).is_empty());
+
+        // A radio already found follows the song at once.
+        app.play_request(song(four), false);
+        assert_eq!(sent(&app), [vec![four.to_string(), radio("five").uri]]);
+
+        // Repeat keeps the song on its own.
+        let remote = app.remote.as_mut().expect("the speaker's state");
+        remote.state.repeat_state = "track".into();
+        remote.received_at = Instant::now();
+        app.play_request(song(four), false);
+        assert_eq!(sent(&app), [vec![four.to_string()]]);
+        app.backend.shutdown();
+    }
+
+    /// The demo playing to a speaker, where a lone song waits for its radio.
+    fn radio_speaker_app() -> App {
+        let mut app = headless_app();
+        crate::demo::populate(&mut app);
+        app.local.connected = false;
+        app.selected_device = Some("speaker".into());
+        app.shuffle_wanted = false;
+        app
+    }
+
+    fn one_song(uri: &str) -> PlayRequest {
+        PlayRequest::tracks(vec![uri.into()]).starting_at_index(0)
+    }
+
+    /// The plays sent to the speaker since the last look.
+    fn remote_plays(app: &App) -> Vec<PlayRequest> {
+        app.backend
+            .take_remote_play_requests()
+            .into_iter()
+            .filter_map(|request| match request {
+                ApiRequest::Remote {
+                    play: Some(play), ..
+                } => Some(play),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A Next up row chosen while a song waits for its radio is the newer
+    /// choice, so the waiting song never plays over it.
+    #[test]
+    fn a_next_up_row_drops_a_song_waiting_for_its_radio() {
+        let ctx = egui::Context::default();
+        let mut app = radio_speaker_app();
+        let song = "spotify:track:one";
+        // #given a song waiting for its radio
+        app.play_request(one_song(song), false);
+        assert!(app.song_radio.is_some());
+        // #when a Next up row is chosen
+        app.apply(
+            Action::PlayFromRow {
+                context: RowContext::Queue,
+                uri: "spotify:track:queued".into(),
+                index: 0,
+            },
+            &ctx,
+        );
+        // #then the song does not play, even once its radio comes
+        assert!(app.song_radio.is_none());
+        let generation = app.radio_pages[song].generation;
+        let radio = vec![radio_song("one", "Radio"), radio_song("two", "Radio")];
+        app.receive_radio(song, generation, Ok(radio));
+        assert!(remote_plays(&app).is_empty());
+        app.backend.shutdown();
+    }
+
+    /// Polls while a song waits for its radio describe what played before
+    /// it, so they cannot settle the song the player bar shows.
+    #[test]
+    fn polls_while_a_song_waits_for_its_radio_keep_its_title() {
+        let mut app = radio_speaker_app();
+        let song = "spotify:track:one";
+        let shown = |app: &App| app.intent_track.as_ref().map(|intent| intent.uri.clone());
+        // #given a song waiting for its radio
+        app.play_request(one_song(song), false);
+        assert!(app.song_radio.is_some());
+        // #when the speaker twice reports the song before it
+        for _ in 0..2 {
+            app.remote_poll_seq += 1;
+            let poll = app.remote_poll_seq;
+            app.reconcile_remote_track_intent(poll, Some("spotify:track:before"));
+        }
+        // #then the song stays, and only a poll sent after it counts
+        assert_eq!(shown(&app).as_deref(), Some(song));
+        let generation = app.radio_pages[song].generation;
+        app.receive_radio(song, generation, Err("no radio".into()));
+        assert_eq!(remote_plays(&app).len(), 1);
+        let sent = app.remote_poll_seq;
+        app.reconcile_remote_track_intent(sent, Some("spotify:track:before"));
+        assert_eq!(
+            shown(&app).as_deref(),
+            Some(song),
+            "a poll sent before the play"
+        );
+        app.reconcile_remote_track_intent(sent + 1, Some(song));
+        assert!(app.intent_track.is_none(), "the speaker confirms the song");
+        app.backend.shutdown();
+    }
+
+    /// A song asked as its own context, as a search match is, waits for
+    /// its radio too, then plays first in a list with it.
+    #[test]
+    fn a_song_asked_as_its_own_context_is_followed_by_its_radio() {
+        let mut app = radio_speaker_app();
+        let song = "spotify:track:one";
+        // #given a song asked as its own context
+        app.play_request(PlayRequest::context(song), false);
+        assert!(remote_plays(&app).is_empty(), "the song waits");
+        // #when its radio comes
+        let generation = app.radio_pages[song].generation;
+        let radio = vec![radio_song("one", "Radio"), radio_song("two", "Radio")];
+        app.receive_radio(song, generation, Ok(radio));
+        // #then the song plays first, with the radio after it
+        let plays = remote_plays(&app);
+        let [play] = plays.as_slice() else {
+            panic!("one play, not {plays:?}");
+        };
+        assert_eq!(play.context_uri, None);
+        assert_eq!(play.uris, [song, "spotify:track:two"]);
+        assert_eq!(play.offset_position, Some(0));
+        app.backend.shutdown();
+    }
+
+    /// A song still waiting for its radio at sign-out never plays for the
+    /// account that left.
+    #[test]
+    fn signing_out_drops_a_song_waiting_for_its_radio() {
+        let ctx = egui::Context::default();
+        let mut app = radio_speaker_app();
+        let song = "spotify:track:one";
+        // #given a song waiting for its radio
+        app.play_request(one_song(song), false);
+        assert!(app.song_radio.is_some());
+        // #when the account signs out
+        app.apply(Action::SignOut, &ctx);
+        // #then the song is never sent
+        assert!(app.song_radio.is_none());
+        assert!(app.send_song_radio_when_due().is_none());
+        assert!(remote_plays(&app).is_empty());
+        // Clearing the account's data drops one too.
+        app.play_request(one_song(song), false);
+        assert!(app.song_radio.is_some());
+        app.reset_data();
+        assert!(app.song_radio.is_none());
         app.backend.shutdown();
     }
 
@@ -33088,6 +35617,68 @@ mod tests {
         app.handle_remote_volume("sonos", percent_to_volume(70));
         assert!(app.pending_remote_volume.is_none());
         assert_eq!(app.now_playing().unwrap().volume_percent, 70);
+        app.backend.shutdown();
+    }
+
+    /// A Sonos turned to 1% reports 0% a moment later while it still plays.
+    /// A report one step off confirms the chosen level, which stays shown so
+    /// the slider does not slip and the icon does not read muted, until the
+    /// speaker reports a level set elsewhere.
+    #[test]
+    fn remote_volume_stays_where_it_was_set_when_the_speaker_reports_a_step_off() {
+        let mut app = remote_volume_app();
+        let device = app.remote.as_mut().unwrap().state.device.as_mut().unwrap();
+        device.id = None;
+        app.local_ready = true;
+        app.selected_device = Some("sonos".into());
+        app.set_volume(1, true);
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Volume {
+                request: app.remote_volume_request,
+            },
+            result: Ok(()),
+        });
+        report_remote_volume(&mut app, 1, Some(0));
+        assert!(app.pending_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 1);
+        report_remote_volume(&mut app, 2, Some(0));
+        app.handle_remote_volume("sonos", percent_to_volume(0));
+        assert_eq!(app.now_playing().unwrap().volume_percent, 1);
+        // A level set elsewhere shows as reported, by poll or by push.
+        report_remote_volume(&mut app, 3, Some(30));
+        assert!(app.settled_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 30);
+        app.set_volume(1, true);
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Volume {
+                request: app.remote_volume_request,
+            },
+            result: Ok(()),
+        });
+        report_remote_volume(&mut app, 4, Some(0));
+        assert_eq!(app.now_playing().unwrap().volume_percent, 1);
+        app.handle_remote_volume("sonos", percent_to_volume(25));
+        assert!(app.settled_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 25);
+        // A push a step off confirms the level as a poll does, once the
+        // hold has run out with no poll to confirm it.
+        app.set_volume(1, true);
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Volume {
+                request: app.remote_volume_request,
+            },
+            result: Ok(()),
+        });
+        app.pending_remote_volume.as_mut().unwrap().written_at =
+            Some(Instant::now() - PLAYBACK_HOLD);
+        app.handle_remote_volume("sonos", percent_to_volume(0));
+        assert!(app.pending_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 1);
+        // A push from another speaker, while the Web API names none, shows
+        // that speaker's own level.
+        app.handle_remote_volume("kitchen", percent_to_volume(0));
+        assert!(app.settled_remote_volume.is_none());
+        assert_eq!(app.now_playing().unwrap().volume_percent, 0);
         app.backend.shutdown();
     }
 
@@ -33902,7 +36493,7 @@ mod tests {
             listening.playing_since = Some(Instant::now() - Duration::from_secs(21));
             app.note_listening();
             assert_eq!(app.plays.plays().len(), sequence as usize);
-            assert_eq!(app.recents_view.len(), sequence as usize);
+            assert_eq!(app.recents_view.len(), 1, "one row for a song heard again");
 
             // Seeking or pausing the same play cannot count it again.
             let mut paused = app.local.clone();
@@ -33918,6 +36509,165 @@ mod tests {
         }
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(state_dir);
+    }
+
+    /// The Recent tab shows the song playing now from its start, as the
+    /// queue does, before the history records it.
+    #[test]
+    fn recent_shows_the_playing_song_at_once() {
+        let mut app = headless_app();
+        app.remote = None;
+        app.selected_device = None;
+        app.plays = crate::history::History::default();
+        app.handle_local(LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track_sequence: 1,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:track:now".into(),
+                title: "Just started".into(),
+                duration_ms: 200_000,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        app.show_playing_in_recents();
+        assert!(app.plays.is_empty(), "not counted yet");
+        assert_eq!(app.recents_view.len(), 1);
+        assert_eq!(app.recents_view[0].track.uri, "spotify:track:now");
+        assert_eq!(app.recents_view[0].track.name, "Just started");
+        app.backend.shutdown();
+    }
+
+    /// A song held paused since before keeps the date it was played, and a
+    /// song played here again from its start is dated anew.
+    #[test]
+    fn recent_dates_a_song_played_again_but_not_one_held_paused() {
+        let mut app = headless_app();
+        app.remote = None;
+        app.selected_device = None;
+        app.plays = crate::history::History::default();
+        let track = crate::player::LocalTrack {
+            uri: "spotify:track:again".into(),
+            title: "Again".into(),
+            duration_ms: 200_000,
+            ..Default::default()
+        };
+        let state = |playback, track_sequence| LocalState {
+            connected: true,
+            playback,
+            track_sequence,
+            track: Some(track.clone()),
+            ..Default::default()
+        };
+        let yesterday: jiff::Timestamp = "2026-01-01T00:00:00Z".parse().unwrap();
+        let played = crate::api::models::Track {
+            uri: track.uri.clone(),
+            name: track.title.clone(),
+            ..Default::default()
+        };
+        app.plays.record(played.clone(), yesterday);
+        app.rebuild_recents();
+        let shown = |app: &App| app.recents_view[0].played_at.clone();
+        let last = |app: &App| app.plays.plays()[0].played_at.clone();
+
+        app.handle_local(state(Playback::Paused, 1));
+        app.show_playing_in_recents();
+        assert_eq!(app.recents_view.len(), 1);
+        assert_eq!(shown(&app), last(&app), "held paused");
+
+        app.handle_local(state(Playback::Playing, 1));
+        app.show_playing_in_recents();
+        assert_ne!(shown(&app), last(&app), "played now");
+
+        // The play counts after it started; heard again from its start, the
+        // row is the new play rather than the one just counted.
+        let started: jiff::Timestamp = "2026-01-02T00:00:00Z".parse().unwrap();
+        if let Some(row) = app.recent_playing.as_mut() {
+            row.played_at = Some(started.to_string());
+        }
+        let counted: jiff::Timestamp = "2026-01-02T00:00:30Z".parse().unwrap();
+        app.plays.record(played, counted);
+        app.rebuild_recents();
+        assert_eq!(shown(&app), last(&app), "the counted play stands");
+        app.handle_local(state(Playback::Playing, 2));
+        app.show_playing_in_recents();
+        assert_eq!(
+            app.recents_view.len(),
+            1,
+            "one row for the song heard again"
+        );
+        assert_ne!(shown(&app), last(&app), "heard again");
+        app.backend.shutdown();
+    }
+
+    /// On another device, a song chosen while another is held paused leaves
+    /// the Recent tab when it fails to start, and a song chosen again is
+    /// dated anew at once.
+    #[test]
+    fn recent_follows_requests_on_another_device() {
+        let mut app = headless_app();
+        app.local_ready = false;
+        app.selected_device = Some("speaker".into());
+        app.plays = crate::history::History::default();
+        let track = |id: &str| crate::api::models::Track {
+            id: Some(id.into()),
+            uri: format!("spotify:track:{id}"),
+            name: id.into(),
+            ..Default::default()
+        };
+        for id in ["held", "chosen"] {
+            app.track_cache.insert(id.into(), track(id));
+        }
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(crate::api::models::Device {
+                    id: Some("speaker".into()),
+                    name: "Speaker".into(),
+                    is_active: true,
+                    ..Default::default()
+                }),
+                item: Some(crate::api::models::PlayableItem::Track(track("held"))),
+                is_playing: false,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        let shown = |app: &App| {
+            app.recents_view
+                .first()
+                .map(|row| (row.track.uri.clone(), row.played_at.clone()))
+        };
+
+        app.expect_track("spotify:track:chosen".into(), 0);
+        app.show_playing_in_recents();
+        assert_eq!(shown(&app).unwrap().0, "spotify:track:chosen");
+        app.handle_api(ApiResponse::Remote {
+            action: RemoteAction::Play,
+            result: Err(crate::api::ApiError::Status {
+                status: 502,
+                message: "Bad Gateway".into(),
+            }),
+        });
+        app.show_playing_in_recents();
+        assert_eq!(shown(&app), None, "the chosen song never started");
+
+        let remote = app.remote.as_mut().unwrap();
+        remote.state.item = Some(crate::api::models::PlayableItem::Track(track("chosen")));
+        remote.state.is_playing = true;
+        app.show_playing_in_recents();
+        let before = "2026-01-01T00:00:00Z";
+        if let Some(row) = app.recent_playing.as_mut() {
+            row.played_at = Some(before.into());
+        }
+        app.rebuild_recents();
+        app.expect_track("spotify:track:chosen".into(), 0);
+        app.show_playing_in_recents();
+        let (uri, at) = shown(&app).unwrap();
+        assert_eq!(uri, "spotify:track:chosen");
+        assert_ne!(at.as_deref(), Some(before), "chosen again");
+        assert_eq!(app.recents_view.len(), 1);
+        app.backend.shutdown();
     }
 
     #[test]

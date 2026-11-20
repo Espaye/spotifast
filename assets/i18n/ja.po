@@ -218,8 +218,12 @@ msgstr "{name}、フォルダ、折りたたみ"
 msgid "{name}, folder, expanded"
 msgstr "{name}、フォルダ、展開"
 
-#: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+#: src/ui/player_bar.rs:88
+msgid "The visualiser shows only music playing on this computer"
+msgstr "ビジュアライザーはこのコンピューターで再生中の音楽だけを表示します"
+
+#: src/ui/player_bar.rs:91
+msgid "Click to change the visualiser"
 msgstr "クリックでビジュアライザーを切り替え"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:131 src/ui/lyrics.rs:805
@@ -644,6 +648,11 @@ msgstr "追加したユーザー"
 msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "追加日"
+
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "リリース日"
 
 #: src/ui/widgets.rs:2507
 msgctxt "column heading"
@@ -1689,11 +1698,11 @@ msgid "Custom title bar"
 msgstr "カスタムタイトルバー"
 
 #: src/ui/settings.rs:1242
-msgid "Player bar visualizer"
+msgid "Player bar visualiser"
 msgstr "プレイヤーバーのビジュアライザー"
 
 #: src/ui/settings.rs:1243
-msgid "Click player bar to change visualizer"
+msgid "Click player bar to change visualiser"
 msgstr "再生バーのクリックでビジュアライザーを切り替える"
 
 #: src/ui/settings.rs:1252
@@ -1775,13 +1784,15 @@ msgstr ""
 
 #: src/ui/settings.rs:1343
 msgid ""
-"Show the song moving behind the player bar's controls while it plays here."
+"Show the song moving behind the player bar's controls. It shows only music "
+"playing on this computer, not on a speaker or another device."
 msgstr ""
-"このコンピューターで再生中の曲の動きを、プレイヤーバーの操作ボタンの背後に表"
-"示します。"
+"プレイヤーバーの操作ボタンの背後に曲の動きを表示します。表示されるのはこのコ"
+"ンピューターで再生中の音楽だけで、スピーカーやほかのデバイスの音楽は表示され"
+"ません。"
 
 #: src/ui/settings.rs:1348
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "再生バーの空いている部分をクリックしてビジュアライザーを切り替えられるように"
 "します。"
@@ -1792,7 +1803,7 @@ msgstr "フレームレート"
 
 #: src/ui/settings.rs:1354
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "プレイヤーバーとミニプレイヤーのビジュアライザーを描画する頻度です。レートを"
@@ -2867,6 +2878,22 @@ msgstr "コラボプレイリスト"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "公開プレイリスト"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "非公開プレイリスト"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "追加日"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "リリース日"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "再生時間"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"
@@ -4096,12 +4123,10 @@ msgstr "{year}年{month}{day}日"
 msgid "{month} {year}"
 msgstr "{year}年{month}"
 
-#. Translators: How long ago a song was added. Keep {count}.
+#. Translators: When a song was added or played, less than a minute ago.
 #: src/util.rs:136
-#, rust-format
-msgid "{count} second ago"
-msgid_plural "{count} seconds ago"
-msgstr[0] "{count}秒前"
+msgid "Just now"
+msgstr "たった今"
 
 #. Translators: How long ago a song was added. Keep {count}.
 #: src/util.rs:146

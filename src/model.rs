@@ -665,7 +665,7 @@ impl TopPeriod {
             ),
             Self::LongTerm => gettext(
                 locale,
-                "Calculated from several years of listening history.",
+                "Based on roughly the last year of listening, including new activity.",
             ),
         }
     }
@@ -1006,6 +1006,8 @@ pub enum SortColumn {
     AddedBy,
     /// Spotify's play count, where the list shows one.
     Plays,
+    /// The song's album's release date.
+    Released,
     /// The list's own order, for playing it reversed from the # heading.
     Index,
 }
@@ -1043,12 +1045,44 @@ pub struct DragTrack {
     /// Full row data, so dropping can update an open playlist immediately.
     /// A picked table row carries the whole selection in table order.
     pub items: Vec<PlayableItem>,
-    /// Source playlist ID and row index for moves within an editable playlist.
+    /// Source playlist ID and row index for moves within an editable
+    /// playlist, or [`QUEUED_ROW`] or [`UPCOMING_ROW`] and the row's index
+    /// in the whole queue for a row of the open queue, or
+    /// [`NOW_PLAYING_ROW`] for its Now playing row.
     pub from: Option<(String, u32)>,
     /// The editable playlist the rows were dragged from, however many there
     /// are. Several rows have no `from`, and dropping them back into their
     /// own playlist must not add copies of them (#669).
     pub source_playlist: Option<String>,
+}
+
+/// The `from` origin of a row dragged out of Next in queue.
+pub const QUEUED_ROW: &str = "queue";
+
+/// The `from` origin of a row dragged out of the queue's rows after Next in
+/// queue, which play from the context in its own order.
+pub const UPCOMING_ROW: &str = "queue-upcoming";
+
+/// The `from` origin of the open queue's Now playing row.
+pub const NOW_PLAYING_ROW: &str = "queue-now-playing";
+
+impl DragTrack {
+    /// Whether the row was dragged out of Next in queue or Now playing,
+    /// which never queues it again. A row of Next up can be queued.
+    pub fn is_queued_or_playing(&self) -> bool {
+        self.from
+            .as_ref()
+            .is_some_and(|(origin, _)| [QUEUED_ROW, NOW_PLAYING_ROW].contains(&origin.as_str()))
+    }
+}
+
+/// Why a song dropped on the open queue stayed where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueRefusal {
+    /// It was the Now playing row: the song is already playing.
+    NowPlaying,
+    /// It was a row of Next in queue, which cannot be moved now.
+    Locked,
 }
 
 /// Where the playing songs come from, as the queue's header names it.
@@ -1081,6 +1115,8 @@ pub enum Dialog {
         name: String,
         public: bool,
         add_uris: Vec<String>,
+        cover: crate::playlist_cover::Draft,
+        description: String,
     },
     EditPlaylist {
         cover: crate::playlist_cover::Draft,
@@ -1108,6 +1144,30 @@ pub enum Dialog {
     PremiumNeeded,
     /// Introduce personal Spotify apps to eligible listeners once.
     PersonalAppIntro,
+}
+
+impl Dialog {
+    /// New playlist, private and without a cover or description yet.
+    pub fn new_playlist(name: String, add_uris: Vec<String>) -> Self {
+        Self::CreatePlaylist {
+            name,
+            public: false,
+            add_uris,
+            cover: Default::default(),
+            description: String::new(),
+        }
+    }
+
+    /// The cover being picked for playlist `id`; New playlist's has no id yet.
+    pub fn cover_draft(&mut self, id: &str) -> Option<&mut crate::playlist_cover::Draft> {
+        match self {
+            Self::CreatePlaylist { cover, .. } if id.is_empty() => Some(cover),
+            Self::EditPlaylist {
+                id: current, cover, ..
+            } if current == id => Some(cover),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1204,8 +1264,9 @@ pub enum Action {
         items: Vec<PlayableItem>,
     },
     /// Move a row within the manually queued "Playing next" section, from a
-    /// drag dropped back on the queue. Only applied while the local player
-    /// is the active target; see [`crate::app::App::queue_locally_reorderable`].
+    /// drag dropped back on the queue. Applied on the local player, and with
+    /// Connect's `set_queue` on a device playing elsewhere that takes it;
+    /// see [`crate::app::App::queue_reorderable`].
     MoveInQueue {
         from: usize,
         to: usize,
@@ -1224,6 +1285,8 @@ pub enum Action {
     RemoveFromQueue {
         rows: Vec<(usize, String)>,
     },
+    /// Say why a song dropped on the open queue stayed where it was.
+    RefuseQueueDrop(QueueRefusal),
     /// Set saved state for several songs explicitly.
     SetSavedMany {
         uris: Vec<String>,
@@ -1396,6 +1459,8 @@ pub enum Action {
         sort: crate::settings::LibrarySort,
     },
     SetLibraryGrid(bool),
+    /// The optional columns of playlists' song lists.
+    SetTrackColumns(crate::settings::TrackColumns),
     ToggleLibraryFolder(String),
     ArrangeLibrary {
         pinned: Vec<String>,

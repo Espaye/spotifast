@@ -62,6 +62,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays,
+                                    show_released: false,
+                                    show_duration: true,
                                     compact: false,
                                     thin: app.settings.tracklist_compact,
                                     shift: 0.0,
@@ -69,6 +71,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, id: &str) {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: true,
                                 },
                             );
                         }

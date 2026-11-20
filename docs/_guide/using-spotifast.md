@@ -174,6 +174,10 @@ Local songs show readable titles, artists, and albums, including spaces and
 accented characters. Names saved in older playlist caches are corrected
 automatically when the cache is read.
 
+A song that is no longer available, or not available in your country, stays
+in its playlist with its whole row greyed out and does not play. A removed
+song often keeps only its cover and album, without a title or length.
+
 Sorted and filtered views omit unavailable songs and local files from playback.
 The rows stay visible, and selecting a repeated song starts that occurrence. Filtering a playlist or Liked Songs plays only the matching songs,
 including repeated entries. Play is disabled when the view has no playable
@@ -485,7 +489,7 @@ has no place in Spotify's playlist tree. Returning to **Local custom order**
 restores its saved position. Dragging a song onto Liked Songs still saves that
 song, wherever the row sits.
 
-**Player bar visualizer** in **Settings > Appearance** shows the song moving
+**Player bar visualiser** in **Settings > Appearance** shows the song moving
 behind the player bar's controls: **Spectrum** draws glowing bars from bass
 to treble with peaks that hang and fall, and **Waveform** draws the sound's
 wave as a glowing line. With **Colour from album art** on, both sweep from
@@ -494,7 +498,8 @@ and its greys after, so a black and white cover moves in grey; with it off,
 they take the accent colour. It follows the equalizer, not the volume, and moves only while the
 song plays on this computer. It is off by default. Clicking the player
 bar's empty space switches it, as Winamp's visualizer did: off, then
-Spectrum, then Waveform, then off again. **Frame rate** in **Settings >
+Spectrum, then Waveform, then off again. While it is off, that space offers
+no tooltip. **Frame rate** in **Settings >
 Appearance** sets how often it and the mini player's analyser draw: 30, 60
 (the default), the rate of the screen showing the window, or Uncapped,
 which follows the display. They draw at half that rate while Spotifast's
@@ -502,13 +507,14 @@ window is out of focus, at most 30 frames a second while the system saves
 energy, and not at all while nobody can see the window: minimised, in the
 tray, with the display off or the screen locked. MilkDrop has its own frame
 rate. Disable **Click player bar to change
-visualizer** in **Settings > Appearance** to prevent accidental changes.
+visualiser** in **Settings > Appearance** to prevent accidental changes.
 
 Spotifast follows the system when it asks for less motion: **Animation
 effects** turned off in Windows, **Reduce motion** on macOS, or GNOME's
 **Animations** turned off. Its animations then show where they end at once:
 the player bar's colour changes without fading, lyrics jump to the sung line,
-and a new theme replaces the old one without the reveal. Spinners still turn.
+the moving bars that mark the playing song stand still, and a new theme
+replaces the old one without the reveal. Spinners still turn.
 
 In **Settings > Appearance**, **Compact track list** puts each song on one
 line. In narrow lists, the added date follows the artist credits with a spaced
@@ -657,14 +663,19 @@ through Spotifast, which Spotify does not record.
 
 Since 0.8.0, choosing any Recent row starts that song on its own,
 and the player bar shows the selection immediately while playback starts.
+With Autoplay on, music Spotify suggests follows it, on this computer and on
+other devices except Soloist, so playback does not stop after the one song.
 
-A song is added after about 30 seconds, or halfway through a shorter song.
-Paused time and seeking do not count.
+The song playing now leads the list as soon as it starts, as it does in the
+queue. It stays in the history once it has played for about 30 seconds, or
+halfway through a shorter song. Paused time and seeking do not count.
 
-Since 0.8.0, each repeat remains a separate play, including songs
-shorter than a minute. A newly loaded local repeat earns its own listening
-time; pausing or seeking the current play does not create another entry.
-The same play reported both locally and by Spotify appears once.
+Since 0.8.0, each repeat remains a separate play in the history, including
+songs shorter than a minute. A newly loaded local repeat earns its own
+listening time; pausing or seeking the current play does not create another
+entry. The same play reported both locally and by Spotify appears once.
+Recent never lists a song twice in a row: a song heard again straight away
+is one row, and it is listed again once another song has played between.
 
 The local list is stored in `history.json` and is never uploaded. Settings →
 Storage shows its location and has a **Clear history** button.
@@ -705,8 +716,8 @@ volume for Spotifast alone.
 
 ## Listening activity
 
-The people button in the player bar, beside Queue and Lyrics, opens what the
-people you follow on Spotify are listening to. It takes the place of the
+The people button in the top bar, beside Settings, opens what the people you
+follow on Spotify are listening to. It takes the place of the
 Queue or Lyrics panel on the right, and they take its place in turn. While
 it is open it refreshes every 15 seconds.
 
@@ -717,8 +728,8 @@ album, the artist opens their page, and the line below opens the playlist,
 album or artist it plays from.
 
 The panel needs playback on this computer, since only that session can read
-it. In a very narrow window the people button gives way so the playback
-controls keep their room; widen the window to bring it back.
+it. In a very narrow window the people button gives way so the search field
+keeps its reading size; widen the window to bring it back.
 
 ## Sleep while playing
 
@@ -822,27 +833,36 @@ A local file from a playlist shows the words in a `.lrc` file of the same name
 beside it, or in its own tags, and the cover in its tags; otherwise lyrics come
 from LRCLIB by its artist, title, album and length.
 Synced lyrics follow the playing line automatically. Scroll to pause following,
-choose **Follow** to resume it, or choose a line to jump to that part of the song.
+choose **Sync lyrics** to resume it, or choose a line to jump to that part of the song.
+While lyrics are open on an unmetered connection, Spotifast prepares the next song's
+words and cover from the queue and keeps the previous song's words ready.
+Where Spotify's synced lyrics mark a stretch without singing, a music note
+stands in for it and lights up while the band plays on.
 
 The expand button in the lyrics panel or at the right of the player bar, or
 **F** when no text field has focus, opens lyrics in full screen. A narrow
 window has no room for the player bar's button. Press **F** or **Esc**, or
 choose the shrink button, to return to your previous window size. Full-screen lyrics
 scroll smoothly and highlight the playing line automatically. Scrolling by
-hand pauses following; choose **Follow** to resume. Since 0.11.0, a wide
+hand pauses following; choose **Sync lyrics** to resume. Since 0.11.0, a wide
 window shows the song's cover beside the lyrics, the two centred together,
 and a song without words, such as an instrumental, shows just its cover in
-the middle of the screen.
+the middle of the screen. The song's title above the lyrics opens its
+album, and each artist their page, as in the player bar.
 
-Press **V** in full screen lyrics, or click anywhere that isn't a line of
-lyrics or a control, to put MilkDrop behind the words instead of the cover's
-art, and do the same again to bring the art back; Spotifast remembers which you
+The player bar slides away after three seconds without input and comes back
+over the lyrics when you move the mouse, scroll, click or press a key. It
+stays while the pointer rests on it or one of its menus is open. Press **Q**
+for the queue beside the lyrics, on a dark pane in either theme.
+
+Press **V** in full screen lyrics to put MilkDrop behind the words in place of
+the cover's art. Press it again to bring the art back; Spotifast remembers which you
 chose. **N** and **P** change the preset there. The picture is dimmed as far as
 it takes to keep the words clear, and holds still while the music is paused.
 It uses the presets you have: with none, the art stays. It follows the sound
 after the equalizer and before the volume, like every visualizer.
 
-Click the album art in full screen lyrics to leave MilkDrop alone on the
+Double-click the album art in full screen lyrics to leave MilkDrop alone on the
 screen, edge to edge and at full brightness, even if it was off. Move the mouse
 to see the player's controls for a few seconds; the cursor hides with them.
 Any other click brings everything back as it was, and **Esc** leaves full

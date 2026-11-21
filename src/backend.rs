@@ -5277,7 +5277,8 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
         | ApiRequest::AddManyToQueue { .. }
-        | ApiRequest::SetQueue { .. } | ApiRequest::EditQueue { .. } => Operation::Playback,
+        | ApiRequest::SetQueue { .. }
+        | ApiRequest::EditQueue { .. } => Operation::Playback,
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
@@ -6298,7 +6299,9 @@ async fn handle(
         }
         ApiRequest::EditQueue { request, .. } => ApiResponse::QueueEdited {
             request,
-            result: Err(ApiError::Network("No Connect session for editing the queue".into())),
+            result: Err(ApiError::Network(
+                "No Connect session for editing the queue".into(),
+            )),
         },
         // Only the Connect route can send it, and that needs local playback.
         ApiRequest::SetQueue { .. } => ApiResponse::QueueSet {
@@ -6498,13 +6501,22 @@ async fn over_connect(
                 result,
             }
         }
-        ApiRequest::EditQueue { device, request, edit } => {
+        ApiRequest::EditQueue {
+            device,
+            request,
+            edit,
+        } => {
             let _turn = connect.queue_skip_turn().await;
             let result = match engine.edited_queue(device, edit) {
                 Some(body) => crate::sonos::command(session, device, &body).await,
-                None => Err(ApiError::Network("The device's queue changed or does not allow this edit".into())),
+                None => Err(ApiError::Network(
+                    "The device's queue changed or does not allow this edit".into(),
+                )),
             };
-            ApiResponse::QueueEdited { request: *request, result }
+            ApiResponse::QueueEdited {
+                request: *request,
+                result,
+            }
         }
         ApiRequest::SetQueue { device_id, queued } => {
             // Any Connect device takes it, restricted or not.

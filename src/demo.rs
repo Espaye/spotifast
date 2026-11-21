@@ -11459,7 +11459,9 @@ mod tests {
         let (ctx, mut app) = accessible_app("queue-to-next-up");
         app.show_queue_panel = true;
         let manual = seed_queued_songs(&mut app);
-        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
         let mut expected = app.queue_origin().unwrap().rows;
         let moved = expected.remove(0);
         expected.insert(2, moved);
@@ -11565,15 +11567,33 @@ mod tests {
         let (ctx, mut app) = accessible_app("playlist-to-next-up");
         seed_queued_songs(&mut app);
         let before = app.queue_origin().unwrap();
-        let items: Vec<_> = app.playlist_pages["pl1"].items.items.iter()
-            .filter_map(|row| row.playable().cloned()).take(2).collect();
+        let items: Vec<_> = app.playlist_pages["pl1"]
+            .items
+            .items
+            .iter()
+            .filter_map(|row| row.playable().cloned())
+            .take(2)
+            .collect();
         assert_eq!(items.len(), 2);
         let slot = before.manual + 1;
         let mut expected = before.rows;
         expected.splice(slot..slot, items.iter().map(|item| item.uri().to_string()));
-        let track = DragTrack { items, title: String::new(), image: None, from: None,
-            source_playlist: Some("pl1".into()), queue_origin: None };
-        app.apply(Action::DropInPlaybackQueue { track: Box::new(track), slot, manual: false }, &ctx);
+        let track = DragTrack {
+            items,
+            title: String::new(),
+            image: None,
+            from: None,
+            source_playlist: Some("pl1".into()),
+            queue_origin: None,
+        };
+        app.apply(
+            Action::DropInPlaybackQueue {
+                track: Box::new(track),
+                slot,
+                manual: false,
+            },
+            &ctx,
+        );
         assert_eq!(app.queue_origin().unwrap().rows, expected);
         assert_eq!(app.queued_rows_len(), before.manual);
         app.backend.shutdown();
@@ -11842,7 +11862,9 @@ mod tests {
         let (ctx, mut app) = accessible_app("next-up-to-manual");
         app.show_queue_panel = true;
         let mut manual = seed_queued_songs(&mut app);
-        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
         let mut expected = app.queue_origin().unwrap().rows;
         let moved = expected.remove(3);
         expected.insert(1, moved.clone());
@@ -11858,9 +11880,13 @@ mod tests {
         let (ctx, mut app) = accessible_app("reorder-next-up");
         app.show_queue_panel = true;
         seed_queued_songs(&mut app);
-        if let Loadable::Loaded(queue) = &mut app.queue { queue.queue.drain(..3); }
+        if let Loadable::Loaded(queue) = &mut app.queue {
+            queue.queue.drain(..3);
+        }
         app.manual_queue.clear();
-        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
         let queue = &app.queue.get().unwrap().queue;
         let first = queue[0].name().to_owned();
         let second = queue[1].name().to_owned();

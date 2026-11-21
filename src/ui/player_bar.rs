@@ -1055,18 +1055,24 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     if let Some(track) = queue_button.dnd_release_payload::<DragTrack>()
         && !track.is_queued_or_playing()
     {
-        if track.from.as_ref().is_some_and(|(kind, _)| kind == crate::model::UPCOMING_ROW) {
+        if track
+            .from
+            .as_ref()
+            .is_some_and(|(kind, _)| kind == crate::model::UPCOMING_ROW)
+        {
             app.actions.push(Action::DropInPlaybackQueue {
-                track: Box::new((*track).clone()), slot: app.queued_rows_len(), manual: true,
+                track: Box::new((*track).clone()),
+                slot: app.queued_rows_len(),
+                manual: true,
             });
         } else {
-        app.actions.push(Action::QueueMany {
-            songs: track
-                .items
-                .iter()
-                .map(|item| (item.uri().to_string(), item.name().to_string()))
-                .collect(),
-        });
+            app.actions.push(Action::QueueMany {
+                songs: track
+                    .items
+                    .iter()
+                    .map(|item| (item.uri().to_string(), item.name().to_string()))
+                    .collect(),
+            });
         }
     }
     if theme::toggle_icon_button(

@@ -2536,7 +2536,9 @@ fn track_row_contents(
                 items,
                 from,
                 source_playlist,
-                queue_origin: matches!(row.context, RowContext::Queue).then(|| app.queue_origin()).flatten(),
+                queue_origin: matches!(row.context, RowContext::Queue)
+                    .then(|| app.queue_origin())
+                    .flatten(),
             },
         );
     }

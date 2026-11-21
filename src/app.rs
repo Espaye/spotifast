@@ -37,6 +37,7 @@ struct PendingQueueEdit {
     device: String,
     playing: String,
     before: Vec<PlayableItem>,
+    shown_len: usize,
     old_manual: Vec<String>,
     expected: Vec<String>,
     new_manual: Vec<String>,
@@ -7959,6 +7960,9 @@ impl App {
             .map(|item| item.uri().to_string())
             .collect();
         let old_manual = std::mem::replace(&mut self.manual_queue, new_manual.clone());
+        self.session_dirty = true;
+        // The offline demo has no receiver to acknowledge an edit.
+        if self.offline { return; }
         self.queue_seq += 1;
         let request = self.queue_seq;
         self.queue_edit = Some(PendingQueueEdit {
@@ -7968,13 +7972,13 @@ impl App {
             at: Instant::now(),
             acknowledged: false,
             before,
+            shown_len: queue.queue.len(),
             old_manual,
             new_manual,
             expected,
         });
         self.queue_stale_retries = 0;
         self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-        self.session_dirty = true;
         self.backend.api(ApiRequest::EditQueue {
             device,
             request,
@@ -10951,6 +10955,7 @@ impl App {
                         self.manual_queue
                             .splice(..edit.new_manual.len(), edit.old_manual);
                         if let Loadable::Loaded(queue) = &mut self.queue
+                            && queue.queue.len() == edit.shown_len
                             && queue
                                 .queue
                                 .iter()

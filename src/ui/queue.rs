@@ -668,7 +668,7 @@ fn rows(
                 .map(|pos| {
                     (((pos.y - list_top) / (row_height + gap)).round() as usize).min(queued_len)
                 }),
-            // A drop anywhere on the panel joins the end of Next in queue.
+            // A receiver with append-only support takes the end of the manual section.
             Some(Landing::Append) if ui.rect_contains_pointer(section_rect) => Some(queued_len),
             _ => None,
         };

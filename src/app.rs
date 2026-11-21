@@ -7962,7 +7962,9 @@ impl App {
         let old_manual = std::mem::replace(&mut self.manual_queue, new_manual.clone());
         self.session_dirty = true;
         // The offline demo has no receiver to acknowledge an edit.
-        if self.offline { return; }
+        if self.offline {
+            return;
+        }
         self.queue_seq += 1;
         let request = self.queue_seq;
         self.queue_edit = Some(PendingQueueEdit {

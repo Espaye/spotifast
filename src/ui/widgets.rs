@@ -2536,6 +2536,7 @@ fn track_row_contents(
                 items,
                 from,
                 source_playlist,
+                queue_origin: matches!(row.context, RowContext::Queue).then(|| app.queue_origin()).flatten(),
             },
         );
     }
@@ -5719,6 +5720,7 @@ mod tests {
                 }),
             ],
             from: None,
+            queue_origin: None,
             source_playlist: None,
         };
         assert_eq!(drag_label(Locale::English, &track), "Kora Panna + 1 more");

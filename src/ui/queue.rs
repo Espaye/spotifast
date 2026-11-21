@@ -8,7 +8,7 @@ use crate::api::models::PlayableItem;
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
 use crate::model::{
-    Action, DragTrack, Loadable, NOW_PLAYING_ROW, QUEUED_ROW, QueueRefusal, QueueTab, RowContext,
+    Action, DragTrack, Loadable, NOW_PLAYING_ROW, QUEUED_ROW, UPCOMING_ROW, QueueRefusal, QueueTab, RowContext,
 };
 use crate::theme::{self, Icon};
 
@@ -385,20 +385,24 @@ enum Landing {
     /// Songs from elsewhere join the end of Next in queue, as Add to queue
     /// does: a device playing elsewhere takes no insert.
     Append,
+    /// A positional edit of the device's upcoming tracks.
+    Edit,
     /// Nothing moves, for the reason given.
     Refused(QueueRefusal),
 }
 
-/// What the song being dragged would do if dropped on the queue now. A row
-/// of Next in queue moves or stays put, and the playing song is not queued
-/// again. A row of Next up is queued like a song from elsewhere; the context
-/// still plays it in its own place too.
+/// How to handle a drop in the manual section. A drop in Next up always
+/// edits the playback order on the device.
 fn landing_of(app: &App, track: &DragTrack) -> Landing {
     match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
+        _ if app.queue_edit_in_flight() => Landing::Refused(QueueRefusal::Locked),
         Some(NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::NowPlaying),
         Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
         Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked),
+        Some(UPCOMING_ROW) if app.can_edit_play_order() => Landing::Edit,
+        Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Locked),
         _ if app.queue_locally_reorderable() => Landing::Insert,
+        _ if app.can_edit_play_order() => Landing::Edit,
         _ => Landing::Append,
     }
 }
@@ -437,15 +441,20 @@ fn drop_line(ui: &egui::Ui, color: Color32, y: f32) {
     );
 }
 
-/// Acts on a song dropped on the queue. `slot` is the row of Next in queue
-/// the drop line showed, if it showed one.
-fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<usize>) {
-    // A move or an insert lands only where the line shows, never on the
-    // rows after Next in queue.
-    let slot = match (landing, slot) {
-        (Landing::Move | Landing::Insert, None) => return,
-        (_, slot) => slot.unwrap_or(0),
-    };
+#[derive(Clone, Copy)]
+struct QueueSlot {
+    index: usize,
+    manual: bool,
+}
+
+/// Dispatches only the action advertised at the pointer.
+fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<QueueSlot>) {
+    let context = slot.is_some_and(|slot| !slot.manual);
+    let landing = if context && !matches!(landing, Landing::Refused(_)) {
+        if app.can_edit_play_order() { Landing::Edit } else { Landing::Refused(QueueRefusal::Locked) }
+    } else { landing };
+    if slot.is_none() && !matches!(landing, Landing::Refused(_)) { return; }
+    let slot = slot.map_or(0, |slot| slot.index);
     let Some(track) = egui::DragAndDrop::take_payload::<DragTrack>(ui.ctx()) else {
         return;
     };
@@ -459,6 +468,9 @@ fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<us
                 app.actions.push(Action::MoveInQueue { from, to: slot });
             }
         }
+        Landing::Edit => app.actions.push(Action::DropInPlaybackQueue {
+            track: Box::new((*track).clone()), slot, manual: !context,
+        }),
         Landing::Insert => app.actions.push(Action::InsertInQueue {
             items: track.items.clone(),
             position: slot,
@@ -499,7 +511,7 @@ fn rows(
     compact: bool,
     dragging: Option<Landing>,
     landing: Option<Landing>,
-) -> Option<usize> {
+) -> Option<QueueSlot> {
     let palette = app.palette;
     let mut slot = None;
     match &app.queue {
@@ -586,13 +598,7 @@ fn rows(
         } else {
             0.0
         };
-    if queue_is_empty(app) {
-        // Nothing queued at all yet: the only slot a drop could land on is
-        // the first one.
-        if matches!(landing, Some(Landing::Insert | Landing::Append)) {
-            slot = Some(0);
-            drop_line(ui, palette.accent, start_line);
-        }
+    if queue_is_empty(app) && dragging.is_none() {
         widgets::empty_state(
             ui,
             &palette,
@@ -600,13 +606,14 @@ fn rows(
             &gettext(app.locale, "Nothing queued"),
             &gettext(app.locale, "Queued songs appear here."),
         );
-        return slot;
+        return None;
     }
     let queue_len = app.queue.get().map(|queue| queue.queue.len()).unwrap_or(0);
     // The user's own songs get their own section on top; the playing
     // context's rows follow under the usual heading. One numbering runs
     // through both, because that is the order things play.
     let queued_len = app.queued_rows_len().min(queue_len);
+    if dragging.is_some() { widgets::scroll_during_drag(ui); }
     if queued_len > 0 {
         // Clear sits with the songs it removes: only this section is the
         // user's to clear, the context below plays itself.
@@ -628,35 +635,26 @@ fn rows(
             });
         });
         ui.add_space(4.0);
-        if matches!(dragging, Some(Landing::Move | Landing::Insert)) {
-            widgets::scroll_during_drag(ui);
-        }
         let gap = ui.spacing().item_spacing.y;
         // Calculate the nearest drop slot from fixed row height because
         // virtualized rows are not all available during drawing.
         let list_top = ui.cursor().top();
-        // Bound a move or an insert to Next in queue's own rows and the
-        // space below them, where the append-at-the-end slot sits. The
-        // scroll area's clip rect also covers Next up below, which is never
-        // a place to move or insert at.
+        // Include the manual heading and half the gap below the last manual row.
         let section_rect = egui::Rect::from_min_max(
-            egui::pos2(ui.clip_rect().left(), list_top),
+            egui::pos2(ui.clip_rect().left(), start_line),
             egui::pos2(
                 ui.clip_rect().right(),
-                list_top + queued_len as f32 * (row_height + gap) + SECTION_GAP,
+                list_top + queued_len as f32 * (row_height + gap) + SECTION_GAP * 0.5,
             ),
         );
         slot = match landing {
-            Some(Landing::Move | Landing::Insert) => ui
+            Some(Landing::Move | Landing::Insert | Landing::Edit) => ui
                 .ctx()
                 .pointer_latest_pos()
                 .filter(|pos| ui.rect_contains_pointer(section_rect) && section_rect.contains(*pos))
-                .and_then(|pos| {
-                    let row = (pos.y - list_top) / (row_height + gap);
-                    (row >= 0.0).then(|| (row.round() as usize).min(queued_len))
-                }),
+                .map(|pos| (((pos.y - list_top) / (row_height + gap)).round() as usize).min(queued_len)),
             // A drop anywhere on the panel joins the end of Next in queue.
-            Some(Landing::Append) => Some(queued_len),
+            Some(Landing::Append) if ui.rect_contains_pointer(section_rect) => Some(queued_len),
             _ => None,
         };
         warm_queue_covers(ui, app, 0, queued_len, row_height + gap, compact);
@@ -684,14 +682,16 @@ fn rows(
         }
         ui.add_space(SECTION_GAP);
     }
-    // With Next in queue empty, a drop anywhere on the panel starts it, under
-    // Now playing: the rows below belong to Next up, which plays from the
-    // context and is never rewritten.
-    if queued_len == 0 && matches!(landing, Some(Landing::Insert | Landing::Append)) {
+    // The gap above Next up accepts the first manually queued song.
+    if queued_len == 0 && landing.is_some_and(|land| !matches!(land, Landing::Refused(_)))
+        && (queue_len == 0 || ui.ctx().pointer_latest_pos().is_some_and(|pos| pos.y < ui.cursor().top()))
+    {
         slot = Some(0);
         drop_line(ui, palette.accent, start_line);
     }
-    if queue_len > queued_len {
+    let mut target = slot.map(|index| QueueSlot { index, manual: true });
+    if queue_len > queued_len || (dragging.is_some() && queued_len > 0) {
+        let heading_top = ui.cursor().top();
         // Named after where its songs come from, which opens on a click. A
         // radio has no page, so its name is plain text.
         let from = app.playing_from();
@@ -737,12 +737,24 @@ fn rows(
         });
         ui.add_space(4.0);
         let unqueued = queue_len - queued_len;
+        let top = ui.cursor().top();
+        let next_slot = landing.and_then(|_| ui.ctx().pointer_latest_pos())
+            .filter(|pos| pos.y >= heading_top && target.is_none())
+            .map(|pos| (((pos.y - top) / row_height).round() as usize).min(unqueued));
+        if let Some(index) = next_slot {
+            target = Some(QueueSlot { index: queued_len + index, manual: false });
+        }
         warm_queue_covers(ui, app, queued_len, unqueued, row_height, compact);
         widgets::virtual_rows(ui, queue_len - queued_len, row_height, |ui, index| {
             queue_row(app, ui, queued_len + index, compact, 0.0);
         });
+        if let Some(index) = next_slot
+            && app.can_edit_play_order()
+            && !matches!(landing, Some(Landing::Refused(_))) {
+            drop_line(ui, palette.accent, top + index as f32 * row_height);
+        }
     }
-    slot
+    target
 }
 
 fn queue_is_empty(app: &App) -> bool {

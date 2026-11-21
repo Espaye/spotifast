@@ -518,16 +518,83 @@ fn set_queue_body(state: &PlayerState, queued: &[String]) -> (serde_json::Value,
             .filter(|track| track.provider != QUEUE_PROVIDER)
             .map(track_json),
     );
-    let prev: Vec<serde_json::Value> = state.prev_tracks.iter().map(track_json).collect();
-    let body = serde_json::json!({
+    (queue_command(state, next), named)
+}
+
+fn queue_command(state: &PlayerState, next: Vec<serde_json::Value>) -> serde_json::Value {
+    let prev: Vec<_> = state.prev_tracks.iter().map(track_json).collect();
+    serde_json::json!({
         "command": {
             "endpoint": "set_queue",
             "next_tracks": next,
             "prev_tracks": prev,
             "queue_revision": state.queue_revision,
         }
-    });
-    (body, named)
+    })
+}
+
+/// A single edit against the visible prefix the listener dragged over.
+#[derive(Clone, Debug)]
+pub struct QueueEdit {
+    pub playing: String,
+    pub before: Vec<String>,
+    pub manual: usize,
+    pub from: Option<usize>,
+    pub to: usize,
+    pub into_manual: bool,
+    pub added: Vec<String>,
+}
+
+impl QueueEdit {
+    fn command(&self, state: &PlayerState) -> Option<serde_json::Value> {
+        let restrictions = &state.restrictions;
+        if state.track.uri != self.playing
+            || !restrictions.disallow_set_queue_reasons.is_empty()
+            || (self.from.is_some() && !restrictions.disallow_reordering_in_next_tracks_reasons.is_empty())
+            || (self.from.is_none() && !restrictions.disallow_inserting_into_next_tracks_reasons.is_empty())
+        {
+            return None;
+        }
+        // Keep delimiters, hidden rows and the unshown tail exactly as received.
+        let visible: Vec<_> = state.next_tracks.iter().enumerate()
+            .filter(|(_, row)| next_stops_on(row) && !row.uri.is_empty()
+                && row.metadata.get("hidden").is_none_or(|hidden| hidden != "true"))
+            .map(|(index, _)| index).collect();
+        if self.before.len() > visible.len() || self.to > self.before.len()
+            || self.before.iter().enumerate().any(|(i, uri)| {
+                let row = &state.next_tracks[visible[i]];
+                row.uri != *uri || (row.provider == QUEUE_PROVIDER) != (i < self.manual)
+            })
+        {
+            return None;
+        }
+        let mut next = state.next_tracks.clone();
+        let mut at = visible.get(self.to).copied().unwrap_or_else(|| {
+            visible.last().map_or(0, |last| last + 1)
+        });
+        let mut insert = if let Some(from) = self.from {
+            if from >= self.before.len() || !self.added.is_empty() { return None; }
+            let index = visible[from];
+            at -= usize::from(index < at);
+            vec![next.remove(index)]
+        } else {
+            self.added.iter().map(|uri| ProvidedTrack {
+                uri: uri.clone(),
+                ..Default::default()
+            }).collect()
+        };
+        for row in &mut insert {
+            if self.into_manual {
+                row.provider = QUEUE_PROVIDER.into();
+                row.metadata.insert("is_queued".into(), "true".into());
+            } else if row.provider.is_empty() || row.provider == QUEUE_PROVIDER {
+                row.provider = "context".into();
+                row.metadata.remove("is_queued");
+            }
+        }
+        next.splice(at..at, insert);
+        Some(queue_command(state, next.iter().map(track_json).collect()))
+    }
 }
 
 /// What the device that plays has coming up, as the latest cluster push
@@ -1187,6 +1254,17 @@ impl Engine {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .row(device, uri, occurrence)
+    }
+
+    pub fn edited_queue(&self, device: &str, edit: &QueueEdit) -> Option<serde_json::Value> {
+        if device == self.device_id() {
+            let watch = self.spirc.watch_player_state();
+            let state = watch.borrow();
+            return edit.command(state.as_ref()?);
+        }
+        let queue = self.remote_queue.lock().unwrap_or_else(|p| p.into_inner());
+        if queue.device != device { return None; }
+        edit.command(queue.state.as_ref()?)
     }
 
     /// The `set_queue` command that rewrites what `device`, playing
@@ -2586,6 +2664,28 @@ mod tests {
             next_tracks: next,
             ..PlayerState::default()
         }
+    }
+
+    #[test]
+    fn queue_edit_moves_the_chosen_copy_and_keeps_hidden_and_unshown_tracks() {
+        let state = player_state(provided("now", "n", "context"), vec![
+            provided("a", "q1", "queue"), provided("a", "first", "context"),
+            provided("spotify:delimiter", "delimiter1", "context"),
+            provided("a", "second", "context"), provided("tail", "t", "autoplay"),
+        ]);
+        let mut edit = super::QueueEdit { playing: "now".into(), before: vec!["a".into(); 3],
+            manual: 1, from: Some(2), to: 0, into_manual: true, added: vec![] };
+        let body = edit.command(&state).unwrap();
+        let next = body["command"]["next_tracks"].as_array().unwrap();
+        assert_eq!(next.iter().map(|row| row["uid"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["second", "q1", "first", "delimiter1", "t"]);
+        assert_eq!(next[0]["metadata"]["is_queued"], "true");
+        assert_eq!(next[0]["provider"], "queue");
+        edit.playing = "advanced".into();
+        assert!(edit.command(&state).is_none());
+        edit.playing = "now".into();
+        edit.before[1] = "changed".into();
+        assert!(edit.command(&state).is_none());
     }
 
     /// A Next up click counts the rows librespot's Next stops on, which the

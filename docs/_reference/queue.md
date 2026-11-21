@@ -174,28 +174,20 @@ Since 0.8.0, selecting several playlist rows and choosing
 For example, selecting B, C, B adds all three rows. A repeated click still
 counts once, and the notification reports only the rows actually added.
 
-11. **Dragging within *Next in queue* reorders it.** On this computer,
-    the app clears its own player's queue and re-adds the songs in the new
-    order. There, dropping a song dragged from elsewhere at a position in
-    *Next in queue* inserts it at that position. On another device, a row of
-    *Next in queue* can be dragged to a new place when the device's Connect
-    state allows reordering. The app sends the new order with Connect's
-    `set_queue` command, which can rearrange and drop the device's queued
-    songs but not add new ones. There, a song dragged from elsewhere is
-    added to the end, exactly like **Add to queue**. While a song is
-    dragged over the queue, a green line shows where it will land, as in a
-    playlist. A row of the queue dropped back on the queue is never queued
-    again: a row of *Next in queue* moves, and when it cannot move yet
-    (songs just added have not reached the device, or the device does not
-    allow reordering) it stays put and a note says why. The Now playing row
-    is not queued again either, nor is a row of *Next in queue* dropped on
-    the player bar's Queue button. A row of the section after it can be
-    dragged into *Next in queue* or onto the Queue button, and is queued
-    like a song from elsewhere. Its row also stays where it was, because
-    that section plays from the current context and is not a list
-    Spotifast can rewrite, so the song plays again when the context
-    reaches it. While *Next in queue* is empty, a drop anywhere on the
-    queue starts it.
+11. **Drag a song to change its place in the play order.** The green line
+    shows where it will play. Drag between rows in *Next up* or *Next from*,
+    or between that section and *Next in queue*. Moving a row moves that
+    occurrence once, including when another occurrence has the same title.
+    Dropping a Next up row on the Queue button moves it to the end of the
+    manual queue. To start an empty manual queue, use the button or drop
+    above the Next up heading. These edits use the player's current queue
+    and require a device that accepts the edit. If its queue has changed,
+    pick up the song again.
+
+    Drag from a playlist into the queue to add songs to the listening
+    session. Drop a song from either queue section onto an editable
+    playlist to save it there. Changes to the play order affect the
+    listening session only.
 
 12. **A song you queued can be removed on its own.** Right-click a row
     under *Next in queue*, or open its **…** menu, and choose **Remove

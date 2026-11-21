@@ -1036,6 +1036,14 @@ pub enum RowContext {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueOrigin {
+    pub device: Option<String>,
+    pub playing: String,
+    pub manual: usize,
+    pub rows: Vec<String>,
+}
+
 /// Track data held during a drag.
 #[derive(Clone, Debug)]
 pub struct DragTrack {
@@ -1054,6 +1062,7 @@ pub struct DragTrack {
     /// are. Several rows have no `from`, and dropping them back into their
     /// own playlist must not add copies of them (#669).
     pub source_playlist: Option<String>,
+    pub queue_origin: Option<QueueOrigin>,
 }
 
 /// The `from` origin of a row dragged out of Next in queue.
@@ -1270,6 +1279,11 @@ pub enum Action {
     MoveInQueue {
         from: usize,
         to: usize,
+    },
+    DropInPlaybackQueue {
+        track: Box<DragTrack>,
+        slot: usize,
+        manual: bool,
     },
     /// Insert dragged songs into "Playing next" at a position, instead of
     /// always appending like `QueueMany`. Falls back to appending when the

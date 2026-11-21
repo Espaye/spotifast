@@ -3614,6 +3614,7 @@ mod tests {
                 image: None,
                 items: vec![song],
                 from: None,
+                queue_origin: None,
                 source_playlist: None,
             },
         );
@@ -3677,6 +3678,7 @@ mod tests {
                     ..Default::default()
                 })],
                 from: None,
+                queue_origin: None,
                 source_playlist: None,
             },
         );
@@ -10503,6 +10505,7 @@ mod tests {
                     image: None,
                     items: dragged.clone(),
                     from: None,
+                    queue_origin: None,
                     source_playlist: None,
                 },
             );
@@ -11451,104 +11454,18 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// "Next up" plays from the current context, not from a list Spotifast
-    /// can rewrite, so it is never a drop target: dropping a queued row on
-    /// it must not move or insert anything, even though the row sits inside
-    /// the same scrollable list as "Playing next".
     #[test]
-    fn dropping_a_queued_row_on_next_up_does_nothing() {
-        let (ctx, mut app) = accessible_app("queue-reorder-next-up-not-a-target");
+    fn a_manual_row_moves_into_next_up_once() {
+        let (ctx, mut app) = accessible_app("queue-to-next-up");
         app.show_queue_panel = true;
-        let uris = seed_queued_songs(&mut app);
-        for _ in 0..3 {
-            frame_events(&ctx, &mut app, vec![]);
-        }
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        // "Otomo" is also a demo library track shown elsewhere on the page
-        // behind the queue side panel, so match on the queue panel's own
-        // on-screen column (it opens flush against the right edge) rather
-        // than the first node with a matching label.
-        let row_rect = |name: &str| {
-            let prefix = format!("Play {name},");
-            let bounds = tree
-                .nodes
-                .iter()
-                .find(|(_, node)| {
-                    node.role() == egui::accesskit::Role::Button
-                        && node.label().is_some_and(|text| text.starts_with(&prefix))
-                        && node
-                            .bounds()
-                            .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
-                })
-                .unwrap_or_else(|| panic!("missing on-screen queue row {name}"))
-                .1
-                .bounds()
-                .unwrap();
-            egui::Rect::from_min_max(
-                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
-                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
-            )
-        };
-        let start_row = row_rect("Queued 0");
-        let start = egui::pos2(start_row.left() + 80.0, start_row.center().y);
-        // "Otomo" is the first row of "Next up", from the default demo
-        // queue past the three manually queued rows seeded above.
-        let next_up_row = row_rect("Otomo");
-        // The "Next up" heading sits just below Playing next's last row.
-        let heading = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
-            .and_then(|(_, node)| node.bounds())
-            .expect("the Next up heading");
-        let heading = egui::Rect::from_min_max(
-            egui::pos2(heading.x0 as f32, heading.y0 as f32),
-            egui::pos2(heading.x1 as f32, heading.y1 as f32),
-        );
-
-        for end in [
-            egui::pos2(next_up_row.left() + 130.0, next_up_row.center().y),
-            egui::pos2(heading.left() + 130.0, heading.center().y),
-            egui::pos2(heading.left() + 130.0, heading.top() + 1.0),
-        ] {
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![
-                    egui::Event::PointerMoved(start),
-                    egui::Event::PointerButton {
-                        pos: start,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            );
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![egui::Event::PointerMoved(start + egui::vec2(15.0, -10.0))],
-            );
-            egui::DragAndDrop::payload::<DragTrack>(&ctx).expect("a reorderable queue row drags");
-
-            frame_events(&ctx, &mut app, vec![egui::Event::PointerMoved(end)]);
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![egui::Event::PointerButton {
-                    pos: end,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            frame_events(&ctx, &mut app, vec![]);
-
-            assert_eq!(
-                app.manual_queue, uris,
-                "Next up is never a drop target: nothing moves or gets inserted (dropped at {end:?})"
-            );
-        }
+        let manual = seed_queued_songs(&mut app);
+        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        let mut expected = app.queue_origin().unwrap().rows;
+        let moved = expected.remove(0);
+        expected.insert(2, moved);
+        drag_queue_row_onto(&ctx, &mut app, "Queued 0", Some("Otomo"));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual[1..]);
         app.backend.shutdown();
     }
 
@@ -11643,152 +11560,22 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// With nothing manually queued yet, every row the open queue shows
-    /// belongs to "Next up", so the panel offers no drop target at all:
-    /// neither a Next up row nor its heading takes a dragged song. The
-    /// player bar's Queue button still does.
     #[test]
-    fn dropping_a_song_on_next_up_with_an_empty_playing_next_does_nothing() {
-        use egui::accesskit::Role;
-        let (ctx, mut app) = accessible_app("queue-empty-playing-next-not-a-target");
-        app.show_queue_panel = true;
-        // Make the local player the active target, like `seed_queued_songs`,
-        // but leave "Playing next" empty.
-        app.local_ready = true;
-        app.local.track = Some(crate::player::LocalTrack {
-            uri: app.now_playing().unwrap().uri,
-            ..Default::default()
-        });
-        app.local.playback = crate::player::Playback::Paused;
-        assert!(app.manual_queue.is_empty());
-        assert!(app.queue_locally_reorderable());
-
-        let source_uri = app
-            .queue
-            .get()
-            .unwrap()
-            .currently_playing
-            .clone()
-            .unwrap()
-            .uri()
-            .to_string();
-
-        for _ in 0..3 {
-            frame_events(&ctx, &mut app, vec![]);
-        }
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let bounds_of = |id: egui::accesskit::NodeId| {
-            let bounds = tree
-                .nodes
-                .iter()
-                .find(|(node, _)| *node == id)
-                .unwrap()
-                .1
-                .bounds()
-                .unwrap();
-            egui::Rect::from_min_max(
-                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
-                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
-            )
-        };
-        // "Otomo" is the first row of the default demo queue's "Next up".
-        // It is also a demo library track shown elsewhere on the page
-        // behind the queue side panel, so match on the queue panel's own
-        // on-screen column (it opens flush against the right edge) rather
-        // than the first node with a matching label.
-        let row = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| {
-                node.role() == Role::Button
-                    && node
-                        .label()
-                        .is_some_and(|text| text.starts_with("Play Otomo,"))
-                    && node
-                        .bounds()
-                        .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
-            })
-            .unwrap_or_else(|| panic!("missing on-screen queue row Otomo"))
-            .0;
-        let row = bounds_of(row);
-        let heading = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
-            .expect("the Next up heading")
-            .0;
-        let heading = bounds_of(heading);
-        // The player bar's Queue button, not the queue panel's Queue tab.
-        let button = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| {
-                node.role() == Role::Button
-                    && node.label() == Some("Queue")
-                    && node.bounds().is_some_and(|bounds| {
-                        bounds.y0 >= f64::from(800.0 - crate::theme::PLAYER_BAR_HEIGHT)
-                    })
-            })
-            .expect("the player bar's Queue button")
-            .0;
-        let button = bounds_of(button);
-
-        let drag_to = |app: &mut App, end: egui::Pos2| {
-            let start = egui::pos2(40.0, 755.0);
-            frame_events(
-                &ctx,
-                app,
-                vec![
-                    egui::Event::PointerMoved(start),
-                    egui::Event::PointerButton {
-                        pos: start,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            );
-            frame_events(
-                &ctx,
-                app,
-                vec![egui::Event::PointerMoved(start + egui::vec2(20.0, -10.0))],
-            );
-            let payload = egui::DragAndDrop::payload::<DragTrack>(&ctx)
-                .expect("dragging the now-playing song should create a payload");
-            assert_eq!(payload.items[0].uri(), source_uri);
-            frame_events(&ctx, app, vec![egui::Event::PointerMoved(end)]);
-            frame_events(
-                &ctx,
-                app,
-                vec![egui::Event::PointerButton {
-                    pos: end,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            frame_events(&ctx, app, vec![]);
-        };
-
-        for end in [
-            egui::pos2(row.left() + 130.0, row.center().y),
-            egui::pos2(row.left() + 130.0, row.top() + 2.0),
-            heading.center(),
-            egui::pos2(heading.left() + 130.0, heading.top() - 2.0),
-        ] {
-            drag_to(&mut app, end);
-            assert!(
-                app.manual_queue.is_empty(),
-                "Next up is never a drop target, even when Playing next has no rows of its own (dropped at {end:?})"
-            );
-        }
-
-        drag_to(&mut app, button.center());
-        assert_eq!(
-            app.manual_queue,
-            vec![source_uri],
-            "the Queue button still queues the dropped song"
-        );
+    fn a_playlist_selection_inserts_into_next_up_in_order() {
+        let (ctx, mut app) = accessible_app("playlist-to-next-up");
+        seed_queued_songs(&mut app);
+        let before = app.queue_origin().unwrap();
+        let items: Vec<_> = app.playlist_pages["pl1"].items.items.iter()
+            .filter_map(|row| row.playable().cloned()).take(2).collect();
+        assert_eq!(items.len(), 2);
+        let slot = before.manual + 1;
+        let mut expected = before.rows;
+        expected.splice(slot..slot, items.iter().map(|item| item.uri().to_string()));
+        let track = DragTrack { items, title: String::new(), image: None, from: None,
+            source_playlist: Some("pl1".into()), queue_origin: None };
+        app.apply(Action::DropInPlaybackQueue { track: Box::new(track), slot, manual: false }, &ctx);
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.queued_rows_len(), before.manual);
         app.backend.shutdown();
     }
 
@@ -12050,60 +11837,38 @@ mod tests {
         payload
     }
 
-    /// A Next up row dropped on Next in queue is queued there, like a song
-    /// from elsewhere: at the drop line on this computer, at the end on a
-    /// device playing elsewhere.
     #[test]
-    fn a_next_up_row_dropped_on_next_in_queue_is_queued_there() {
-        for local in [true, false] {
-            let (ctx, mut app) = accessible_app(&format!("queue-next-up-drop-{local}"));
-            app.show_queue_panel = true;
-            let uris = seed_queued_songs(&mut app);
-            app.local_ready = local;
-            for _ in 0..3 {
-                frame_events(&ctx, &mut app, vec![]);
-            }
-            // "Otomo" is the first Next up row, after the three queued ones.
-            let otomo = app.queue.get().unwrap().queue[3].uri().to_string();
-            let payload = drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 1"));
-            assert_eq!(
-                payload.from,
-                Some((crate::model::UPCOMING_ROW.to_string(), 3)),
-                "local {local}"
-            );
-            let expected = if local {
-                vec![uris[0].clone(), otomo, uris[1].clone(), uris[2].clone()]
-            } else {
-                vec![uris[0].clone(), uris[1].clone(), uris[2].clone(), otomo]
-            };
-            assert_eq!(app.manual_queue, expected, "local {local}");
-            app.backend.shutdown();
-        }
+    fn next_up_to_manual_moves_the_existing_occurrence() {
+        let (ctx, mut app) = accessible_app("next-up-to-manual");
+        app.show_queue_panel = true;
+        let mut manual = seed_queued_songs(&mut app);
+        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        let mut expected = app.queue_origin().unwrap().rows;
+        let moved = expected.remove(3);
+        expected.insert(1, moved.clone());
+        manual.insert(1, moved);
+        drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 1"));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual);
+        app.backend.shutdown();
     }
 
-    /// With Next in queue empty, a Next up row dropped on the panel starts
-    /// Next in queue on this computer's player too.
     #[test]
-    fn a_next_up_row_dropped_on_an_empty_next_in_queue_starts_it() {
-        let (ctx, mut app) = accessible_app("queue-next-up-drop-empty");
+    fn next_up_reorders_with_an_empty_manual_queue() {
+        let (ctx, mut app) = accessible_app("reorder-next-up");
         app.show_queue_panel = true;
         seed_queued_songs(&mut app);
-        if let Loadable::Loaded(queue) = &mut app.queue {
-            queue.queue.drain(..3);
-        }
+        if let Loadable::Loaded(queue) = &mut app.queue { queue.queue.drain(..3); }
         app.manual_queue.clear();
-        assert!(app.queue_locally_reorderable());
-        for _ in 0..3 {
-            frame_events(&ctx, &mut app, vec![]);
-        }
-        let first = app.queue.get().unwrap().queue[0].name().to_string();
-        let dragged = app.queue.get().unwrap().queue[1].clone();
-        let payload = drag_queue_row_onto(&ctx, &mut app, dragged.name(), Some(&first));
-        assert_eq!(
-            payload.from,
-            Some((crate::model::UPCOMING_ROW.to_string(), 1))
-        );
-        assert_eq!(app.manual_queue, vec![dragged.uri().to_string()]);
+        for _ in 0..3 { frame_events(&ctx, &mut app, vec![]); }
+        let queue = &app.queue.get().unwrap().queue;
+        let first = queue[0].name().to_owned();
+        let second = queue[1].name().to_owned();
+        let mut expected = app.queue_origin().unwrap().rows;
+        expected.swap(0, 1);
+        drag_queue_row_onto(&ctx, &mut app, &second, Some(&first));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert!(app.manual_queue.is_empty());
         app.backend.shutdown();
     }
 
@@ -12764,6 +12529,7 @@ mod tests {
                     image: None,
                     items: dragged,
                     from: (mode == "foreign").then(|| ("pl2".into(), 5)),
+                    queue_origin: None,
                     source_playlist: match mode {
                         "foreign" => Some("pl2".into()),
                         "own-multiple" => Some("pl1".into()),
@@ -13118,6 +12884,7 @@ mod tests {
                 ..Default::default()
             })],
             from: Some(("pl1".into(), from as u32)),
+            queue_origin: None,
             source_playlist: Some("pl1".into()),
         };
 

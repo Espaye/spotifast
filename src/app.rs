@@ -30338,11 +30338,17 @@ mod tests {
         assert!(!app.devices_loading, "a fresh list is not fetched again");
         app.apply(Action::ToggleDevicesPopup, &ctx);
         assert!(app.show_devices);
-        assert!(!app.devices_loading, "the picker shows the list just fetched");
+        assert!(
+            !app.devices_loading,
+            "the picker shows the list just fetched"
+        );
         app.apply(Action::ToggleDevicesPopup, &ctx);
         app.devices_warmed_at = Some(Instant::now() - DEVICES_WARM);
         app.apply(Action::ToggleDevicesPopup, &ctx);
-        assert!(app.devices_loading, "an older list is fetched again on opening");
+        assert!(
+            app.devices_loading,
+            "an older list is fetched again on opening"
+        );
     }
 
     /// Resting on an album's card fetches the album, one at a time and never

@@ -551,7 +551,15 @@ pub fn warm_card_covers(
     let columns = grid_columns(ui.available_width());
     let url = |index: usize| if index < count { url(index) } else { None };
     let rows = (count.div_ceil(columns), columns);
-    warm_covers(ui, app, rows, card_height + CARD_GAP, CARDS_AHEAD, CARD_ART, url);
+    warm_covers(
+        ui,
+        app,
+        rows,
+        card_height + CARD_GAP,
+        CARDS_AHEAD,
+        CARD_ART,
+        url,
+    );
 }
 
 /// Fetches and makes the covers `screens` heights of the visible list above
@@ -657,7 +665,9 @@ pub fn virtual_wrapped_cards(
 fn grid_columns(width: f32) -> usize {
     let spacing = CARD_GAP / 2.0;
     let width = width.max(CARD_WIDTH);
-    ((width + spacing) / (CARD_WIDTH + spacing)).floor().max(1.0) as usize
+    ((width + spacing) / (CARD_WIDTH + spacing))
+        .floor()
+        .max(1.0) as usize
 }
 
 /// How long the pointer rests on a card before the page it opens is
@@ -5577,10 +5587,15 @@ mod tests {
         assert_eq!(grid_columns(CARD_WIDTH * 2.0 + CARD_GAP / 2.0 - 1.0), 1);
         let (mut tops, mut width) = (Vec::new(), 0.0);
         let size = vec2(800.0, 400.0);
-        run(size, Rect::from_min_size(pos2(0.0, 0.0), size), Vec::new(), |ui| {
-            width = ui.available_width();
-            virtual_wrapped_cards(ui, 40, 180.0, |ui, _| tops.push(ui.min_rect().top()));
-        });
+        run(
+            size,
+            Rect::from_min_size(pos2(0.0, 0.0), size),
+            Vec::new(),
+            |ui| {
+                width = ui.available_width();
+                virtual_wrapped_cards(ui, 40, 180.0, |ui, _| tops.push(ui.min_rect().top()));
+            },
+        );
         let first_row = tops.iter().take_while(|top| (**top - tops[0]).abs() < 0.5);
         assert_eq!(first_row.count(), grid_columns(width));
         assert!(grid_columns(width) > 1);
@@ -5613,7 +5628,11 @@ mod tests {
             rested
         };
         assert_eq!(frame(0.0, Some(pos2(50.0, 50.0))), [false; 2]);
-        assert_eq!(frame(0.1, None), [false; 2], "passing over asks for nothing");
+        assert_eq!(
+            frame(0.1, None),
+            [false; 2],
+            "passing over asks for nothing"
+        );
         assert_eq!(frame(0.4, None), [true, false]);
         assert_eq!(frame(0.5, None), [false; 2], "once per visit");
         assert_eq!(frame(0.6, Some(pos2(200.0, 50.0))), [false; 2]);

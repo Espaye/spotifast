@@ -626,6 +626,8 @@ pub struct App {
     queue_fetched_at: Option<Instant>,
     /// Latest queue request sequence. Older responses are discarded.
     queue_seq: u64,
+    /// Target owning the displayed rows and the outstanding queue read.
+    queue_target: Option<(Target, Option<String>)>,
     /// When to retry after a stale queue response.
     queue_recheck_at: Option<Instant>,
     queue_stale_retries: u8,
@@ -1455,6 +1457,7 @@ impl App {
             },
             queue_fetched_at: None,
             queue_seq: 0,
+            queue_target: None,
             queue_recheck_at: None,
             queue_stale_retries: 0,
             queue_details_pending: Vec::new(),
@@ -3921,6 +3924,9 @@ impl App {
 
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
+        self.forget_playback_queue();
+        self.local_queue = None;
+        self.remote_queue = None;
         self.pending_repeat = None;
         self.adjacent_lyrics.clear();
         self.remote_previous = None;
@@ -4223,6 +4229,9 @@ impl App {
             self.poll_remote_soon();
         }
         self.local = state;
+        if self.queue_target.is_some() {
+            self.bind_playback_queue();
+        }
         if self.local.playback == Playback::Playing
             && !self.local.loading
             && self.local.error.is_none()
@@ -7770,7 +7779,52 @@ impl App {
         }
     }
 
+    fn playback_queue_target(&self) -> (Target, Option<String>) {
+        let target = self.target();
+        let device = match &target {
+            Target::Local => self.local_device_id.clone(),
+            Target::Remote(Some(id)) => Some(id.clone()),
+            Target::Remote(None) => self.remote_queue.as_ref().map(|view| view.device.clone()),
+        };
+        (target, device)
+    }
+
+    fn forget_playback_queue(&mut self) {
+        self.queue_seq += 1;
+        self.queue_target = None;
+        self.queue = Loadable::NotLoaded;
+        self.queue_fetched_at = None;
+        self.queue_recheck_at = None;
+        self.queue_stale_retries = 0;
+        self.manual_queue.clear();
+        self.pending_queue_adds.clear();
+        self.pending_queue_batches.clear();
+        self.pending_album_queues.clear();
+        self.last_album_queue = None;
+        self.queue_edits.clear();
+        self.queue_cleared = None;
+        self.queue_removed = None;
+        self.queue_reorder_pending = None;
+        self.queue_shuffle_pending = None;
+        self.queue_details_pending.clear();
+        self.queue_details_retry_at.clear();
+        self.queue_details_paused_until = None;
+        self.queue_skip = None;
+        self.queue_skip_unanswered = 0;
+        self.queue_start_pending = None;
+        self.remote_queue_logged = None;
+    }
+
+    fn bind_playback_queue(&mut self) {
+        let target = self.playback_queue_target();
+        if self.queue_target.as_ref().is_some_and(|old| *old != target) {
+            self.forget_playback_queue();
+        }
+        self.queue_target = Some(target);
+    }
+
     fn refresh_queue(&mut self, force: bool) {
+        self.bind_playback_queue();
         if !self.is_connected() || !self.network_reachable {
             return;
         }
@@ -7798,6 +7852,11 @@ impl App {
     /// rows as a fresh list instead used to take seconds, threw the
     /// context away, and left Spotify's copy of the queue to reappear.
     fn play_queue_item(&mut self, index: usize, uri: String) {
+        self.bind_playback_queue();
+        if self.queue.get().is_none() {
+            self.refresh_queue(true);
+            return;
+        }
         self.adopt_local_manual_queue();
         // A newer choice outranks a song still waiting for its radio.
         self.song_radio = None;
@@ -7979,6 +8038,9 @@ impl App {
     }
 
     fn queue_edit_allowed(&self, insert: bool) -> bool {
+        if self.queue_target.as_ref().is_some_and(|target| *target != self.playback_queue_target()) {
+            return false;
+        }
         (self.offline && self.queue_locally_reorderable()
             || self.queue_player_view().is_some_and(|view| {
                 (if insert {
@@ -8367,6 +8429,9 @@ impl App {
             .as_ref()
             .is_none_or(|shown| shown.rows != view.rows || shown.track != view.track);
         self.remote_queue = Some(view);
+        if self.queue_target.is_some() {
+            self.bind_playback_queue();
+        }
         if changed && self.remote_queue_view().is_some() {
             self.recheck_visible_queue();
         }
@@ -9664,6 +9729,9 @@ impl App {
                             state,
                             received_at: Instant::now(),
                         });
+                        if self.queue_target.is_some() {
+                            self.bind_playback_queue();
+                        }
                         if let Some(pending) = &self.pending_remote_previous
                             && pending.at.elapsed() < PLAYBACK_HOLD
                             && self.remote.as_ref().is_some_and(|remote| {
@@ -9763,6 +9831,11 @@ impl App {
                 }
             }
             ApiResponse::Queue { seq, mut result } => {
+                if self.queue_target.as_ref().is_some_and(|target| *target != self.playback_queue_target()) {
+                    self.bind_playback_queue();
+                    self.recheck_visible_queue();
+                    return;
+                }
                 if seq != self.queue_seq || self.queue_edit_in_flight() {
                     // A newer request supersedes this response.
                     return;
@@ -13225,6 +13298,10 @@ impl App {
             self.settled_remote_volume = None;
         }
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
+            if !matches!(self.target(), Target::Local) {
+                self.forget_playback_queue();
+                self.local_queue = None;
+            }
             self.selected_device = None;
             self.show_devices = false;
             if !self.local.is_active() {
@@ -13250,6 +13327,9 @@ impl App {
     }
 
     fn transfer_remote(&mut self, device_id: String, play: bool) {
+        if self.playback_queue_target().1.as_deref() != Some(device_id.as_str()) {
+            self.forget_playback_queue();
+        }
         self.selected_device = Some(device_id.clone());
         self.backend.api(ApiRequest::Transfer { device_id, play });
     }
@@ -24414,6 +24494,35 @@ mod tests {
         assert_eq!(row.uri(), track.uri);
         assert_eq!(row.name(), track.name);
         assert_eq!(row.duration_ms(), track.duration_ms);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn queue_rows_and_reads_cannot_cross_a_device_or_account_change() {
+        let mut app = app_with_local_manual_queue();
+        app.backend.set_offline(true);
+        app.local_ready = false;
+        app.selected_device = Some("first".into());
+        app.bind_playback_queue();
+        let old_seq = app.queue_seq;
+        let old = app.queue.get().unwrap().clone();
+        app.selected_device = Some("second".into());
+        app.handle_api(ApiResponse::Queue { seq: old_seq, result: Ok(old.clone()) });
+        assert!(app.queue.get().is_none());
+        assert!(app.manual_queue.is_empty());
+        app.show_queued_song("spotify:track:new", "New");
+        app.remote_queue = Some(crate::player::RemoteQueueView {
+            device: "second".into(),
+            ..Default::default()
+        });
+        let before_reset = app.queue_seq;
+        app.reset_data();
+        assert!(app.remote_queue.is_none());
+        assert!(app.local_queue.is_none());
+        assert!(app.manual_queue.is_empty());
+        assert!(app.pending_queue_adds.is_empty());
+        app.handle_api(ApiResponse::Queue { seq: before_reset, result: Ok(old) });
+        assert!(app.queue.get().is_none(), "the signed-out read stays discarded");
         app.backend.shutdown();
     }
 

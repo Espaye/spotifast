@@ -578,7 +578,8 @@ pub enum QueueEditOperation {
 
 impl QueueEdit {
     pub(crate) fn command(&self, state: &PlayerState) -> Option<serde_json::Value> {
-        self.tracks(state).map(|next| queue_command(state, next.iter().map(track_json).collect()))
+        self.tracks(state)
+            .map(|next| queue_command(state, next.iter().map(track_json).collect()))
     }
 
     fn tracks(&self, state: &PlayerState) -> Option<Vec<ProvidedTrack>> {
@@ -683,16 +684,29 @@ impl QueueEdit {
         };
         let mut actual = current.next_tracks.clone();
         actual.sort_by_key(|row| row.provider != QUEUE_PROVIDER);
-        let manual = wanted.iter().take_while(|row| row.provider == QUEUE_PROVIDER).count();
-        let actual_manual = actual.iter().take_while(|row| row.provider == QUEUE_PROVIDER).count();
+        let manual = wanted
+            .iter()
+            .take_while(|row| row.provider == QUEUE_PROVIDER)
+            .count();
+        let actual_manual = actual
+            .iter()
+            .take_while(|row| row.provider == QUEUE_PROVIDER)
+            .count();
         if actual_manual < manual || actual.len() - actual_manual != wanted.len() - manual {
             return false;
         }
-        let original_uids: std::collections::HashSet<_> = before.next_tracks.iter()
-            .filter(|row| !row.uid.is_empty()).map(|row| row.uid.as_str()).collect();
-        wanted.iter().zip(actual[..manual].iter().chain(&actual[actual_manual..]))
+        let original_uids: std::collections::HashSet<_> = before
+            .next_tracks
+            .iter()
+            .filter(|row| !row.uid.is_empty())
+            .map(|row| row.uid.as_str())
+            .collect();
+        wanted
+            .iter()
+            .zip(actual[..manual].iter().chain(&actual[actual_manual..]))
             .all(|(wanted, actual)| {
-                wanted.uri == actual.uri && wanted.provider == actual.provider
+                wanted.uri == actual.uri
+                    && wanted.provider == actual.provider
                     && wanted.metadata.get("hidden") == actual.metadata.get("hidden")
                     && (!original_uids.contains(actual.uid.as_str()) || wanted.uid == actual.uid)
             })
@@ -703,9 +717,13 @@ impl QueueEdit {
         view.track == self.playing
             && view.queued.len() >= manual
             && view.queued.iter().take(prefix).eq(expected[..prefix].iter())
-            && view.rows.iter().skip(view.queued.len())
+            && view
+                .rows
+                .iter()
+                .skip(view.queued.len())
                 .take(expected.len().saturating_sub(manual))
-                .map(|(uri, _)| uri).eq(expected[prefix..].iter())
+                .map(|(uri, _)| uri)
+                .eq(expected[prefix..].iter())
     }
 }
 
@@ -1423,7 +1441,11 @@ impl Engine {
             {
                 return None;
             }
-            return self.local_queue_state.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            return self
+                .local_queue_state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
         }
         let queue = self.remote_queue.lock().unwrap_or_else(|p| p.into_inner());
         if queue.device != device {
@@ -2917,37 +2939,59 @@ mod tests {
 
     #[test]
     fn duplicate_edits_need_a_new_revision_and_the_affected_occurrences() {
-        let mut state = player_state(provided("now", "n", "context"), vec![
-            provided("a", "first", "queue"), provided("a", "second", "queue"),
-            provided("tail", "t", "context"),
-        ]);
+        let mut state = player_state(
+            provided("now", "n", "context"),
+            vec![
+                provided("a", "first", "queue"),
+                provided("a", "second", "queue"),
+                provided("tail", "t", "context"),
+            ],
+        );
         state.queue_revision = "r0".into();
         let edit = super::QueueEdit {
-            playing: "now".into(), before: vec!["a".into(), "a".into()], manual: 2,
-            operation: super::QueueEditOperation::Move { from: 0, to: 2, into_manual: true },
+            playing: "now".into(),
+            before: vec!["a".into(), "a".into()],
+            manual: 2,
+            operation: super::QueueEditOperation::Move {
+                from: 0,
+                to: 2,
+                into_manual: true,
+            },
         };
         assert!(!edit.confirmed_state(&state, &state));
         let mut confirmed = state.clone();
         confirmed.queue_revision = "r1".into();
-        assert!(!edit.confirmed_state(&state, &confirmed), "a revision alone cannot swap retained UIDs");
+        assert!(
+            !edit.confirmed_state(&state, &confirmed),
+            "a revision alone cannot swap retained UIDs"
+        );
         confirmed.next_tracks.swap(0, 1);
         assert!(edit.confirmed_state(&state, &confirmed));
         for (index, row) in confirmed.next_tracks.iter_mut().enumerate() {
             row.uid = format!("fresh-{index}");
         }
-        assert!(edit.confirmed_state(&state, &confirmed), "some receivers replace all UIDs");
+        assert!(
+            edit.confirmed_state(&state, &confirmed),
+            "some receivers replace all UIDs"
+        );
         confirmed.next_tracks[2].uri = "unrelated".into();
-        assert!(!edit.confirmed_state(&state, &confirmed), "the untouched tail still matters");
+        assert!(
+            !edit.confirmed_state(&state, &confirmed),
+            "the untouched tail still matters"
+        );
     }
 
     #[test]
     fn an_empty_remove_prefix_cannot_confirm_an_unrelated_rewrite() {
-        let mut state = player_state(provided("now", "n", "context"), vec![
-            provided("a", "q", "queue"), provided("b", "b", "context"),
-        ]);
+        let mut state = player_state(
+            provided("now", "n", "context"),
+            vec![provided("a", "q", "queue"), provided("b", "b", "context")],
+        );
         state.queue_revision = "r0".into();
         let edit = super::QueueEdit {
-            playing: "now".into(), before: vec!["a".into()], manual: 1,
+            playing: "now".into(),
+            before: vec!["a".into()],
+            manual: 1,
             operation: super::QueueEditOperation::Remove { indexes: vec![0] },
         };
         let mut confirmed = state.clone();
@@ -2964,12 +3008,19 @@ mod tests {
             playing: "now".into(),
             before: vec!["a".into(), "b".into(), "c".into()],
             manual: 1,
-            operation: super::QueueEditOperation::Move { from: 1, to: 1, into_manual: true },
+            operation: super::QueueEditOperation::Move {
+                from: 1,
+                to: 1,
+                into_manual: true,
+            },
         };
         let view = super::RemoteQueueView {
             track: "now".into(),
             queued: vec!["a".into(), "b".into(), "d".into()],
-            rows: ["a", "b", "d", "c"].into_iter().map(|uri| (uri.into(), String::new())).collect(),
+            rows: ["a", "b", "d", "c"]
+                .into_iter()
+                .map(|uri| (uri.into(), String::new()))
+                .collect(),
             ..Default::default()
         };
         assert!(edit.confirmed(&view, &["a".into(), "b".into(), "c".into()], 2));

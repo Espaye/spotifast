@@ -3927,6 +3927,7 @@ impl App {
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
         self.forget_playback_queue();
+        self.resume_queue.clear();
         self.local_queue = None;
         self.remote_queue = None;
         self.pending_repeat = None;
@@ -4150,7 +4151,7 @@ impl App {
                 self.clear_play_pending();
             }
         }
-        if state.track != self.local.track && !passing {
+        if track_changed && !passing {
             self.clear_play_pending();
         }
         // A copy passed on the way does not settle what was asked for, and
@@ -7799,6 +7800,7 @@ impl App {
         self.queue_recheck_at = None;
         self.queue_stale_retries = 0;
         self.manual_queue.clear();
+        self.session_dirty = true;
         self.pending_queue_adds.clear();
         self.pending_queue_batches.clear();
         self.pending_album_queues.clear();
@@ -7819,8 +7821,16 @@ impl App {
 
     fn bind_playback_queue(&mut self) {
         let target = self.playback_queue_target();
-        if self.queue_target.as_ref().is_some_and(|old| *old != target) {
-            self.forget_playback_queue();
+        if let Some(old) = &self.queue_target
+            && *old != target
+        {
+            if old.0 == target.0 && old.1.is_none() {
+                // Learning an anonymous player's id invalidates the old read,
+                // but does not undo additions made before its first push.
+                self.queue_seq += 1;
+            } else {
+                self.forget_playback_queue();
+            }
         }
         self.queue_target = Some(target);
     }
@@ -8040,7 +8050,11 @@ impl App {
     }
 
     fn queue_edit_allowed(&self, insert: bool) -> bool {
-        if self.queue_target.as_ref().is_some_and(|target| *target != self.playback_queue_target()) {
+        if self
+            .queue_target
+            .as_ref()
+            .is_some_and(|target| *target != self.playback_queue_target())
+        {
             return false;
         }
         (self.offline && self.queue_locally_reorderable()
@@ -8184,7 +8198,11 @@ impl App {
             .take(expected_len)
             .map(|item| item.uri().to_string())
             .collect();
-        let old_manual = before.iter().take(edit.manual).map(|item| item.uri().to_string()).collect();
+        let old_manual = before
+            .iter()
+            .take(edit.manual)
+            .map(|item| item.uri().to_string())
+            .collect();
         self.manual_queue = new_manual.clone();
         self.session_dirty = true;
         // The offline demo has no receiver to acknowledge an edit.
@@ -8275,9 +8293,17 @@ impl App {
         })
     }
 
-    fn queue_view_is_older(view: &crate::player::RemoteQueueView, shown: Option<&crate::player::RemoteQueueView>) -> bool {
-        shown.is_some_and(|shown| shown.device == view.device
-            && shown.published_at.zip(view.published_at).is_some_and(|(shown, incoming)| shown > incoming))
+    fn queue_view_is_older(
+        view: &crate::player::RemoteQueueView,
+        shown: Option<&crate::player::RemoteQueueView>,
+    ) -> bool {
+        shown.is_some_and(|shown| {
+            shown.device == view.device
+                && shown
+                    .published_at
+                    .zip(view.published_at)
+                    .is_some_and(|(shown, incoming)| shown > incoming)
+        })
     }
 
     fn note_local_queue(&mut self, view: crate::player::RemoteQueueView) {
@@ -8622,7 +8648,13 @@ impl App {
             crate::model::QueueRefusal::Locked { insert } => {
                 let target = self.target();
                 let view = self.queue_player_view();
-                let allowed = view.is_some_and(|view| if insert { view.can_insert } else { view.can_reorder });
+                let allowed = view.is_some_and(|view| {
+                    if insert {
+                        view.can_insert
+                    } else {
+                        view.can_reorder
+                    }
+                });
                 let albums = self
                     .pending_queue_batches
                     .values()
@@ -8653,16 +8685,25 @@ impl App {
                         "Spotifast has not seen this device's queue yet. Try again in a moment.",
                     )
                 } else if !allowed && insert {
-                    gettext(self.locale, "This device does not let Spotifast insert into its queue")
+                    gettext(
+                        self.locale,
+                        "This device does not let Spotifast insert into its queue",
+                    )
                 } else if !allowed {
-                    gettext(self.locale, "This device does not let Spotifast reorder its queue")
+                    gettext(
+                        self.locale,
+                        "This device does not let Spotifast reorder its queue",
+                    )
                 } else if !self.pending_queue_adds.is_empty() || albums > 0 {
                     gettext(
                         self.locale,
                         "The songs just added are still on their way. Try again in a moment.",
                     )
                 } else {
-                    gettext(self.locale, "The queue is still updating. Try again in a moment.")
+                    gettext(
+                        self.locale,
+                        "The queue is still updating. Try again in a moment.",
+                    )
                 }
             }
         };
@@ -8671,7 +8712,12 @@ impl App {
 
     /// Legacy manual-row actions use the same positional edit path as a drag.
     fn move_in_remote_queue(&mut self, from: usize, to: usize) {
-        let Some(item) = self.queue.get().and_then(|queue| queue.queue.get(from)).cloned() else {
+        let Some(item) = self
+            .queue
+            .get()
+            .and_then(|queue| queue.queue.get(from))
+            .cloned()
+        else {
             return;
         };
         if from >= self.queued_rows_len() || to > self.queued_rows_len() {
@@ -8693,9 +8739,18 @@ impl App {
         if !self.remote_queue_editable(|view| view.can_remove) {
             return;
         }
-        let rows = self.queue.get().map(|queue| queue.queue.iter()
-            .take(self.queued_rows_len()).enumerate()
-            .map(|(index, item)| (index, item.uri().to_string())).collect::<Vec<_>>())
+        let rows = self
+            .queue
+            .get()
+            .map(|queue| {
+                queue
+                    .queue
+                    .iter()
+                    .take(self.queued_rows_len())
+                    .enumerate()
+                    .map(|(index, item)| (index, item.uri().to_string()))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         if self.remove_play_order_rows(&rows) {
             self.pending_album_queues.clear();
@@ -8983,7 +9038,8 @@ impl App {
         // not an earlier copy of it while a skip to a later one goes on.
         if let Some((uri, _)) = &self.queue_skip
             && self.queue_skip_in_flight()
-            && (self.queue_skip_unanswered > 0
+            && (matches!(self.target(), Target::Local)
+                || self.queue_skip_unanswered > 0
                 || fetched
                     .currently_playing
                     .as_ref()
@@ -9770,7 +9826,11 @@ impl App {
                 }
             }
             ApiResponse::Queue { seq, mut result } => {
-                if self.queue_target.as_ref().is_some_and(|target| *target != self.playback_queue_target()) {
+                if self
+                    .queue_target
+                    .as_ref()
+                    .is_some_and(|target| *target != self.playback_queue_target())
+                {
                     self.bind_playback_queue();
                     self.recheck_visible_queue();
                     return;
@@ -9781,9 +9841,9 @@ impl App {
                 }
                 if result.is_err() {
                     let mut fallback = self.queue.get().cloned().unwrap_or_else(|| Queue {
-                        currently_playing: self.current_track_uri().map(|uri| {
-                            self.optimistic_queue_item(&uri, &uri)
-                        }),
+                        currently_playing: self
+                            .current_track_uri()
+                            .map(|uri| self.optimistic_queue_item(&uri, &uri)),
                         queue: Vec::new(),
                     });
                     self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
@@ -11439,21 +11499,28 @@ impl App {
                                 let at = last.new_manual.len();
                                 let mut without_adds = queue.queue.clone();
                                 let added: Vec<_> = without_adds.drain(at..at + extra).collect();
-                                if without_adds.iter().take(last.expected.len())
-                                    .map(PlayableItem::uri).eq(last.expected.iter().map(String::as_str))
+                                if without_adds
+                                    .iter()
+                                    .take(last.expected.len())
+                                    .map(PlayableItem::uri)
+                                    .eq(last.expected.iter().map(String::as_str))
                                 {
                                     let mut restored = first.before;
                                     restored.splice(first.edit.manual..first.edit.manual, added);
                                     queue.queue = restored;
                                     for addition in &mut self.pending_queue_adds {
                                         if addition.manual_index >= at {
-                                            addition.manual_index = first.old_manual.len() + addition.manual_index - at;
+                                            addition.manual_index =
+                                                first.old_manual.len() + addition.manual_index - at;
                                         }
                                     }
                                     self.manual_queue.splice(..at, first.old_manual);
                                     for addition in &mut self.pending_queue_adds {
-                                        addition.required_count = self.manual_queue[..=addition.manual_index]
-                                            .iter().filter(|uri| uri.as_str() == addition.item.uri()).count();
+                                        addition.required_count = self.manual_queue
+                                            [..=addition.manual_index]
+                                            .iter()
+                                            .filter(|uri| uri.as_str() == addition.item.uri())
+                                            .count();
                                     }
                                     self.session_dirty = true;
                                 }
@@ -13537,12 +13604,18 @@ impl App {
 
     fn queue_add_required_count(&self, uri: &str) -> usize {
         let shown = self.queue.get().map_or(0, |queue| {
-            queue.queue[..self.queued_rows_len()].iter().filter(|item| item.uri() == uri).count()
+            queue.queue[..self.queued_rows_len()]
+                .iter()
+                .filter(|item| item.uri() == uri)
+                .count()
         });
-        let pending = self.pending_queue_adds.iter()
+        let pending = self
+            .pending_queue_adds
+            .iter()
             .filter(|addition| addition.item.uri() == uri)
             .map(|addition| addition.required_count)
-            .max().unwrap_or(0);
+            .max()
+            .unwrap_or(0);
         shown.max(pending) + 1
     }
 
@@ -22421,13 +22494,26 @@ mod tests {
         app.offline = false;
         app.local_ready = false;
         let now = "spotify:track:now";
-        app.remote = Some(RemoteSnapshot { state: sonos_playing(now), received_at: Instant::now() });
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing(now),
+            received_at: Instant::now(),
+        });
         app.queue = loaded_queue(now, &["spotify:track:a", "spotify:track:b", "spotify:track:c"]);
         app.remote_queue = Some(crate::player::RemoteQueueView {
-            device: "sonos".into(), track: now.into(),
+            device: "sonos".into(),
+            track: now.into(),
             queued: vec!["spotify:track:a".into()],
-            rows: app.queue.get().unwrap().queue.iter().map(|item| (item.uri().to_string(), String::new())).collect(),
-            can_reorder: true, can_remove: true, can_insert: true,
+            rows: app
+                .queue
+                .get()
+                .unwrap()
+                .queue
+                .iter()
+                .map(|item| (item.uri().to_string(), String::new()))
+                .collect(),
+            can_reorder: true,
+            can_remove: true,
+            can_insert: true,
             ..Default::default()
         });
         app
@@ -22439,8 +22525,10 @@ mod tests {
         app.locale = Locale::Dutch;
         app.remote_queue.as_mut().unwrap().can_insert = false;
         app.refuse_queue_drop(QueueRefusal::Locked { insert: true });
-        assert_eq!(app.toasts.last().unwrap().message,
-            "Op dit apparaat kan Spotifast geen nummers in de wachtrij invoegen");
+        assert_eq!(
+            app.toasts.last().unwrap().message,
+            "Op dit apparaat kan Spotifast geen nummers in de wachtrij invoegen"
+        );
         assert!(app.pending_queue_adds.is_empty());
         app.backend.shutdown();
     }
@@ -22451,11 +22539,16 @@ mod tests {
         app.clear_queue();
         assert_eq!(queue_uris(&app).1, ["spotify:track:b", "spotify:track:c"]);
         assert_eq!(app.queue_edits.len(), 1);
-        assert!(matches!(app.queue_edits[0].edit.operation,
-            crate::player::QueueEditOperation::Remove { .. }));
+        assert!(matches!(
+            app.queue_edits[0].edit.operation,
+            crate::player::QueueEditOperation::Remove { .. }
+        ));
         let track = DragTrack {
-            title: "C".into(), image: None, items: vec![queued_song("spotify:track:c")],
-            from: Some((UPCOMING_ROW.into(), 1)), source_playlist: None,
+            title: "C".into(),
+            image: None,
+            items: vec![queued_song("spotify:track:c")],
+            from: Some((UPCOMING_ROW.into(), 1)),
+            source_playlist: None,
             queue_origin: app.queue_origin(),
         };
         app.drop_in_playback_queue(track, 0, false);
@@ -22465,10 +22558,14 @@ mod tests {
         cleared.queued.clear();
         cleared.rows.remove(0);
         app.handle_api(ApiResponse::QueueEdited {
-            request: app.queue_edits[0].request, result: Ok(cleared),
+            request: app.queue_edits[0].request,
+            result: Ok(cleared),
         });
         assert_eq!(app.queue_edits.len(), 1);
-        assert_eq!(app.queue_edits[0].edit.before, ["spotify:track:b", "spotify:track:c"]);
+        assert_eq!(
+            app.queue_edits[0].edit.before,
+            ["spotify:track:b", "spotify:track:c"]
+        );
         app.backend.shutdown();
     }
 
@@ -22477,8 +22574,11 @@ mod tests {
         let mut app = app_with_connect_edit_rows();
         app.remote_queue.as_mut().unwrap().queued.clear();
         let track = DragTrack {
-            title: "C".into(), image: None, items: vec![queued_song("spotify:track:c")],
-            from: Some((UPCOMING_ROW.into(), 2)), source_playlist: None,
+            title: "C".into(),
+            image: None,
+            items: vec![queued_song("spotify:track:c")],
+            from: Some((UPCOMING_ROW.into(), 2)),
+            source_playlist: None,
             queue_origin: app.queue_origin(),
         };
         app.drop_in_playback_queue(track, 0, false);
@@ -22491,11 +22591,21 @@ mod tests {
         newer.rows.swap(1, 2);
         newer.published_at = Some(at + Duration::from_millis(1));
         app.note_remote_queue(newer.clone());
-        app.handle_api(ApiResponse::QueueEdited { request, result: Ok(acknowledged.clone()) });
+        app.handle_api(ApiResponse::QueueEdited {
+            request,
+            result: Ok(acknowledged.clone()),
+        });
         assert_eq!(app.remote_queue.as_ref(), Some(&newer));
-        assert_eq!(queue_uris(&app).1, ["spotify:track:c", "spotify:track:b", "spotify:track:a"]);
+        assert_eq!(
+            queue_uris(&app).1,
+            ["spotify:track:c", "spotify:track:b", "spotify:track:a"]
+        );
         app.note_remote_queue(acknowledged);
-        assert_eq!(app.remote_queue.as_ref(), Some(&newer), "late watcher events are ordered too");
+        assert_eq!(
+            app.remote_queue.as_ref(),
+            Some(&newer),
+            "late watcher events are ordered too"
+        );
         app.backend.shutdown();
     }
 
@@ -22506,20 +22616,34 @@ mod tests {
         app.offline = false;
         app.local_ready = false;
         let now = "spotify:track:now";
-        let [a, b, c, d] = ["spotify:track:a", "spotify:track:b", "spotify:track:c", "spotify:track:d"];
-        app.remote = Some(RemoteSnapshot { state: sonos_playing(now), received_at: Instant::now() });
+        let [a, b, c, d] = [
+            "spotify:track:a",
+            "spotify:track:b",
+            "spotify:track:c",
+            "spotify:track:d",
+        ];
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing(now),
+            received_at: Instant::now(),
+        });
         app.remote_queue = Some(crate::player::RemoteQueueView {
             device: "sonos".into(),
             track: now.into(),
             queued: vec![a.into()],
-            rows: [a, b, c].into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            rows: [a, b, c]
+                .into_iter()
+                .map(|uri| (uri.into(), uri.into()))
+                .collect(),
             can_reorder: true,
             ..Default::default()
         });
         app.queue = loaded_queue(now, &[a, b, c]);
         let track = DragTrack {
-            title: "B".into(), image: None, items: vec![queued_song(b)],
-            from: Some((UPCOMING_ROW.into(), 1)), source_playlist: None,
+            title: "B".into(),
+            image: None,
+            items: vec![queued_song(b)],
+            from: Some((UPCOMING_ROW.into(), 1)),
+            source_playlist: None,
             queue_origin: app.queue_origin(),
         };
         app.drop_in_playback_queue(track, 1, true);
@@ -22530,14 +22654,21 @@ mod tests {
         assert_eq!(queue_uris(&app).1, [a, b, d, c]);
         app.handle_api(ApiResponse::QueueEdited {
             request: edit,
-            result: Err(crate::api::ApiError::Status { status: 409, message: "Changed".into() }),
+            result: Err(crate::api::ApiError::Status {
+                status: 409,
+                message: "Changed".into(),
+            }),
         });
         assert_eq!(queue_uris(&app).1, [a, d, b, c]);
         assert_eq!(app.manual_queue, [a, d]);
         assert_eq!(app.pending_queue_adds[0].manual_index, 1);
         app.handle_api(ApiResponse::QueueBatchAdded {
-            request: write, added: 0,
-            result: Err(crate::api::ApiError::Status { status: 403, message: "Rejected".into() }),
+            request: write,
+            added: 0,
+            result: Err(crate::api::ApiError::Status {
+                status: 403,
+                message: "Rejected".into(),
+            }),
         });
         assert_eq!(queue_uris(&app).1, [a, b, c]);
         assert_eq!(app.manual_queue, [a]);
@@ -23015,7 +23146,10 @@ mod tests {
         app.local_queue = Some(crate::player::RemoteQueueView {
             device: "this-computer".into(),
             track: now.into(),
-            rows: [b, now, b].into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            rows: [b, now, b]
+                .into_iter()
+                .map(|uri| (uri.into(), uri.into()))
+                .collect(),
             ..Default::default()
         });
         app.handle_api(ApiResponse::Queue {
@@ -23037,14 +23171,21 @@ mod tests {
                 app.local_queue = Some(crate::player::RemoteQueueView {
                     device: "this-computer".into(),
                     track: expected.0.clone().unwrap(),
-                    rows: expected.1.iter().map(|uri| (uri.clone(), uri.clone())).collect(),
+                    rows: expected
+                        .1
+                        .iter()
+                        .map(|uri| (uri.clone(), uri.clone()))
+                        .collect(),
                     ..Default::default()
                 });
                 app.queue = Loadable::Loading;
             }
             app.handle_api(ApiResponse::Queue {
                 seq: app.queue_seq,
-                result: Err(crate::api::ApiError::Status { status: 503, message: "Unavailable".into() }),
+                result: Err(crate::api::ApiError::Status {
+                    status: 503,
+                    message: "Unavailable".into(),
+                }),
             });
             assert_eq!(queue_uris(&app), expected);
             assert!(app.queue_recheck_at.is_some());
@@ -23882,16 +24023,15 @@ mod tests {
         assert_eq!(queue_uris(&app), chosen, "the song from before");
 
         let mut state = app.local.clone();
-        state.track = track("spotify:track:c");
-        state.track_sequence += 1;
-        app.handle_local(state.clone());
-        assert!(app.queue_skip.is_some(), "c is on the way");
-        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
-
         state.track = track("spotify:track:b");
         state.track_sequence += 1;
         app.handle_local(state);
-        assert!(app.queue_skip.is_none(), "it plays");
+        assert!(
+            app.queue_skip.is_none(),
+            "one report of the new occurrence settles it"
+        );
+        assert!(!app.play_pending("spotify:track:b"));
+        assert_eq!(app.local.track_sequence, 1);
     }
 
     /// A skip that never lands does not hold the screen for good: once its
@@ -24601,6 +24741,30 @@ mod tests {
     }
 
     #[test]
+    fn learning_an_anonymous_devices_id_keeps_its_pending_adds() {
+        let mut app = app_with_local_manual_queue();
+        app.backend.set_offline(true);
+        app.local_ready = false;
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing("spotify:track:playing"),
+            received_at: Instant::now(),
+        });
+        app.bind_playback_queue();
+        app.show_queued_song("spotify:track:new", "New");
+        let shown = queue_uris(&app);
+        let old_seq = app.queue_seq;
+        app.note_remote_queue(crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: "spotify:track:playing".into(),
+            ..Default::default()
+        });
+        assert!(app.queue_seq > old_seq);
+        assert_eq!(queue_uris(&app), shown);
+        assert_eq!(app.pending_queue_adds.len(), 1);
+        app.backend.shutdown();
+    }
+
+    #[test]
     fn queue_rows_and_reads_cannot_cross_a_device_or_account_change() {
         let mut app = app_with_local_manual_queue();
         app.backend.set_offline(true);
@@ -24610,7 +24774,10 @@ mod tests {
         let old_seq = app.queue_seq;
         let old = app.queue.get().unwrap().clone();
         app.selected_device = Some("second".into());
-        app.handle_api(ApiResponse::Queue { seq: old_seq, result: Ok(old.clone()) });
+        app.handle_api(ApiResponse::Queue {
+            seq: old_seq,
+            result: Ok(old.clone()),
+        });
         assert!(app.queue.get().is_none());
         assert!(app.manual_queue.is_empty());
         app.show_queued_song("spotify:track:new", "New");
@@ -24624,8 +24791,14 @@ mod tests {
         assert!(app.local_queue.is_none());
         assert!(app.manual_queue.is_empty());
         assert!(app.pending_queue_adds.is_empty());
-        app.handle_api(ApiResponse::Queue { seq: before_reset, result: Ok(old) });
-        assert!(app.queue.get().is_none(), "the signed-out read stays discarded");
+        app.handle_api(ApiResponse::Queue {
+            seq: before_reset,
+            result: Ok(old),
+        });
+        assert!(
+            app.queue.get().is_none(),
+            "the signed-out read stays discarded"
+        );
         app.backend.shutdown();
     }
 
@@ -25401,7 +25574,12 @@ mod tests {
                     [PlayerCommand::ClearQueue]
                 ));
             } else {
-                app.apply(Action::PlayNext { items: vec![queued_song("spotify:track:new")] }, &ctx);
+                app.apply(
+                    Action::PlayNext {
+                        items: vec![queued_song("spotify:track:new")],
+                    },
+                    &ctx,
+                );
                 let expected = ["spotify:track:new", "spotify:track:a", "spotify:track:a"];
                 assert_eq!(app.manual_queue, expected);
                 let commands = app.backend.take_player_commands();

@@ -6548,10 +6548,15 @@ async fn edit_connect_queue(
     expected: &[String],
     manual: usize,
 ) -> ApiResult<crate::player::RemoteQueueView> {
-    edit_published_queue(device, edit, expected, manual,
+    edit_published_queue(
+        device,
+        edit,
+        expected,
+        manual,
         || engine.queue_state(device),
         |body| async move { crate::sonos::command(engine.session(), device, &body).await },
-    ).await
+    )
+    .await
 }
 
 async fn edit_published_queue<R, S, F>(
@@ -6595,8 +6600,11 @@ where
                         message: "The device's queue changed".into(),
                     });
                 }
-                let mut view = crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
-                if edit.confirmed_state(&state, &current) && edit.confirmed(&view, expected, manual) {
+                let mut view =
+                    crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
+                let confirmed = edit.confirmed_state(&state, &current)
+                    && edit.confirmed(&view, expected, manual);
+                if confirmed {
                     view.published_at = Some(published_at);
                     return Ok(view);
                 }
@@ -10462,24 +10470,47 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn queue_rewrites_wait_for_revisions_and_allow_an_append_but_time_out_on_old_pushes() {
-        use librespot_protocol::player::{PlayerState, ProvidedTrack};
         use crate::player::{QueueEdit, QueueEditOperation};
+        use librespot_protocol::player::{PlayerState, ProvidedTrack};
         use std::cell::RefCell;
         let row = |uri: &str, provider: &str| ProvidedTrack {
-            uri: uri.into(), uid: uri.into(), provider: provider.into(), ..Default::default()
+            uri: uri.into(),
+            uid: uri.into(),
+            provider: provider.into(),
+            ..Default::default()
         };
         let state = |revision: &str, rows| PlayerState {
             track: protobuf::MessageField::some(row("now", "context")),
-            queue_revision: revision.into(), next_tracks: rows, ..Default::default()
+            queue_revision: revision.into(),
+            next_tracks: rows,
+            ..Default::default()
         };
-        let r0 = state("r0", vec![row("a", "queue"), row("b", "context"), row("c", "context")]);
-        let r1 = state("r1", vec![row("a", "queue"), row("b", "queue"), row("d", "queue"), row("c", "context")]);
-        let r2 = state("r2", vec![row("a", "queue"), row("d", "queue"), row("c", "context")]);
+        let r0 = state(
+            "r0",
+            vec![row("a", "queue"), row("b", "context"), row("c", "context")],
+        );
+        let r1 = state(
+            "r1",
+            vec![
+                row("a", "queue"),
+                row("b", "queue"),
+                row("d", "queue"),
+                row("c", "context"),
+            ],
+        );
+        let r2 = state(
+            "r2",
+            vec![row("a", "queue"), row("d", "queue"), row("c", "context")],
+        );
         let pending = RefCell::new(VecDeque::from([r0.clone(), r0, r1.clone()]));
         let bodies = RefCell::new(Vec::new());
         let mut read = || {
             let mut pending = pending.borrow_mut();
-            let state = if pending.len() > 1 { pending.pop_front() } else { pending.front().cloned() };
+            let state = if pending.len() > 1 {
+                pending.pop_front()
+            } else {
+                pending.front().cloned()
+            };
             state.map(|state| (state, Instant::now()))
         };
         let mut send = |body| {
@@ -10487,24 +10518,64 @@ mod tests {
             std::future::ready(Ok(()))
         };
         let first = QueueEdit {
-            playing: "now".into(), before: vec!["a".into(), "b".into(), "c".into()], manual: 1,
-            operation: QueueEditOperation::Move { from: 1, to: 1, into_manual: true },
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into(), "c".into()],
+            manual: 1,
+            operation: QueueEditOperation::Move {
+                from: 1,
+                to: 1,
+                into_manual: true,
+            },
         };
-        edit_published_queue("device", &first, &["a".into(), "b".into(), "c".into()], 2, &mut read, &mut send).await.unwrap();
+        edit_published_queue(
+            "device",
+            &first,
+            &["a".into(), "b".into(), "c".into()],
+            2,
+            &mut read,
+            &mut send,
+        )
+        .await
+        .unwrap();
         *pending.borrow_mut() = VecDeque::from([r1, r2.clone()]);
         let second = QueueEdit {
-            playing: "now".into(), before: vec!["a".into(), "b".into(), "d".into(), "c".into()], manual: 3,
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into(), "d".into(), "c".into()],
+            manual: 3,
             operation: QueueEditOperation::Remove { indexes: vec![1] },
         };
-        edit_published_queue("device", &second, &["a".into(), "d".into(), "c".into()], 2, &mut read, &mut send).await.unwrap();
+        edit_published_queue(
+            "device",
+            &second,
+            &["a".into(), "d".into(), "c".into()],
+            2,
+            &mut read,
+            &mut send,
+        )
+        .await
+        .unwrap();
         assert_eq!(bodies.borrow()[0]["command"]["queue_revision"], "r0");
         assert_eq!(bodies.borrow()[1]["command"]["queue_revision"], "r1");
         *pending.borrow_mut() = VecDeque::from([r2.clone()]);
         let third = QueueEdit {
-            playing: "now".into(), before: vec!["a".into(), "d".into(), "c".into()], manual: 2,
-            operation: QueueEditOperation::Move { from: 2, to: 0, into_manual: true },
+            playing: "now".into(),
+            before: vec!["a".into(), "d".into(), "c".into()],
+            manual: 2,
+            operation: QueueEditOperation::Move {
+                from: 2,
+                to: 0,
+                into_manual: true,
+            },
         };
-        let result = edit_published_queue("device", &third, &["c".into(), "a".into(), "d".into()], 3, &mut read, &mut send).await;
+        let result = edit_published_queue(
+            "device",
+            &third,
+            &["c".into(), "a".into(), "d".into()],
+            3,
+            &mut read,
+            &mut send,
+        )
+        .await;
         assert!(matches!(result, Err(ApiError::Status { status: 504, .. })));
         let mut late = r2;
         late.queue_revision = "r3".into();
@@ -10514,7 +10585,11 @@ mod tests {
         *pending.borrow_mut() = VecDeque::from([late]);
         let result = edit_published_queue("device", &third, &[], 0, &mut read, &mut send).await;
         assert!(matches!(result, Err(ApiError::Status { status: 409, .. })));
-        assert_eq!(bodies.borrow().len(), 3, "a late push cannot validate old positions");
+        assert_eq!(
+            bodies.borrow().len(),
+            3,
+            "a late push cannot validate old positions"
+        );
     }
 
     /// Avoids shared playlist search after a successful session read.

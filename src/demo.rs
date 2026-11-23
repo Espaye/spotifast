@@ -2885,6 +2885,20 @@ mod tests {
                 .map(|item| item.uri().to_string())
                 .collect();
             let saved_uris = app.queue_playlist_uris();
+            let context_heading = if app.playing_from().is_some() {
+                "Next from:"
+            } else {
+                "Next up"
+            };
+            let painted = view_frame(&ctx, &mut app, vec![], crate::ui::queue::side_panel);
+            for source in ["Next in queue", context_heading] {
+                assert!(
+                    painted
+                        .iter()
+                        .any(|(text, _)| text == &gettext(locale, source)),
+                    "missing translated queue heading: {source}"
+                );
+            }
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
             let save = accessible_node(&tree, &gettext(locale, "Save as a playlist"), Role::Button);
@@ -9170,7 +9184,7 @@ mod tests {
 
     /// The queue names where the playing song comes from, on one row
     /// with its label: the playlist, or the song a radio is seeded by.
-    /// With nothing reported, the row is not drawn.
+    /// Without a context it uses Next up.
     #[test]
     fn the_queue_names_where_the_song_plays_from() {
         let root = std::env::temp_dir().join(format!(
@@ -9242,7 +9256,7 @@ mod tests {
         // The name sits to the right of its label on one row. The sidebar
         // draws the same playlist name elsewhere, so look beside the label.
         let beside = |placed: &[(String, egui::Rect)], text: &str| {
-            let label = find(placed, "Playing from");
+            let label = find(placed, "Next from:");
             placed
                 .iter()
                 .find(|(drawn, rect)| {
@@ -9265,15 +9279,16 @@ mod tests {
         }
         beside(&drawn(&mut app), "Rosewood Radio");
 
-        // Nothing reported, nothing named.
+        // Without a context the upcoming section is still named.
         if let Some(remote) = app.remote.as_mut() {
             remote.state.context = None;
         }
         let placed = drawn(&mut app);
         assert!(
-            !placed.iter().any(|(text, _)| text == "Playing from"),
-            "the row hides without a context"
+            !placed.iter().any(|(text, _)| text == "Next from:"),
+            "no context name is shown"
         );
+        find(&placed, "Next up");
         app.backend.shutdown();
     }
 
@@ -11107,13 +11122,14 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// Dropping a dragged song anywhere on the open queue list (side panel
-    /// or full page) queues it. The queue has no positional drop slots, so
-    /// any point in the list works, not just the toggle button.
+    /// A drop at an upcoming row inserts into the context at that position,
+    /// leaving the manual section and the other occurrences intact.
     #[test]
-    fn dropping_a_dragged_song_on_the_open_queue_list_queues_it() {
+    fn dropping_a_dragged_song_on_the_open_queue_list_inserts_at_the_slot() {
         let (ctx, mut app) = accessible_app("queue-list-drop");
         app.show_queue_panel = true;
+        let manual = seed_queued_songs(&mut app);
+        let mut expected = app.queue_origin().unwrap().rows;
         let source_uri = app
             .queue
             .get()
@@ -11127,9 +11143,22 @@ mod tests {
             frame_events(&ctx, &mut app, vec![]);
         }
 
-        // A point well inside the queue side panel's body, clear of its
-        // close/save buttons and tab chips.
-        let end = egui::pos2(1100.0, 300.0);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let bounds = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node
+                        .label()
+                        .is_some_and(|text| text.starts_with("Play Otomo,"))
+                    && node.bounds().is_some_and(|bounds| bounds.x0 >= 900.0)
+            })
+            .expect("the first context row in the open queue")
+            .1
+            .bounds()
+            .unwrap();
+        let end = egui::pos2(bounds.x0 as f32 + 130.0, bounds.y0 as f32 + 1.0);
 
         let start = egui::pos2(40.0, 755.0);
         frame_events(
@@ -11166,13 +11195,12 @@ mod tests {
             }],
         );
 
-        assert_eq!(app.manual_queue, vec![source_uri]);
+        expected.insert(manual.len(), source_uri);
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual);
         assert!(
-            app.toasts
-                .iter()
-                .any(|toast| toast.message == "1 song added to queue"),
-            "{:?}",
-            app.toasts
+            app.backend.take_queue_requests().is_empty(),
+            "no append as well as the insert"
         );
         app.backend.shutdown();
     }
@@ -11990,7 +12018,7 @@ mod tests {
     }
 
     /// A Next in queue row dropped on the player bar's Queue button is not
-    /// queued again. A Next up row is, like Add to queue.
+    /// queued again. A Next up row moves into the manual section once.
     #[test]
     fn queue_rows_dropped_on_the_queue_button() {
         for (index, name) in ["Queued 1", "Otomo"].into_iter().enumerate() {
@@ -11998,6 +12026,8 @@ mod tests {
             app.show_queue_panel = true;
             let uris = seed_queued_songs(&mut app);
             let otomo = app.queue.get().unwrap().queue[3].uri().to_string();
+            let all_rows = app.queue_origin().unwrap().rows;
+            let sequence = app.local.track_sequence;
             for _ in 0..3 {
                 frame_events(&ctx, &mut app, vec![]);
             }
@@ -12010,6 +12040,16 @@ mod tests {
                 assert!(payload.is_queued_or_playing(), "{name}");
             }
             assert_eq!(app.manual_queue, expected, "{name}");
+            assert_eq!(
+                app.queue_origin().unwrap().rows,
+                all_rows,
+                "the occurrence moved without a copy"
+            );
+            assert_eq!(
+                app.local.track_sequence,
+                sequence,
+                "a queue drag does not start playback"
+            );
             app.backend.shutdown();
         }
     }

@@ -20498,7 +20498,7 @@ mod tests {
         );
         assert_eq!(
             TopPeriod::LongTerm.subtitle(en),
-            "Calculated from several years of listening history."
+            "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
         );
     }
 

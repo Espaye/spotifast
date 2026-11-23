@@ -2951,7 +2951,7 @@ mod tests {
 
     #[test]
     fn translated_lyrics_controls_keep_follow_retry_and_fullscreen_actions() {
-        use crate::i18n::{Locale, gettext, pgettext};
+        use crate::i18n::{Locale, gettext};
         use clap::ValueEnum;
         use egui::accesskit::{Action as AccessibleAction, Role};
 
@@ -2964,8 +2964,7 @@ mod tests {
             app.lyrics_following = false;
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let follow =
-                accessible_node(&tree, &pgettext(locale, "lyrics", "Follow"), Role::Button);
+            let follow = accessible_node(&tree, &gettext(locale, "Sync lyrics"), Role::Button);
             accessible_frame(
                 &ctx,
                 &mut app,
@@ -2983,8 +2982,7 @@ mod tests {
             assert!(app.lyrics_fullscreen.is_some());
             app.lyrics_following = false;
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let follow =
-                accessible_node(&tree, &pgettext(locale, "lyrics", "Follow"), Role::Button);
+            let follow = accessible_node(&tree, &gettext(locale, "Sync lyrics"), Role::Button);
             accessible_frame(
                 &ctx,
                 &mut app,
@@ -8824,7 +8822,8 @@ mod tests {
                             output.textures_delta.clear();
                         }
                         let dialog = app.dialog_rect.expect("playlist dialog");
-                        let limit = if edit { 600.0 } else { 360.0 };
+                        // Both forms carry a cover and a description.
+                        let limit = 600.0;
                         assert!(
                             dialog.height() <= limit,
                             "edit={edit}, busy={busy}, light={light}, size={size:?}: {dialog:?}"
@@ -9172,11 +9171,10 @@ mod tests {
             app.show_queue_panel = queue;
             app.show_lyrics_panel = lyrics;
             let placed = drawn(&mut app);
+            // The lyrics header holds only its title; Sync lyrics sits
+            // below the words.
             if queue {
                 assert_same_row(&placed, "Queue", "Recent");
-            }
-            if lyrics {
-                assert_same_row(&placed, "Lyrics", "Follow");
             }
         }
         app.backend.shutdown();
@@ -13675,8 +13673,14 @@ mod tests {
                         _ => None,
                     })
                     .collect();
+                // The player bar's toggles keep their colour and grow instead.
+                let saved = if place == "player bar" {
+                    app.palette.accent
+                } else {
+                    app.palette.accent_hover
+                };
                 assert!(
-                    tints.contains(&app.palette.accent_hover),
+                    tints.contains(&saved),
                     "a hovered {place} button in {theme} must still look saved: {tints:?}"
                 );
                 assert!(!tints.contains(&app.palette.text), "{place} in {theme}");

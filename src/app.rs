@@ -937,11 +937,6 @@ pub struct App {
     /// Nexts and Next up skips sent to another device and not answered
     /// yet. Each is answered as a `Next`.
     next_answers_due: usize,
-    /// That skip, on this computer, goes to a later copy of its song, or to
-    /// the song playing again: the reports of the song still to come, the
-    /// chosen copy's included. The engine reports each earlier copy as it
-    /// passes it.
-    queue_skip_copies: usize,
     pub playlist_busy: bool,
     creating_playlist: Option<(Vec<String>, Option<crate::playlist_cover::Cover>)>,
     pub quit_requested: bool,
@@ -1626,7 +1621,6 @@ impl App {
             queue_skip: None,
             queue_skip_unanswered: 0,
             next_answers_due: 0,
-            queue_skip_copies: 0,
             playlist_busy: false,
             creating_playlist: None,
             quit_requested: false,
@@ -4124,14 +4118,9 @@ impl App {
             .as_ref()
             .filter(|_| self.queue_skip_in_flight())
             .map(|(uri, _)| uri.clone());
-        let mut passing = track_changed
+        let passing = track_changed
             && skipping_to.is_some()
             && state.track.as_ref().map(|track| &track.uri) != skipping_to.as_ref();
-        // So is an earlier copy of its song, on the way to a later one.
-        if track_changed && skipping_to.is_some() && !passing && self.queue_skip_copies > 1 {
-            self.queue_skip_copies -= 1;
-            passing = true;
-        }
         if track_changed && !passing && self.queue_skip.take().is_some() {
             // Spotify's copy of the queue gets its own tries to catch up.
             self.queue_stale_retries = 0;
@@ -7888,11 +7877,6 @@ impl App {
                 // its way lands.
                 self.queue_skip = Some((uri.clone(), Instant::now()));
                 self.queue_skip_unanswered = 0;
-                self.queue_skip_copies = if occurrence > 0 || replays {
-                    occurrence + 1
-                } else {
-                    0
-                };
                 self.backend.player(PlayerCommand::SkipTo {
                     uri,
                     occurrence,
@@ -7917,7 +7901,6 @@ impl App {
                 } else {
                     0
                 };
-                self.queue_skip_copies = 0;
                 self.backend.api(ApiRequest::SkipTo {
                     device_id,
                     uri,
@@ -8997,7 +8980,6 @@ impl App {
         if let Some((uri, _)) = &self.queue_skip
             && self.queue_skip_in_flight()
             && (self.queue_skip_unanswered > 0
-                || self.queue_skip_copies > 0
                 || fetched
                     .currently_playing
                     .as_ref()
@@ -14604,7 +14586,6 @@ impl App {
                 if skipping && let Some(intent) = &self.intent_track {
                     // One more song for the skip to pass.
                     self.queue_skip = Some((intent.uri.clone(), Instant::now()));
-                    self.queue_skip_copies = 0;
                 }
                 match target {
                     Target::Local => self.backend.player(PlayerCommand::Next),
@@ -22997,10 +22978,7 @@ mod tests {
         );
     }
 
-    /// The songs a skip passes on its way to the chosen one play for a
-    /// moment at most. They take over neither the screen nor the queue, and
-    /// Spotify's copy from halfway, which lists the chosen song again under
-    /// the one before it, is not shown however long the skip takes.
+    /// A stale catalogue read cannot undo the single skip to the chosen row.
     #[test]
     fn songs_a_queue_skip_passes_on_its_way_do_not_show() {
         let ctx = egui::Context::default();
@@ -23030,21 +23008,6 @@ mod tests {
             vec!["spotify:track:d".to_string()],
         );
 
-        let mut passing = app.local.clone();
-        passing.track = track("spotify:track:b");
-        passing.track_sequence += 1;
-        app.handle_local(passing.clone());
-        assert_eq!(
-            app.current_track_uri().as_deref(),
-            Some("spotify:track:c"),
-            "the song passed on the way does not show as playing"
-        );
-        assert!(
-            app.play_pending("spotify:track:c"),
-            "the chosen song still loads"
-        );
-        assert_eq!(queue_uris(&app), chosen);
-
         let halfway = Queue {
             currently_playing: Some(queued_song("spotify:track:b")),
             queue: vec![
@@ -23064,7 +23027,7 @@ mod tests {
             "no second copy of the chosen song under the one passed"
         );
 
-        let mut landed = passing;
+        let mut landed = app.local.clone();
         landed.track = track("spotify:track:c");
         landed.track_sequence += 1;
         app.handle_local(landed);
@@ -23074,12 +23037,10 @@ mod tests {
         assert_eq!(app.queue_stale_retries, 0, "Spotify's copy may catch up");
     }
 
-    /// A skip on this computer to a later copy of a song passes the earlier
-    /// copy, and the engine reports it. It is one of the songs on the way:
-    /// neither it nor the song after it shows as playing, and Spotify's
-    /// copy of the queue from there is not shown.
+    /// The engine removes earlier copies without playing them, then reports
+    /// the chosen occurrence once. That report must settle the skip.
     #[test]
-    fn a_local_skip_to_a_later_copy_passes_the_earlier_one() {
+    fn a_local_skip_to_a_later_copy_settles_on_one_report() {
         let ctx = egui::Context::default();
         let mut app = headless_app();
         let track = |uri: &str| {
@@ -23113,17 +23074,6 @@ mod tests {
         );
 
         let mut state = app.local.clone();
-        for passed in ["spotify:track:b", "spotify:track:c"] {
-            state.track = track(passed);
-            state.track_sequence += 1;
-            app.handle_local(state.clone());
-            // A report of its progress alone settles nothing either.
-            state.position_ms += 1_000;
-            app.handle_local(state.clone());
-            assert!(app.queue_skip.is_some(), "{passed} is on the way");
-            assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:b"));
-            assert!(app.play_pending("spotify:track:b"));
-        }
         let halfway = Queue {
             currently_playing: Some(queued_song("spotify:track:b")),
             queue: vec![
@@ -23143,6 +23093,14 @@ mod tests {
         app.handle_local(state);
         assert!(app.queue_skip.is_none(), "it plays");
         assert!(!app.play_pending("spotify:track:b"));
+        assert_eq!(app.local.track_sequence, 1, "one playback transition");
+        let fresh = loaded_queue("spotify:track:b", &["spotify:track:d"]);
+        assert!(!app.queue_fetch_is_stale(fresh.get().unwrap()));
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(fresh.get().unwrap().clone()),
+        });
+        assert_eq!(queue_uris(&app), chosen);
     }
 
     /// Songs queued on another device, from any app, stay under Next in

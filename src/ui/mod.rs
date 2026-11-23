@@ -94,13 +94,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         );
     }
-    let fullscreen_controls = if app.lyrics_fullscreen.is_some() {
+    let mut hide_cursor = false;
+    if app.lyrics_fullscreen.is_some() {
         // The player bar slides away while nothing happens and comes back
         // with any input, over the lyrics rather than beside them.
         let controls = lyrics::fullscreen_controls(app, ctx, typed);
+        hide_cursor = lyrics::fullscreen_controls_idle(ctx) && app.dialog.is_none();
         lyrics::fullscreen(app, ui, controls);
         player_bar::overlay(app, ui, 1.0 - controls);
-        Some(controls)
     } else {
         lyrics::forget_fullscreen_controls(ctx);
         player_bar::show(app, ui);
@@ -117,8 +118,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             friends::side_panel(app, ui);
         }
         central(app, ui);
-        None
-    };
+    }
     keep_room_for_panels(app, ctx);
     devices::popup(app, ctx);
     dialogs::show(app, ctx);
@@ -127,10 +127,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
     caption_buttons(ui, &app.palette, app.locale);
     fastframe_titlebar::resize(ui);
-    if let Some(controls) = fullscreen_controls
-        && app.dialog.is_none()
-    {
-        lyrics::fade_fullscreen_cursor(ctx, controls);
+    if hide_cursor {
+        ctx.set_cursor_icon(egui::CursorIcon::None);
     }
 }
 

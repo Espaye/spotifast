@@ -217,6 +217,8 @@ struct TrackIntent {
     position_ms: u32,
     at: Instant,
     confirmation: TrackConfirmation,
+    /// Where a plain remote Next started, until the device reports where it landed.
+    next_from: Option<(Target, String)>,
 }
 
 /// The row a song was started from, so a list holding that song more than
@@ -805,6 +807,7 @@ pub struct App {
     /// first, as Spotify's latest push named them, for Previous to show at
     /// once.
     remote_previous: Option<(String, Vec<String>)>,
+    previous_metadata_requested: Option<String>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
     /// The main window's size, position and maximized state: from the
@@ -1547,6 +1550,7 @@ impl App {
             remote_recheck_at: None,
             remote_pushed_at: None,
             remote_previous: None,
+            previous_metadata_requested: None,
             seek_preview: None,
             volume_preview: None,
             window_geometry: fastframe_shell::window::Geometry {
@@ -2358,6 +2362,7 @@ impl App {
             position_ms,
             at: Instant::now(),
             confirmation,
+            next_from: None,
         });
     }
 
@@ -3903,6 +3908,8 @@ impl App {
     fn reset_data(&mut self) {
         self.pending_repeat = None;
         self.adjacent_lyrics.clear();
+        self.remote_previous = None;
+        self.previous_metadata_requested = None;
         self.lyrics_uri = None;
         self.lyrics = Loadable::NotLoaded;
         self.lyrics_retry_at = None;
@@ -4731,13 +4738,15 @@ impl App {
         uri: String,
         state: Loadable<Option<crate::lyrics::Lyrics>>,
     ) {
-        if self.adjacent_lyrics.len() == 2 {
+        self.adjacent_lyrics.retain(|(held, _)| *held != uri);
+        // Keep the previous track, the next track, and one more for a quick skip.
+        if self.adjacent_lyrics.len() == 3 {
             self.adjacent_lyrics.remove(0);
         }
         self.adjacent_lyrics.push((uri, state));
     }
 
-    fn prepare_next_song(&mut self, ui: &egui::Ui) {
+    fn prepare_adjacent_songs(&mut self, ui: &egui::Ui) {
         let reading = self.show_lyrics_panel || self.lyrics_fullscreen.is_some();
         let Some(now) = &self.frame_now else {
             return;
@@ -4753,30 +4762,58 @@ impl App {
         {
             return;
         }
-        let Some(queue) = self.queue.get() else {
-            return;
-        };
-        if queue.currently_playing.as_ref().map(PlayableItem::uri) != Some(now.uri.as_str()) {
-            return;
-        }
-        let Some(item @ PlayableItem::Track(track)) = queue.queue.first() else {
-            return;
-        };
-        if track.uri == now.uri || !self.row_playable(item) {
-            return;
-        }
-        let art = self.backend.art();
+        let current = now.uri.clone();
         let fullscreen = self.lyrics_fullscreen.is_some();
         let size = if fullscreen { 320.0 } else { 56.0 };
-        let current_art = self.small_art(now, size);
-        if current_art.is_some_and(|url| !art.is_settled(url)) {
+        if self
+            .small_art(now, size)
+            .is_some_and(|url| !self.backend.art().is_settled(url))
+        {
             return;
         }
         let pixels = if fullscreen { 640 } else { self.art_px(size) };
-        if let Some(url) = self.item_image(item, pixels)
-            && !art.has_copy(&url)
+        if let Some(queue) = self.queue.get()
+            && queue.currently_playing.as_ref().map(PlayableItem::uri) == Some(current.as_str())
+            && let Some(item @ PlayableItem::Track(track)) = queue.queue.first()
+            && track.uri != current
+            && self.row_playable(item)
         {
-            crate::ui::widgets::cover_copy(ui, &url, egui::Vec2::splat(size), Some(art));
+            let url = self.item_image(item, pixels);
+            if let Some(request) =
+                self.prepare_song_assets(ui, track, url.as_deref(), size, reading)
+            {
+                self.preload_lyrics(request);
+            }
+        }
+        if reading
+            && self.remote_elsewhere().is_some()
+            && !self.targets_own_soloist()
+            && let Some(uri) = self.remote_song_before()
+            && uri != current
+        {
+            self.prepare_previous_track(&uri);
+            if let Some(track) = util::uri_id(&uri).and_then(|id| self.track_cache.get(id))
+                && let Some(request) =
+                    self.prepare_song_assets(ui, track, track.image(pixels), size, true)
+            {
+                self.preload_lyrics(request);
+            }
+        }
+    }
+
+    fn prepare_song_assets(
+        &self,
+        ui: &egui::Ui,
+        track: &Track,
+        url: Option<&str>,
+        size: f32,
+        reading: bool,
+    ) -> Option<LyricsRequest> {
+        let art = self.backend.art();
+        if let Some(url) = url
+            && !art.has_copy(url)
+        {
+            crate::ui::widgets::cover_copy(ui, url, egui::Vec2::splat(size), Some(art));
         }
         if !reading
             || !matches!(self.lyrics, Loadable::Loaded(_))
@@ -4785,7 +4822,7 @@ impl App {
                 .iter()
                 .any(|(uri, state)| uri == &track.uri || state.is_loading())
         {
-            return;
+            return None;
         }
         let uri = track.uri.clone();
         let query = crate::lyrics::Query {
@@ -4803,12 +4840,16 @@ impl App {
             duration_ms: track.duration_ms,
         };
         let local_file = self.local_file(&uri).map(std::path::Path::to_path_buf);
-        self.remember_adjacent_lyrics(uri.clone(), Loadable::Loading);
-        self.backend.send(Command::Lyrics(Box::new(LyricsRequest {
+        Some(LyricsRequest {
             uri,
             query,
             local_file,
-        })));
+        })
+    }
+
+    fn preload_lyrics(&mut self, request: LyricsRequest) {
+        self.remember_adjacent_lyrics(request.uri.clone(), Loadable::Loading);
+        self.backend.send(Command::Lyrics(Box::new(request)));
     }
 
     /// Pushes the Winamp window's always-on-top level to the live window.
@@ -8713,8 +8754,19 @@ impl App {
             self.track_cache.entry(id.to_owned()).or_insert(track);
         }
         self.consume_manual_queue_head(&uri);
-        self.queue_start_pending = Some(self.target());
+        let target = self.target();
+        let next_from = current
+            .filter(|uri| {
+                matches!(target, Target::Remote(_))
+                    && !self.queue_skip_in_flight()
+                    && uri.starts_with("spotify:track:")
+            })
+            .map(|uri| (target.clone(), uri));
+        self.queue_start_pending = Some(target);
         self.expect_track(uri, 0);
+        if let Some(intent) = &mut self.intent_track {
+            intent.next_from = next_from;
+        }
     }
 
     /// Consume one queued occurrence, retaining any later copy of this song.
@@ -12794,27 +12846,64 @@ impl App {
     /// Whether Previous goes to the song before rather than restarting this
     /// one, by the three-second rule librespot and Spotify's devices follow.
     fn previous_steps_back(&self) -> bool {
-        let position = if self.resume_only() {
-            self.resume_position_ms
-        } else {
-            self.now_playing().map_or(0, |now| now.position_ms)
-        };
-        position <= RESTART_BEFORE_PREVIOUS
+        self.previous_position() <= RESTART_BEFORE_PREVIOUS
     }
 
-    /// The song Previous lands on another device, as Spotify's latest push
-    /// named it for the song shown now. A Previous pressed again before the
-    /// device answers steps back from the song the first one shows. A song
-    /// shown by a Next still on its way has no known song before it.
+    fn previous_position(&self) -> u32 {
+        if self.resume_only() {
+            return self.resume_position_ms;
+        }
+        if let Some(intent) = self.pending_remote_next() {
+            // The pending preview displays zero until the device catches up.
+            return intent.at.elapsed().as_millis() as u32;
+        }
+        self.now_playing().map_or(0, |now| now.position_ms)
+    }
+
+    fn pending_remote_next(&self) -> Option<&TrackIntent> {
+        self.intent_track.as_ref().filter(|intent| {
+            intent.at.elapsed() < PLAYBACK_HOLD
+                && intent
+                    .next_from
+                    .as_ref()
+                    .is_some_and(|(target, _)| *target == self.target())
+        })
+    }
+
+    /// The song before the one shown, including a Next still on its way.
     fn remote_song_before(&self) -> Option<String> {
-        let (playing, before) = self.remote_previous.as_ref()?;
         let shown = self.current_track_uri()?;
-        let at = if shown == *playing {
-            before.len()
-        } else {
-            before.iter().rposition(|uri| *uri == shown)?
-        };
+        if let Some((_, from)) = self
+            .pending_remote_next()
+            .and_then(|intent| intent.next_from.as_ref())
+        {
+            return Some(from.clone());
+        }
+        if let Some((playing, before)) = &self.remote_previous
+            && shown == *playing
+        {
+            return before.last().cloned();
+        }
+        let (_, before) = self.remote_previous.as_ref()?;
+        let at = before.iter().rposition(|uri| *uri == shown)?;
         at.checked_sub(1).map(|index| before[index].clone())
+    }
+
+    fn prepare_previous_track(&mut self, uri: &str) {
+        let Some(id) = uri.strip_prefix("spotify:track:") else {
+            return;
+        };
+        if let Some(context) = self.playing_context_uri() {
+            self.cache_track_from_context(&context, uri);
+        }
+        if !self.track_cache.contains_key(id)
+            && self.previous_metadata_requested.as_deref() != Some(id)
+        {
+            self.previous_metadata_requested = Some(id.to_owned());
+            if self.track_requests.insert(id.to_owned()) {
+                self.backend.api(ApiRequest::Track { id: id.to_owned() });
+            }
+        }
     }
 
     /// Choosing another song ends Repeat One and keeps repeating the rest,
@@ -14281,10 +14370,8 @@ impl App {
             }
             Action::Previous => {
                 self.resume_load = None;
-                let steps_back = self.previous_steps_back();
-                // Read before the expectation below goes: a Next still on
-                // its way shows a song Spotify has not named one before.
-                let position = self.now_playing().map_or(0, |now| now.position_ms);
+                let position = self.previous_position();
+                let steps_back = position <= RESTART_BEFORE_PREVIOUS;
                 let before = (position <= RESTART_BEFORE_PREVIOUS - REMOTE_PREVIOUS_MARGIN)
                     .then(|| self.remote_song_before())
                     .flatten();
@@ -14301,13 +14388,15 @@ impl App {
                         // goes now: the start, or the song before.
                         if !steps_back {
                             self.pending_remote_position = Some((0, Instant::now()));
-                        } else if let Some(uri) = before {
-                            if let Some(context) = self.playing_context_uri() {
-                                self.cache_track_from_context(&context, &uri);
-                            }
-                            self.expect_track(uri, 0);
+                        } else if let Some(uri) = &before {
+                            self.pending_remote_position = None;
+                            self.expect_track(uri.clone(), 0);
                         }
                         self.remote(RemoteAction::Previous, device_id);
+                        if let Some(uri) = before {
+                            self.prepare_previous_track(&uri);
+                        }
+                        ctx.request_repaint();
                     }
                 }
             }
@@ -16441,7 +16530,7 @@ impl App {
         let ctx = &ctx;
         self.pixels_per_point = ctx.pixels_per_point();
         self.refresh_frame_now();
-        self.prepare_next_song(ui);
+        self.prepare_adjacent_songs(ui);
         self.apply_theme(ctx);
         let autoscroll_on = crate::autoscroll::enabled(self.settings.middle_click_autoscroll);
         self.autoscroll.begin(ctx, autoscroll_on);
@@ -22152,8 +22241,8 @@ mod tests {
 
     /// Previous on another device shows the song it goes back to at once,
     /// the one Spotify's push names before the playing song, and after
-    /// three seconds the start of this one. Once a Next on its way shows a
-    /// song that push said nothing of, Previous guesses no song.
+    /// three seconds the start of this one. Previous immediately reverses
+    /// a Next whose new song the device has yet to confirm.
     #[test]
     fn previous_on_another_device_shows_where_it_goes_at_once() {
         let ctx = egui::Context::default();
@@ -22216,15 +22305,21 @@ mod tests {
         assert_eq!(shown.position_ms, 0, "from its start at once");
 
         app.pending_remote_position = None;
-        app.remote = Some(playing(1_000));
+        app.remote = Some(playing(60_000));
+        app.track_cache.insert("c".into(), song("spotify:track:c"));
         app.queue = loaded_queue("spotify:track:c", &["spotify:track:d"]);
+        app.refresh_frame_now();
         app.apply(Action::Next, &ctx);
+        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:d"));
+        let click_at = Instant::now();
         app.apply(Action::Previous, &ctx);
-        assert_ne!(
-            app.current_track_uri().as_deref(),
-            Some("spotify:track:b"),
-            "Next, Previous lands back on c, not on the song before it"
-        );
+        let intent = app
+            .intent_track
+            .as_ref()
+            .expect("preview before a device reply");
+        assert!(intent.at >= click_at);
+        assert_eq!(intent.uri, "spotify:track:c");
+        assert_eq!(app.requested_track_preview().unwrap().position_ms, 0);
     }
 
     /// A track is removed from Next up as soon as it starts.

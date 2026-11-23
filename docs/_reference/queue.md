@@ -80,6 +80,9 @@ not consume a queue row or restore an older queue saved on this computer.
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
 
+   A long queue can show more songs than Spotify includes in its first
+   response. Their titles, covers and durations fill in as the details arrive.
+
    Spotify pads a short queue by going round it again, back to the playing
    song, even with Repeat off. With Repeat off, Spotifast leaves out the
    rows from where the list comes back round, so a song started on its own,

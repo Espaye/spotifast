@@ -938,7 +938,7 @@ fn warm_queue_covers(
 /// queue, whichever section it sits in. `shift` parts rows around the slot
 /// a dragged row would land in, in the "Next in queue" section only.
 fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shift: f32) {
-    let Some(item) = app
+    let Some(mut item) = app
         .queue
         .get()
         .and_then(|queue| queue.queue.get(index))
@@ -946,6 +946,12 @@ fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shif
     else {
         return;
     };
+    if let PlayableItem::Track(track) = &mut item
+        && track.needs_queue_details()
+        && (track.name.is_empty() || track.name == track.uri)
+    {
+        track.name = gettext(app.locale, "Loading…").to_string();
+    }
     widgets::queue_track_row(
         ui,
         app,

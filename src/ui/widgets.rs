@@ -3049,15 +3049,17 @@ fn track_row_contents(
 
     // Duration.
     if cols.duration > 0.0 {
-        let duration_rect =
-            Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
-        painter.text(
-            pos2(duration_rect.right() - 6.0, duration_rect.center().y),
-            egui::Align2::RIGHT_CENTER,
-            util::format_duration_ms(row.item.duration_ms()),
-            theme::regular(13.0),
-            palette.secondary,
-        );
+        if !queue_menu || !row.item.needs_queue_details() {
+            let duration_rect =
+                Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
+            painter.text(
+                pos2(duration_rect.right() - 6.0, duration_rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                util::format_duration_ms(row.item.duration_ms()),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        }
         x += cols.duration;
     }
 

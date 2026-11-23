@@ -594,7 +594,11 @@ command logs one line with counts.
 
 Positional queue drags and removal of an individual upcoming song use the
 rows published by the built-in player or the active Connect device. The Web
-API supplies track details. Each edit appears immediately. Spotifast sends a
+API supplies track details. If its queue response covers fewer songs than
+the player's list, Spotifast looks up the missing details in batches over
+the same-account playback session. It reuses known details, limits the
+lookup to one batch at a time, and waits before retrying a failed lookup.
+Each edit appears immediately. Spotifast sends a
 `set_queue` command and waits for the player to publish the new queue before
 sending the next edit with its revision. Receivers that restrict these edits,
 including Soloist through its documented API, omit those controls.

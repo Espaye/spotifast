@@ -107,6 +107,8 @@ const REMOTE_PUSH_SPACING: Duration = Duration::from_secs(1);
 const QUEUE_RECHECK: Duration = Duration::from_millis(700);
 /// A queue on show fetched this recently is current enough to keep.
 const QUEUE_FRESH: Duration = Duration::from_secs(20);
+const QUEUE_DETAILS_BATCH: usize = 50;
+const QUEUE_DETAILS_RETRY: Duration = Duration::from_secs(60);
 /// How long a Next up click may take to reach its song. This computer's
 /// engine passes each song above it with a Next of its own, and each Next
 /// waits for a Connect state update; another device gets one skip naming
@@ -622,6 +624,9 @@ pub struct App {
     /// When to retry after a stale queue response.
     queue_recheck_at: Option<Instant>,
     queue_stale_retries: u8,
+    queue_details_pending: Vec<String>,
+    queue_details_retry_at: HashMap<String, Instant>,
+    queue_details_paused_until: Option<Instant>,
     /// Rows removed by Clear queue, used to detect stale responses.
     queue_cleared: Option<(std::collections::HashSet<String>, Instant)>,
     /// Upcoming context order before shuffle was toggled, used to detect lagging responses.
@@ -1449,6 +1454,9 @@ impl App {
             queue_seq: 0,
             queue_recheck_at: None,
             queue_stale_retries: 0,
+            queue_details_pending: Vec::new(),
+            queue_details_retry_at: HashMap::new(),
+            queue_details_paused_until: None,
             queue_cleared: None,
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
@@ -3999,6 +4007,9 @@ impl App {
         self.saved_recordings.clear();
         self.saved_writes.clear();
         self.queue = Loadable::NotLoaded;
+        self.queue_details_pending.clear();
+        self.queue_details_retry_at.clear();
+        self.queue_details_paused_until = None;
         self.queue_shuffle_pending = None;
         self.queue_edits.clear();
         self.local_queue = None;
@@ -8212,6 +8223,79 @@ impl App {
         true
     }
 
+    fn request_queue_details(&mut self) {
+        let now = Instant::now();
+        if !self.network_reachable
+            || !self.queue_on_show()
+            || self.queue_player_view().is_none()
+            || !self.queue_details_pending.is_empty()
+            || self
+                .queue_details_paused_until
+                .is_some_and(|until| now < until)
+        {
+            return;
+        }
+        self.queue_details_retry_at.retain(|_, until| *until > now);
+        let Some(queue) = self.queue.get() else {
+            return;
+        };
+        let mut seen = HashSet::new();
+        let uris: Vec<_> = queue
+            .queue
+            .iter()
+            .filter(|item| item.needs_queue_details())
+            .map(PlayableItem::uri)
+            .filter(|uri| !self.queue_details_retry_at.contains_key(*uri) && seen.insert(*uri))
+            .take(QUEUE_DETAILS_BATCH)
+            .map(str::to_owned)
+            .collect();
+        if !uris.is_empty() {
+            self.queue_details_pending = uris.clone();
+            self.backend.api(ApiRequest::QueueDetails { uris });
+        }
+    }
+
+    fn apply_queue_details(&mut self, items: Option<HashMap<String, PlayableItem>>) {
+        let pending = std::mem::take(&mut self.queue_details_pending);
+        if pending.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let retry_at = now + QUEUE_DETAILS_RETRY;
+        let Some(items) = items else {
+            self.queue_details_paused_until = Some(retry_at);
+            return;
+        };
+        for uri in pending {
+            match items.get(&uri) {
+                Some(PlayableItem::Track(track)) => {
+                    if let Some(id) = &track.id {
+                        let cached = self.track_cache.entry(id.clone()).or_default();
+                        if cached.name.is_empty() || cached.needs_queue_details() {
+                            *cached = track.clone();
+                        }
+                        self.track_used.insert(id.clone(), now);
+                    }
+                }
+                Some(PlayableItem::Episode(_)) => {}
+                None => {
+                    self.queue_details_retry_at.insert(uri, retry_at);
+                }
+            }
+        }
+        if let Some(queue) = self.queue.get_mut() {
+            // A track may have moved or started while the request was in flight.
+            for row in queue.currently_playing.iter_mut().chain(&mut queue.queue) {
+                if row.needs_queue_details()
+                    && let Some(item) = items.get(row.uri())
+                {
+                    *row = item.clone();
+                }
+            }
+        }
+        self.request_queue_details();
+    }
+
     /// Keeps a cluster push and asks for the queue again when what the
     /// device has queued changed, so Next in queue follows another app.
     fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
@@ -9660,7 +9744,9 @@ impl App {
                         .collect();
                     self.request_contains(uris);
                 }
+                self.request_queue_details();
             }
+            ApiResponse::QueueDetails { items } => self.apply_queue_details(items),
             ApiResponse::RecentlyPlayed {
                 who,
                 generation,
@@ -13523,17 +13609,19 @@ impl App {
     fn optimistic_queue_item(&self, uri: &str, label: &str) -> PlayableItem {
         let cached = util::uri_id(uri)
             .and_then(|id| self.track_cache.get(id))
+            .filter(|track| track.uri == uri && !track.needs_queue_details())
             .cloned();
         if let Some(track) = cached {
             return PlayableItem::Track(track);
         }
-        if let Some(item) = self.queue.get().and_then(|queue| {
+        let shown = self.queue.get().and_then(|queue| {
             queue
                 .currently_playing
                 .iter()
                 .chain(&queue.queue)
-                .find(|item| item.uri() == uri)
-        }) {
+                .find(|item| item.uri() == uri && !item.needs_queue_details())
+        });
+        if let Some(item) = shown {
             return item.clone();
         }
         if let Some(item) = self
@@ -22030,6 +22118,86 @@ mod tests {
                 .map(|item| item.uri().to_string())
                 .collect(),
         )
+    }
+
+    #[test]
+    fn a_long_queue_fills_missing_details_even_if_the_user_skips_during_the_read() {
+        for local in [true, false] {
+            let mut app = if local {
+                app_with_local_manual_queue()
+            } else {
+                headless_app()
+            };
+            app.backend.set_offline(true);
+            app.show_queue_panel = true;
+            let now = "spotify:track:playing";
+            let uris: Vec<_> = (0..47)
+                .map(|id| format!("spotify:track:{id:022}"))
+                .collect();
+            let view = crate::player::RemoteQueueView {
+                device: "queue-device".into(),
+                track: now.into(),
+                rows: uris
+                    .iter()
+                    .map(|uri| (uri.clone(), String::new()))
+                    .collect(),
+                ..Default::default()
+            };
+            if local {
+                app.manual_queue.clear();
+                app.local_device_id = Some(view.device.clone());
+                app.local_queue = Some(view);
+            } else {
+                app.local_ready = false;
+                app.remote = Some(RemoteSnapshot {
+                    state: sonos_playing(now),
+                    received_at: Instant::now(),
+                });
+                app.remote_queue = Some(view);
+            }
+            let detailed = |uri: &str| {
+                PlayableItem::Track(Track {
+                    uri: uri.into(),
+                    id: util::uri_id(uri).map(str::to_owned),
+                    name: "Song title".into(),
+                    duration_ms: 180_000,
+                    ..Default::default()
+                })
+            };
+            app.handle_api(ApiResponse::Queue {
+                seq: app.queue_seq,
+                result: Ok(Queue {
+                    currently_playing: Some(detailed(now)),
+                    queue: uris[..20].iter().map(|uri| detailed(uri)).collect(),
+                }),
+            });
+            assert_eq!(queue_uris(&app).1, uris);
+            assert_eq!(app.queue_details_pending, uris[20..]);
+
+            app.play_queue_item(22, uris[22].clone());
+            app.request_queue_details();
+            assert_eq!(app.queue_details_pending, uris[20..]);
+            app.handle_api(ApiResponse::QueueDetails {
+                items: Some(
+                    uris[20..]
+                        .iter()
+                        .map(|uri| (uri.clone(), detailed(uri)))
+                        .collect(),
+                ),
+            });
+            let (current, upcoming) = queue_uris(&app);
+            assert_eq!(current.as_deref(), Some(uris[22].as_str()));
+            assert_eq!(upcoming, uris[23..]);
+            let queue = app.queue.get().unwrap();
+            assert!(
+                queue
+                    .currently_playing
+                    .iter()
+                    .chain(&queue.queue)
+                    .all(|row| row.duration_ms() == 180_000)
+            );
+            assert!(app.queue_details_pending.is_empty());
+        }
     }
 
     /// What Spotify reports while a Sonos plays `uri`. The Web API names a

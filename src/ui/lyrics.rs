@@ -475,10 +475,11 @@ pub fn forget_fullscreen_controls(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<(f64, bool)>(controls_id()));
 }
 
-/// System cursors only show or hide. Draw the idle pointer while it fades
-/// so it uses the same opacity as the full-screen header.
+/// Use one arrow at every opacity so its shape does not change mid-fade.
+/// Interactive cursors still use the system's icons.
 pub fn fade_fullscreen_cursor(ctx: &egui::Context, controls: f32) {
-    if controls >= 1.0 || ctx.output(|output| output.cursor_icon) == egui::CursorIcon::None {
+    let icon = ctx.output(|output| output.cursor_icon);
+    if icon == egui::CursorIcon::None || (controls > 0.0 && icon != egui::CursorIcon::Default) {
         return;
     }
     ctx.set_cursor_icon(egui::CursorIcon::None);
@@ -1672,8 +1673,9 @@ mod tests {
     }
 
     #[test]
-    fn the_fullscreen_cursor_uses_the_controls_opacity() {
+    fn the_fullscreen_cursor_fades_without_changing_shape() {
         let ctx = egui::Context::default();
+        let mut points = Vec::new();
         for controls in [1.0, 0.75, 0.25, 0.0] {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -1687,21 +1689,35 @@ mod tests {
                 egui::Shape::Mesh(mesh) if mesh.vertices.len() == 7 => Some(mesh),
                 _ => None,
             });
-            if 0.0 < controls && controls < 1.0 {
+            if controls > 0.0 {
                 let expected = egui::Color32::WHITE.gamma_multiply(controls);
-                assert!(arrow.unwrap().vertices.iter().all(|v| v.color == expected));
+                let arrow = arrow.unwrap();
+                assert!(arrow.vertices.iter().all(|v| v.color == expected));
+                let positions: Vec<_> = arrow.vertices.iter().map(|v| v.pos).collect();
+                if controls == 1.0 {
+                    points = positions;
+                } else {
+                    assert_eq!(positions, points);
+                }
             } else {
                 assert!(arrow.is_none());
             }
-            assert_eq!(
-                output.platform_output.cursor_icon,
-                if controls == 1.0 {
-                    egui::CursorIcon::Default
-                } else {
-                    egui::CursorIcon::None
-                },
-            );
+            assert_eq!(output.platform_output.cursor_icon, egui::CursorIcon::None);
         }
+    }
+
+    #[test]
+    fn the_fullscreen_cursor_keeps_the_system_link_pointer() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            super::fade_fullscreen_cursor(ui.ctx(), 0.5);
+        });
+        output.textures_delta.clear();
+        assert_eq!(
+            output.platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! the interface with `request_repaint`, so the app stays event-driven and
 //! idle when nothing is happening.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -161,6 +161,9 @@ pub enum ApiRequest {
     },
     Queue {
         seq: u64,
+    },
+    QueueDetails {
+        uris: Vec<String>,
     },
     RecentlyPlayed {
         /// Request owner. Home and Recents use separate generation counters,
@@ -454,6 +457,9 @@ pub enum ApiResponse {
     Queue {
         seq: u64,
         result: ApiResult<Queue>,
+    },
+    QueueDetails {
+        items: Option<HashMap<String, PlayableItem>>,
     },
     RecentlyPlayed {
         who: RecentsFor,
@@ -5345,6 +5351,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::Show { .. }
         | ApiRequest::ShowEpisodes { .. }
         | ApiRequest::HomeEpisodes { .. }
+        | ApiRequest::QueueDetails { .. }
         | ApiRequest::Track { .. }
         | ApiRequest::Episode { .. } => Operation::Catalog,
     }
@@ -5699,6 +5706,23 @@ async fn handle(
     }
     let session_engine =
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()));
+    if let ApiRequest::QueueDetails { uris } = &request {
+        let items = if let Some(engine) = session_engine {
+            let _permit = background_session.acquire().await.ok();
+            match tokio::time::timeout(
+                SESSION_READ_TIMEOUT,
+                session_reads::queue_details(engine.session(), uris),
+            )
+            .await
+            {
+                Ok(Ok(items)) => Some(items),
+                Ok(Err(_)) | Err(_) => None,
+            }
+        } else {
+            None
+        };
+        return (ApiResponse::QueueDetails { items }, Vec::new());
+    }
     if let ApiRequest::NewReleases { generation } = request {
         let mut expired = Vec::new();
         let result =
@@ -5897,6 +5921,7 @@ async fn handle(
         ApiRequest::MadeForYou { .. }
         | ApiRequest::NewReleases { .. }
         | ApiRequest::NewReleaseTracks { .. }
+        | ApiRequest::QueueDetails { .. }
         | ApiRequest::HiddenSongs { .. }
         | ApiRequest::PlaylistUris { .. }
         | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),

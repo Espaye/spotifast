@@ -589,6 +589,14 @@ restrictions allow `set_queue` and the reorder or removal, and the push's
 `queue` provider rows decide which songs show under Next in queue. Each
 command logs one line with counts.
 
+Positional queue drags use the upcoming rows published by the built-in
+player or by the active Connect device. The Web API supplies track details
+for those rows. Each drag appears immediately. Spotifast sends it as a
+`set_queue` command and waits for the receiving player to publish the new
+order before sending the next drag with its revision. Unsupported queue
+edits are unavailable on receivers that restrict them, including Soloist
+through its documented API.
+
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their
 places, and a failed write stops the remaining songs. Signing out cancels

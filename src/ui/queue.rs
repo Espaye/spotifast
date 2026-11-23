@@ -396,14 +396,16 @@ enum Landing {
 /// edits the playback order on the device.
 fn landing_of(app: &App, track: &DragTrack) -> Landing {
     match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
-        _ if app.queue_edit_in_flight() => Landing::Refused(QueueRefusal::Locked),
         Some(NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::NowPlaying),
+        Some(QUEUED_ROW | UPCOMING_ROW) if app.can_edit_play_order() => Landing::Edit,
+        _ if app.queue_edit_in_flight() && !app.can_insert_in_play_order() => {
+            Landing::Refused(QueueRefusal::Locked)
+        }
         Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
         Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked),
-        Some(UPCOMING_ROW) if app.can_edit_play_order() => Landing::Edit,
         Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Locked),
+        _ if app.can_insert_in_play_order() => Landing::Edit,
         _ if app.queue_locally_reorderable() => Landing::Insert,
-        _ if app.can_edit_play_order() => Landing::Edit,
         _ => Landing::Append,
     }
 }
@@ -451,12 +453,8 @@ struct QueueSlot {
 /// Dispatches only the action advertised at the pointer.
 fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<QueueSlot>) {
     let context = slot.is_some_and(|slot| !slot.manual);
-    let landing = if context && !matches!(landing, Landing::Refused(_)) {
-        if app.can_edit_play_order() {
-            Landing::Edit
-        } else {
-            Landing::Refused(QueueRefusal::Locked)
-        }
+    let landing = if context && !matches!(landing, Landing::Edit | Landing::Refused(_)) {
+        Landing::Refused(QueueRefusal::Locked)
     } else {
         landing
     };
@@ -776,8 +774,7 @@ fn rows(
             queue_row(app, ui, queued_len + index, compact, 0.0);
         });
         if let Some(index) = next_slot
-            && app.can_edit_play_order()
-            && !matches!(landing, Some(Landing::Refused(_)))
+            && landing == Some(Landing::Edit)
         {
             drop_line(ui, palette.accent, top + index as f32 * row_height);
         }

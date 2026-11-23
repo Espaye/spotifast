@@ -1,7 +1,7 @@
 //! The application: state, event handling, and the actions views ask for.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -32,10 +32,8 @@ use fastframe_now_playing::{
 
 struct PendingQueueEdit {
     request: u64,
-    at: Instant,
-    acknowledged: bool,
     device: String,
-    playing: String,
+    edit: crate::player::QueueEdit,
     before: Vec<PlayableItem>,
     shown_len: usize,
     old_manual: Vec<String>,
@@ -626,7 +624,8 @@ pub struct App {
     /// When a local reorder or positional insert last landed, used to
     /// reject a fetch whose queued rows still show the pre-move order.
     queue_reorder_pending: Option<Instant>,
-    queue_edit: Option<PendingQueueEdit>,
+    queue_edits: VecDeque<PendingQueueEdit>,
+    local_queue: Option<crate::player::RemoteQueueView>,
     /// Songs taken out of Playing next one by one, and when, used to
     /// reject a fetch that still has one right after the queued rows.
     queue_removed: Option<(std::collections::HashSet<String>, Instant)>,
@@ -1446,7 +1445,8 @@ impl App {
             queue_cleared: None,
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
-            queue_edit: None,
+            queue_edits: VecDeque::new(),
+            local_queue: None,
             queue_removed: None,
             remote_queue: None,
             remote_queue_logged: None,
@@ -3177,6 +3177,7 @@ impl App {
                     self.handle_remote_volume(&device_id, volume);
                 }
                 Event::RemoteQueue(view) => self.note_remote_queue(view),
+                Event::LocalQueue(view) => self.note_local_queue(view),
                 Event::Api(response) => self.handle_api(*response),
                 Event::Accent {
                     url,
@@ -3985,7 +3986,8 @@ impl App {
         self.saved_writes.clear();
         self.queue = Loadable::NotLoaded;
         self.queue_shuffle_pending = None;
-        self.queue_edit = None;
+        self.queue_edits.clear();
+        self.local_queue = None;
         self.queue_reorder_pending = None;
         self.queue_removed = None;
         self.devices.clear();
@@ -7822,8 +7824,22 @@ impl App {
     /// here, `manual`, and those the device playing elsewhere lists as
     /// queued, which include songs queued from another app.
     fn queued_end(&self, rows: &[PlayableItem], manual: &[String]) -> usize {
-        if self.queue_edit.is_some() {
+        if self.queue_edit_in_flight() {
             return Self::end_of_queued_rows_of(rows, &[manual]);
+        }
+        if let Some(view) = self.queue_player_view()
+            && rows
+                .iter()
+                .take(view.queued.len())
+                .map(PlayableItem::uri)
+                .eq(view.queued.iter().map(String::as_str))
+            && self.pending_queue_adds.is_empty()
+            && self.queue_reorder_pending.is_none()
+            && self.queue_cleared.is_none()
+            && self.queue_removed.is_none()
+            && manual.iter().all(|uri| view.queued.contains(uri))
+        {
+            return view.queued.len();
         }
         Self::end_of_queued_rows_of(rows, &[manual, self.remote_queued()])
     }
@@ -7851,12 +7867,26 @@ impl App {
     }
 
     pub fn queue_edit_in_flight(&self) -> bool {
-        self.queue_edit.is_some()
+        !self.queue_edits.is_empty()
     }
 
     pub fn can_edit_play_order(&self) -> bool {
-        self.queue_reorderable()
-            && self.queue_edit.is_none()
+        self.queue_edit_allowed(false)
+    }
+
+    pub fn can_insert_in_play_order(&self) -> bool {
+        self.queue_edit_allowed(true)
+    }
+
+    fn queue_edit_allowed(&self, insert: bool) -> bool {
+        (self.offline && self.queue_locally_reorderable()
+            || self.queue_player_view().is_some_and(|view| {
+                (if insert { view.can_insert } else { view.can_reorder })
+                    && (self.queue_edit_in_flight()
+                        || self.queue_locally_reorderable()
+                        || !view.rows.is_empty()
+                        || self.queue.get().is_some_and(|queue| queue.queue.is_empty()))
+            }))
             && self.pending_queue_adds.is_empty()
             && !self
                 .pending_queue_batches
@@ -7865,7 +7895,11 @@ impl App {
     }
 
     fn drop_in_playback_queue(&mut self, track: DragTrack, slot: usize, manual: bool) {
-        if !self.can_edit_play_order() {
+        let inserts = !matches!(
+            track.from.as_ref().map(|(kind, _)| kind.as_str()),
+            Some(QUEUED_ROW | UPCOMING_ROW | NOW_PLAYING_ROW)
+        );
+        if !self.queue_edit_allowed(inserts) {
             self.refuse_queue_drop(QueueRefusal::Locked);
             return;
         }
@@ -7967,12 +8001,11 @@ impl App {
         }
         self.queue_seq += 1;
         let request = self.queue_seq;
-        self.queue_edit = Some(PendingQueueEdit {
+        let send = self.queue_edits.is_empty();
+        self.queue_edits.push_back(PendingQueueEdit {
             request,
-            device: device.clone(),
-            playing: origin.playing,
-            at: Instant::now(),
-            acknowledged: false,
+            device,
+            edit,
             before,
             shown_len: queue.queue.len(),
             old_manual,
@@ -7980,12 +8013,21 @@ impl App {
             expected,
         });
         self.queue_stale_retries = 0;
-        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-        self.backend.api(ApiRequest::EditQueue {
-            device,
-            request,
-            edit,
-        });
+        if send {
+            self.send_queue_edit();
+        }
+    }
+
+    fn send_queue_edit(&self) {
+        if let Some(next) = self.queue_edits.front() {
+            self.backend.api(ApiRequest::EditQueue {
+                device: next.device.clone(),
+                request: next.request,
+                edit: next.edit.clone(),
+                expected: next.expected.clone(),
+                manual: next.new_manual.len(),
+            });
+        }
     }
 
     /// The songs the device playing elsewhere lists as queued by hand. A
@@ -8031,21 +8073,80 @@ impl App {
         (current.as_deref() == Some(view.track.as_str())).then_some(view)
     }
 
+    fn queue_player_view(&self) -> Option<&crate::player::RemoteQueueView> {
+        if !self.queue_locally_reorderable() {
+            return self.remote_queue_view();
+        }
+        self.local_queue.as_ref().filter(|view| {
+            self.local_device_id.as_deref() == Some(view.device.as_str())
+                && self.current_track_uri().as_deref() == Some(view.track.as_str())
+        })
+    }
+
+    fn note_local_queue(&mut self, view: crate::player::RemoteQueueView) {
+        let changed = self.local_queue.as_ref() != Some(&view);
+        self.local_queue = Some(view);
+        if changed && self.queue_locally_reorderable() {
+            self.recheck_visible_queue();
+        }
+    }
+
+    fn recheck_visible_queue(&mut self) {
+        if !self.queue_on_show() {
+            self.queue_fetched_at = None;
+        } else if !self.queue_edit_in_flight() && self.queue_recheck_at.is_none() {
+            self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+        }
+    }
+
+    /// The playback engine supplies the row order. The catalogue response
+    /// supplies artwork, names and durations for those rows.
+    fn align_queue_with_player(&self, fetched: &mut Queue) -> bool {
+        let Some(view) = self.queue_player_view() else {
+            return false;
+        };
+        if !self.pending_queue_adds.is_empty()
+            || self.queue_reorder_pending.is_some()
+            || self.queue_shuffle_pending.is_some()
+            || self.queue_skip_in_flight()
+            || (!self.queue_locally_reorderable()
+                && view.rows.is_empty()
+                && !fetched.queue.is_empty())
+            || fetched.currently_playing.as_ref().map(PlayableItem::uri)
+                != Some(view.track.as_str())
+        {
+            return false;
+        }
+        let known: HashMap<_, _> = fetched
+            .queue
+            .iter()
+            .map(|item| (item.uri(), item))
+            .collect();
+        fetched.queue = view
+            .rows
+            .iter()
+            .map(|(uri, title)| {
+                known
+                    .get(uri.as_str())
+                    .map(|&item| item.clone())
+                    .unwrap_or_else(|| {
+                        self.optimistic_queue_item(uri, if title.is_empty() { uri } else { title })
+                    })
+            })
+            .collect();
+        true
+    }
+
     /// Keeps a cluster push and asks for the queue again when what the
     /// device has queued changed, so Next in queue follows another app.
     fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
         let changed = self
             .remote_queue
             .as_ref()
-            .is_none_or(|shown| shown.queued != view.queued || shown.track != view.track);
+            .is_none_or(|shown| shown.rows != view.rows || shown.track != view.track);
         self.remote_queue = Some(view);
         if changed && self.remote_queue_view().is_some() {
-            if !self.queue_on_show() {
-                // Read when a queue shows again.
-                self.queue_fetched_at = None;
-            } else if self.queue_recheck_at.is_none() {
-                self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-            }
+            self.recheck_visible_queue();
         }
     }
 
@@ -8144,7 +8245,9 @@ impl App {
 
     /// Whether songs can be taken out of Next in queue.
     fn queue_removable(&self) -> bool {
-        self.queue_locally_reorderable() || self.remote_queue_editable(|view| view.can_remove)
+        !self.queue_edit_in_flight()
+            && (self.queue_locally_reorderable()
+                || self.remote_queue_editable(|view| view.can_remove))
     }
 
     /// Whether Next in queue has rows that can be cleared.
@@ -8161,13 +8264,6 @@ impl App {
     /// Says why a song dropped on the open queue stayed where it was, and
     /// logs what held a move of Next in queue back.
     fn refuse_queue_drop(&mut self, refusal: crate::model::QueueRefusal) {
-        if self.queue_edit.is_some() {
-            self.toast(gettext(
-                self.locale,
-                "Waiting for the device to confirm the queue",
-            ));
-            return;
-        }
         let message = match refusal {
             crate::model::QueueRefusal::NowPlaying => gettext(
                 self.locale,
@@ -8335,6 +8431,9 @@ impl App {
     /// the local engine's queue, and only that one. A row whose index no
     /// longer holds its song is left alone.
     fn remove_from_queue(&mut self, rows: Vec<(usize, String)>) {
+        if !self.queue_removable() {
+            return;
+        }
         if !self.queue_locally_reorderable() {
             self.remove_from_remote_queue(rows);
             return;
@@ -8398,6 +8497,9 @@ impl App {
 
     /// Clears manually queued tracks while keeping the context's upcoming rows.
     fn clear_queue(&mut self) {
+        if self.queue_edit_in_flight() {
+            return;
+        }
         if !matches!(self.target(), Target::Local) {
             self.clear_remote_queue();
             return;
@@ -8557,23 +8659,6 @@ impl App {
                     .currently_playing
                     .as_ref()
                     .is_none_or(|item| item.uri() != uri.as_str()))
-        {
-            return true;
-        }
-        if let Some(edit) = &self.queue_edit
-            && self.current_track_uri().as_deref() == Some(edit.playing.as_str())
-            && self.queue_edit_device().as_deref() == Some(edit.device.as_str())
-            && (!edit.acknowledged
-                || (edit.at.elapsed() < PLAYBACK_HOLD
-                    && (!fetched
-                        .queue
-                        .iter()
-                        .take(edit.expected.len())
-                        .map(PlayableItem::uri)
-                        .eq(edit.expected.iter().map(String::as_str))
-                        || self
-                            .remote_queue_view()
-                            .is_some_and(|view| view.queued != edit.new_manual))))
         {
             return true;
         }
@@ -9331,12 +9416,12 @@ impl App {
                 }
             }
             ApiResponse::Queue { seq, mut result } => {
-                if seq != self.queue_seq {
+                if seq != self.queue_seq || self.queue_edit_in_flight() {
                     // A newer request supersedes this response.
                     return;
                 }
                 if let Ok(fetched) = &mut result {
-                    if self.queue_edit.is_none() {
+                    if !self.align_queue_with_player(fetched) {
                         self.follow_remote_queue(fetched);
                     }
                     self.drop_queue_padding(fetched);
@@ -9348,9 +9433,6 @@ impl App {
                     .values()
                     .any(|target| *target == self.target());
                 if writing_queue
-                    || (self.queue_edit.as_ref().is_some_and(|edit| {
-                        !edit.acknowledged || edit.at.elapsed() < PLAYBACK_HOLD
-                    }) && result.is_err())
                     || result
                         .as_ref()
                         .is_ok_and(|fetched| self.queue_fetch_is_stale(fetched))
@@ -9363,7 +9445,6 @@ impl App {
                 }
                 self.queue_stale_retries = 0;
                 if result.is_ok() {
-                    self.queue_edit = None;
                     self.queue_cleared = None;
                     self.queue_shuffle_pending = None;
                     self.queue_reorder_pending = None;
@@ -10940,40 +11021,55 @@ impl App {
                 self.refresh_queue(true);
             }
             ApiResponse::QueueEdited { request, result } => {
-                let Some(edit) = &mut self.queue_edit else {
+                let Some(first) = self.queue_edits.front() else {
                     return;
                 };
-                if edit.request != request {
+                if first.request != request {
                     return;
                 }
-                edit.acknowledged = result.is_ok();
-                edit.at = Instant::now();
-                if let Err(error) = result {
-                    let edit = self.queue_edit.take().unwrap();
-                    if self.current_track_uri().as_deref() == Some(edit.playing.as_str())
-                        && self.queue_edit_device().as_deref() == Some(edit.device.as_str())
-                        && self.manual_queue.starts_with(&edit.new_manual)
-                    {
-                        self.manual_queue
-                            .splice(..edit.new_manual.len(), edit.old_manual);
+                let applies = self.current_track_uri().as_deref()
+                    == Some(first.edit.playing.as_str())
+                    && self.queue_edit_device().as_deref() == Some(first.device.as_str());
+                let first = self.queue_edits.pop_front().unwrap();
+                let last = self.queue_edits.back().unwrap_or(&first);
+                match result {
+                    Ok(view) if applies => {
+                        if self.queue_locally_reorderable() {
+                            self.local_queue = Some(view);
+                        } else {
+                            self.remote_queue = Some(view);
+                        }
+                        self.send_queue_edit();
+                    }
+                    Err(error) if applies => {
+                        let manual_len = self.manual_queue.starts_with(&last.new_manual)
+                            .then_some(last.new_manual.len());
                         if let Loadable::Loaded(queue) = &mut self.queue
-                            && queue.queue.len() == edit.shown_len
+                            && queue.queue.len() == last.shown_len
                             && queue
                                 .queue
                                 .iter()
-                                .take(edit.expected.len())
+                                .take(last.expected.len())
                                 .map(PlayableItem::uri)
-                                .eq(edit.expected.iter().map(String::as_str))
+                                .eq(last.expected.iter().map(String::as_str))
                         {
-                            queue.queue = edit.before;
+                            queue.queue = first.before;
                         }
+                        if let Some(manual_len) = manual_len {
+                            self.manual_queue.splice(..manual_len, first.old_manual);
+                            self.session_dirty = true;
+                        }
+                        self.queue_edits.clear();
+                        self.toast_error(
+                            gettext(self.locale, "Couldn't change the queue: {error}")
+                                .replace("{error}", &error.to_string()),
+                        );
                     }
-                    self.toast_error(
-                        gettext(self.locale, "Couldn't change the queue: {error}")
-                            .replace("{error}", &error.to_string()),
-                    );
+                    _ => self.queue_edits.clear(),
                 }
-                self.refresh_queue(true);
+                if !self.queue_edit_in_flight() {
+                    self.refresh_queue(true);
+                }
             }
             ApiResponse::QueueSet { result } => {
                 if let Err(error) = result {

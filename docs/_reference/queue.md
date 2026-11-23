@@ -180,14 +180,18 @@ counts once, and the notification reports only the rows actually added.
     occurrence once, including when another occurrence has the same title.
     Dropping a Next up row on the Queue button moves it to the end of the
     manual queue. To start an empty manual queue, use the button or drop
-    above the Next up heading. These edits use the player's current queue
-    and require a device that accepts the edit. If its queue has changed,
-    pick up the song again.
+    above the Next up heading. The order comes from the active player's
+    queue and each drop appears immediately. You can keep dragging while a
+    device confirms earlier drops. Spotifast sends them in order using the
+    latest confirmed queue revision. If playback advances or another app
+    changes the affected rows, pick up the song again from the updated list.
 
     Drag from a playlist into the queue to add songs to the listening
     session. Drop a song from either queue section onto an editable
     playlist to save it there. Changes to the play order affect the
-    listening session only.
+    listening session only. Positional drops require queue editing support
+    from the active player. On append-only devices, a playlist drag can
+    still add songs to the end of Next in queue.
 
 12. **A song you queued can be removed on its own.** Right-click a row
     under *Next in queue*, or open its **…** menu, and choose **Remove

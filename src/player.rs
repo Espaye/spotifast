@@ -345,6 +345,7 @@ pub enum EngineEvent {
     /// What the playing device has queued by hand changed, or which queue
     /// edits it takes.
     RemoteQueue(RemoteQueueView),
+    LocalQueue(RemoteQueueView),
 }
 
 /// The parts of a Connect cluster push that the interface shows for
@@ -435,33 +436,55 @@ pub struct RemoteQueueView {
     pub queued: Vec<String>,
     /// Their titles, empty where the push names none.
     pub titles: Vec<String>,
+    /// Upcoming rows in play order, including the manual queue at the front.
+    pub rows: Vec<(String, String)>,
     /// Whether it takes a `set_queue` that reorders its next tracks.
     pub can_reorder: bool,
+    pub can_insert: bool,
     /// Whether it takes a `set_queue` that removes some of them.
     pub can_remove: bool,
 }
 
 impl RemoteQueueView {
     fn of(cluster: &Cluster) -> Self {
-        let state = &cluster.player_state;
+        Self::from_state(cluster.active_device_id.clone(), &cluster.player_state)
+    }
+
+    pub(crate) fn from_state(device: String, state: &PlayerState) -> Self {
         let restrictions = &state.restrictions;
         let set_queue = restrictions.disallow_set_queue_reasons.is_empty();
-        let queued: Vec<&ProvidedTrack> = state
-            .next_tracks
+        let mut order = visible_queue(&state.next_tracks);
+        order.sort_by_key(|&index| state.next_tracks[index].provider != QUEUE_PROVIDER);
+        let rows: Vec<_> = order
             .iter()
-            .filter(|track| track.provider == QUEUE_PROVIDER)
+            .map(|&index| {
+                let track = &state.next_tracks[index];
+                (
+                    track.uri.clone(),
+                    track.metadata.get("title").cloned().unwrap_or_default(),
+                )
+            })
             .collect();
+        let queued = order
+            .iter()
+            .take_while(|&&index| state.next_tracks[index].provider == QUEUE_PROVIDER)
+            .count();
         Self {
-            device: cluster.active_device_id.clone(),
+            device,
             track: state.track.uri.clone(),
-            queued: queued.iter().map(|track| track.uri.clone()).collect(),
-            titles: queued
+            queued: rows[..queued].iter().map(|(uri, _)| uri.clone()).collect(),
+            titles: rows[..queued]
                 .iter()
-                .map(|track| track.metadata.get("title").cloned().unwrap_or_default())
+                .map(|(_, title)| title.clone())
                 .collect(),
+            rows,
             can_reorder: set_queue
                 && restrictions
                     .disallow_reordering_in_next_tracks_reasons
+                    .is_empty(),
+            can_insert: set_queue
+                && restrictions
+                    .disallow_inserting_into_next_tracks_reasons
                     .is_empty(),
             can_remove: set_queue
                 && restrictions
@@ -469,6 +492,22 @@ impl RemoteQueueView {
                     .is_empty(),
         }
     }
+}
+
+fn visible_queue(next: &[ProvidedTrack]) -> Vec<usize> {
+    next.iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            (next_stops_on(row)
+                && !row.uri.is_empty()
+                && row.uri != "spotify:delimiter"
+                && row
+                    .metadata
+                    .get("hidden")
+                    .is_none_or(|hidden| hidden != "true"))
+            .then_some(index)
+        })
+        .collect()
 }
 
 /// A next or previous track as a Connect command names it. A queued one
@@ -546,7 +585,7 @@ pub struct QueueEdit {
 }
 
 impl QueueEdit {
-    fn command(&self, state: &PlayerState) -> Option<serde_json::Value> {
+    pub(crate) fn command(&self, state: &PlayerState) -> Option<serde_json::Value> {
         let restrictions = &state.restrictions;
         if state.track.uri != self.playing
             || !restrictions.disallow_set_queue_reasons.is_empty()
@@ -562,30 +601,21 @@ impl QueueEdit {
             return None;
         }
         // Keep delimiters, hidden rows and the unshown tail exactly as received.
-        let visible: Vec<_> = state
-            .next_tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| {
-                next_stops_on(row)
-                    && !row.uri.is_empty()
-                    && row
-                        .metadata
-                        .get("hidden")
-                        .is_none_or(|hidden| hidden != "true")
-            })
-            .map(|(index, _)| index)
-            .collect();
+        let mut next = state.next_tracks.clone();
+        // Some receivers interleave their manual and context rows in a push.
+        next.sort_by_key(|row| row.provider != QUEUE_PROVIDER);
+        let visible = visible_queue(&next);
         if self.before.len() > visible.len()
             || self.to > self.before.len()
+            || (self.into_manual && self.to > self.manual)
+            || (!self.into_manual && self.to < self.manual)
             || self.before.iter().enumerate().any(|(i, uri)| {
-                let row = &state.next_tracks[visible[i]];
+                let row = &next[visible[i]];
                 row.uri != *uri || (row.provider == QUEUE_PROVIDER) != (i < self.manual)
             })
         {
             return None;
         }
-        let mut next = state.next_tracks.clone();
         let mut at = visible
             .get(self.to)
             .copied()
@@ -617,6 +647,17 @@ impl QueueEdit {
         }
         next.splice(at..at, insert);
         Some(queue_command(state, next.iter().map(track_json).collect()))
+    }
+
+    pub fn confirmed(&self, view: &RemoteQueueView, expected: &[String], manual: usize) -> bool {
+        view.track == self.playing
+            && view.queued.len() == manual
+            && view
+                .rows
+                .iter()
+                .take(expected.len())
+                .map(|(uri, _)| uri)
+                .eq(expected.iter())
     }
 }
 
@@ -777,11 +818,15 @@ async fn watch_cluster(
                 restrictions.disallow_removing_from_next_tracks_reasons,
             );
         }
+        let view = ClusterView::of(&cluster);
+        {
+            let mut kept = queue.lock().unwrap_or_else(|p| p.into_inner());
+            kept.show(cluster);
+        }
         if queued != shown_queue {
             shown_queue = queued.clone();
             notify(EngineEvent::RemoteQueue(queued));
         }
-        let view = ClusterView::of(&cluster);
         if shown.changed_elsewhere(&view, &own_device) {
             notify(match shown.volume_only(&view) {
                 Some(volume) => EngineEvent::RemoteVolume {
@@ -795,8 +840,6 @@ async fn watch_cluster(
             });
         }
         shown = view;
-        let mut kept = queue.lock().unwrap_or_else(|p| p.into_inner());
-        kept.show(cluster);
     }
 }
 
@@ -912,18 +955,31 @@ fn retire_landed(target: &mut Option<SkipTarget>, playing: Option<&str>) {
 async fn retire_landed_skips(
     mut states: tokio::sync::watch::Receiver<Option<PlayerState>>,
     target: Arc<Mutex<Option<SkipTarget>>>,
+    device: String,
+    notify: Notify,
 ) {
+    let mut shown = RemoteQueueView::default();
     while states.changed().await.is_ok() {
         // Out of the watch before the target is locked: a skip holds the
         // target while it reads the watch.
-        let playing = {
+        let (playing, queue) = {
             let state = states.borrow_and_update();
-            Option::as_ref(&*state).and_then(playing_key)
+            let state = state.as_ref();
+            (
+                state.and_then(playing_key),
+                state.map(|state| RemoteQueueView::from_state(device.clone(), state)),
+            )
         };
         retire_landed(
             &mut target.lock().unwrap_or_else(|p| p.into_inner()),
             playing.as_deref(),
         );
+        if let Some(queue) = queue
+            && queue != shown
+        {
+            shown = queue.clone();
+            notify(EngineEvent::LocalQueue(queue));
+        }
     }
 }
 
@@ -961,6 +1017,7 @@ impl Engine {
             initial_volume: config.initial_volume,
             disable_volume: false,
             volume_steps: 64,
+            emit_set_queue_events: true,
             ..ConnectConfig::default()
         };
         let (spirc, spirc_task) = Spirc::new(
@@ -1034,6 +1091,8 @@ impl Engine {
         tokio::spawn(retire_landed_skips(
             spirc.watch_player_state(),
             Arc::clone(&skip_target),
+            config.device_id(),
+            Arc::clone(&notify),
         ));
 
         let device_id = config.device_id();
@@ -1279,17 +1338,25 @@ impl Engine {
             .row(device, uri, occurrence)
     }
 
-    pub fn edited_queue(&self, device: &str, edit: &QueueEdit) -> Option<serde_json::Value> {
+    pub fn queue_state(&self, device: &str) -> Option<PlayerState> {
         if device == self.device_id() {
+            if !self
+                .state
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_active()
+            {
+                return None;
+            }
             let watch = self.spirc.watch_player_state();
-            let state = watch.borrow();
-            return edit.command(state.as_ref()?);
+            let state = watch.borrow().clone();
+            return state;
         }
         let queue = self.remote_queue.lock().unwrap_or_else(|p| p.into_inner());
         if queue.device != device {
             return None;
         }
-        edit.command(queue.state.as_ref()?)
+        queue.state.clone()
     }
 
     /// The `set_queue` command that rewrites what `device`, playing
@@ -2727,6 +2794,48 @@ mod tests {
         edit.playing = "now".into();
         edit.before[1] = "changed".into();
         assert!(edit.command(&state).is_none());
+    }
+
+    #[test]
+    fn queue_edits_use_the_same_order_as_the_player_view() {
+        let mut state = player_state(
+            provided("now", "n", "context"),
+            vec![
+                provided("a", "first", "context"),
+                provided("b", "manual", "queue"),
+                provided("hidden", "x", "unavailable"),
+                provided("a", "second", "context"),
+            ],
+        );
+        state.queue_revision = "revision-from-receiver".into();
+        let before = super::RemoteQueueView::from_state("device".into(), &state);
+        let edit = super::QueueEdit {
+            playing: before.track,
+            before: before.rows.into_iter().map(|(uri, _)| uri).collect(),
+            manual: 1,
+            from: Some(0),
+            to: 2,
+            into_manual: false,
+            added: vec![],
+        };
+        let body = edit.command(&state).unwrap();
+        assert_eq!(body["command"]["queue_revision"], "revision-from-receiver");
+        let rows = body["command"]["next_tracks"].as_array().unwrap();
+        assert_eq!(rows[2]["uid"], "manual");
+        assert_eq!(rows[2]["provider"], "context");
+        assert!(!edit.confirmed(
+            &super::RemoteQueueView::from_state("device".into(), &state),
+            &["a".into(), "b".into(), "a".into()],
+            0,
+        ));
+        let mut moved = state.next_tracks.remove(1);
+        moved.provider = "context".into();
+        state.next_tracks.insert(2, moved);
+        assert!(edit.confirmed(
+            &super::RemoteQueueView::from_state("device".into(), &state),
+            &["a".into(), "b".into(), "a".into()],
+            0,
+        ));
     }
 
     /// A Next up click counts the rows librespot's Next stops on, which the

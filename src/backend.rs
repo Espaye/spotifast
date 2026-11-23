@@ -416,6 +416,8 @@ pub enum ApiRequest {
         device: String,
         request: u64,
         edit: crate::player::QueueEdit,
+        expected: Vec<String>,
+        manual: usize,
     },
 }
 
@@ -684,7 +686,7 @@ pub enum ApiResponse {
     },
     QueueEdited {
         request: u64,
-        result: ApiResult<()>,
+        result: ApiResult<crate::player::RemoteQueueView>,
     },
 }
 
@@ -1102,6 +1104,7 @@ pub enum Event {
     /// What the device playing elsewhere has queued by hand, as Spotify
     /// last pushed it.
     RemoteQueue(crate::player::RemoteQueueView),
+    LocalQueue(crate::player::RemoteQueueView),
     Api(Box<ApiResponse>),
     Accent {
         url: String,
@@ -3649,6 +3652,10 @@ impl Worker {
                 }
                 EngineEvent::RemoteQueue(view) => {
                     let _ = events.send(Event::RemoteQueue(view));
+                    waker.wake();
+                }
+                EngineEvent::LocalQueue(view) => {
+                    let _ = events.send(Event::LocalQueue(view));
                     waker.wake();
                 }
             }
@@ -6505,14 +6512,11 @@ async fn over_connect(
             device,
             request,
             edit,
+            expected,
+            manual,
         } => {
             let _turn = connect.queue_skip_turn().await;
-            let result = match engine.edited_queue(device, edit) {
-                Some(body) => crate::sonos::command(session, device, &body).await,
-                None => Err(ApiError::Network(
-                    "The device's queue changed or does not allow this edit".into(),
-                )),
-            };
+            let result = edit_connect_queue(engine, device, edit, expected, *manual).await;
             ApiResponse::QueueEdited {
                 request: *request,
                 result,
@@ -6545,6 +6549,53 @@ async fn over_connect(
         }
         _ => return None,
     })
+}
+
+async fn edit_connect_queue(
+    engine: &Engine,
+    device: &str,
+    edit: &crate::player::QueueEdit,
+    expected: &[String],
+    manual: usize,
+) -> ApiResult<crate::player::RemoteQueueView> {
+    let Some(state) = engine.queue_state(device) else {
+        return Err(ApiError::Status {
+            status: 409,
+            message: "The device's queue is unavailable".into(),
+        });
+    };
+    let Some(body) = edit.command(&state) else {
+        return Err(ApiError::Status {
+            status: 409,
+            message: "The device's queue changed or does not allow this edit".into(),
+        });
+    };
+    let timeout = || ApiError::Status {
+        status: 504,
+        message: "The device did not confirm the queue edit".into(),
+    };
+    // A successful command response does not yet supply the receiver's next
+    // revision. Read its published queue before sending another rewrite.
+    tokio::time::timeout(Duration::from_secs(6), async {
+        crate::sonos::command(engine.session(), device, &body).await?;
+        loop {
+            if let Some(current) = engine.queue_state(device) {
+                if current.track.uri != state.track.uri || current.track.uid != state.track.uid {
+                    return Err(ApiError::Status {
+                        status: 409,
+                        message: "The device's queue changed".into(),
+                    });
+                }
+                let view = crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
+                if edit.confirmed(&view, expected, manual) {
+                    return Ok(view);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+    })
+    .await
+    .map_err(|_| timeout())?
 }
 
 /// Waits for shuffle to succeed before starting playback, preserving either error.

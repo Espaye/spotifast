@@ -56,8 +56,8 @@ const REMOTE_FRESH: Duration = Duration::from_secs(60);
 /// How often the open Friend activity panel asks for news.
 const FRIENDS_POLL: Duration = Duration::from_secs(15);
 const DEVICES_FRESH: Duration = Duration::from_secs(12);
-/// How long after resting on a device button opening the picker shows the
-/// list that fetched instead of asking again.
+/// How long a list fetched by resting on a device button serves the picker
+/// without asking again.
 const DEVICES_WARM: Duration = Duration::from_secs(5);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
 /// How long a suspend or the end of the session waits for pending file
@@ -619,8 +619,7 @@ pub struct App {
     /// This computer's audio outputs, listed when the device picker asks.
     pub output_devices: Loadable<Vec<fastframe_audio::DeviceInfo>>,
     devices_fetched_at: Option<Instant>,
-    /// When resting on a device button last fetched the list ahead of the
-    /// click.
+    /// When resting on a device button last fetched the list.
     devices_warmed_at: Option<Instant>,
     pub selected_device: Option<String>,
     pub queue: Loadable<Queue>,
@@ -15377,9 +15376,7 @@ impl App {
             }
             Action::ToggleDevicesPopup => {
                 self.show_devices = !self.show_devices;
-                // Resting on the button has just fetched the list and
-                // started the search; asking again would only spin over the
-                // same answer.
+                // A rest on the button has just fetched the list and searched.
                 let warmed = self
                     .devices_warmed_at
                     .is_some_and(|at| at.elapsed() < DEVICES_WARM);

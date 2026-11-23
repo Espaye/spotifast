@@ -576,11 +576,12 @@ one before it is answered.
 Previous on another device shows where it lands before the device answers
 when the destination is known. A quick Previous after Next can use the
 song that Next left, even before a new Connect push. Three seconds into a
-song, Previous restarts it. Close to that cutoff, Spotifast waits for the
-device to show whether the command arrived in time to go back. With lyrics
-open, Spotifast prepares the known previous song's cover and lyrics along
-with the next song's. It reuses cached details and requests the previous
-song's details when they are missing.
+song, Previous restarts it. When the earlier song is unknown, the first
+Connect push identifying the new song can update the display before the
+next Web API poll. Previous history crosses the delimiter at a context
+boundary. With lyrics open, Spotifast prepares the known previous song's
+cover and lyrics along with the next song's. It reuses cached details and
+requests the previous song's details when they are missing.
 
 Reordering, removing and clearing the songs queued on another device go over
 the Connect route to any device, restricted or not, as one `set_queue` command:

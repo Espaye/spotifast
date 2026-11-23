@@ -357,8 +357,7 @@ struct ClusterView {
     active_device: String,
     context: String,
     track: String,
-    /// The songs before it, oldest first, back to the nearest entry that is
-    /// not a song, and at most [`PREVIOUS_KEPT`] of them.
+    /// Up to [`PREVIOUS_KEPT`] songs before it, oldest first.
     previous: Vec<String>,
     playing: bool,
     shuffle: bool,
@@ -374,22 +373,30 @@ const PREVIOUS_KEPT: usize = 20;
 impl ClusterView {
     fn of(cluster: &Cluster) -> Self {
         let state = &cluster.player_state;
-        // Only an unbroken run of songs counts: past an episode or a
-        // delimiter the steps back are not known.
-        let tracks = &state.prev_tracks;
-        let start = tracks
-            .iter()
-            .rposition(|track| !track.uri.starts_with("spotify:track:"))
-            .map_or(0, |index| index + 1)
-            .max(tracks.len().saturating_sub(PREVIOUS_KEPT));
+        // Previous steps across a context delimiter before taking the song
+        // behind it. An episode or an unknown row still breaks the run.
+        let mut previous = Vec::new();
+        let mut crossed_delimiter = false;
+        for track in state.prev_tracks.iter().rev() {
+            if track.uri == "spotify:delimiter" && !crossed_delimiter {
+                crossed_delimiter = true;
+                continue;
+            }
+            if !track.uri.starts_with("spotify:track:") {
+                break;
+            }
+            previous.push(track.uri.clone());
+            if previous.len() == PREVIOUS_KEPT {
+                break;
+            }
+            crossed_delimiter = false;
+        }
+        previous.reverse();
         Self {
             active_device: cluster.active_device_id.clone(),
             context: state.context_uri.clone(),
             track: state.track.uri.clone(),
-            previous: tracks[start..]
-                .iter()
-                .map(|track| track.uri.clone())
-                .collect(),
+            previous,
             playing: state.is_playing && !state.is_paused,
             shuffle: state.options.shuffling_context,
             repeat_context: state.options.repeating_context,
@@ -3557,15 +3564,18 @@ mod tests {
     #[test]
     fn a_push_names_the_song_before_the_playing_one() {
         let mut pushed = cluster("sonos", "spotify:track:c", true, 30_000);
-        assert_eq!(ClusterView::of(&pushed).previous, None, "the first song");
+        assert!(
+            ClusterView::of(&pushed).previous.is_empty(),
+            "the first song"
+        );
         let state = pushed.player_state.mut_or_insert_default();
-        for uri in ["spotify:track:a", "spotify:track:b"] {
+        for uri in ["spotify:track:a", "spotify:track:b", "spotify:delimiter"] {
             let mut track = ProvidedTrack::new();
             track.uri = uri.into();
             state.prev_tracks.push(track);
         }
         let view = ClusterView::of(&pushed);
-        assert_eq!(view.previous.as_deref(), Some("spotify:track:b"));
+        assert_eq!(view.previous, ["spotify:track:a", "spotify:track:b"]);
         assert!(
             ClusterView::of(&cluster("sonos", "spotify:track:c", true, 30_000))
                 .changed_elsewhere(&view, "this")

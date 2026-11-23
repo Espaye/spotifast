@@ -77,11 +77,6 @@ const ROOTLIST_REFRESH: Duration = Duration::from_secs(5);
 /// How far into a song Previous restarts it rather than stepping back,
 /// matching what librespot does during playback.
 const RESTART_BEFORE_PREVIOUS: u32 = 3_000;
-/// How far under [`RESTART_BEFORE_PREVIOUS`] Previous on another device must
-/// be pressed to show the song before at once: the command reaches the
-/// device a moment later, when a song just under the mark may have passed it
-/// and restart instead.
-const REMOTE_PREVIOUS_MARGIN: u32 = 1_000;
 
 const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// Match other interface animations. egui subtracts the predicted frame time
@@ -219,6 +214,12 @@ struct TrackIntent {
     confirmation: TrackConfirmation,
     /// Where a plain remote Next started, until the device reports where it landed.
     next_from: Option<(Target, String)>,
+}
+
+struct PendingRemotePrevious {
+    device: String,
+    from: String,
+    at: Instant,
 }
 
 /// The row a song was started from, so a list holding that song more than
@@ -807,6 +808,7 @@ pub struct App {
     /// first, as Spotify's latest push named them, for Previous to show at
     /// once.
     remote_previous: Option<(String, Vec<String>)>,
+    pending_remote_previous: Option<PendingRemotePrevious>,
     previous_metadata_requested: Option<String>,
     pub seek_preview: Option<f32>,
     pub volume_preview: Option<f32>,
@@ -1550,6 +1552,7 @@ impl App {
             remote_recheck_at: None,
             remote_pushed_at: None,
             remote_previous: None,
+            pending_remote_previous: None,
             previous_metadata_requested: None,
             seek_preview: None,
             volume_preview: None,
@@ -2350,6 +2353,7 @@ impl App {
     fn expect_track(&mut self, uri: String, position_ms: u32) {
         // Another song asked for: no skip is on its way anymore.
         self.queue_skip = None;
+        self.pending_remote_previous = None;
         let confirmation = match self.target() {
             Target::Local => TrackConfirmation::Local,
             Target::Remote(_) => TrackConfirmation::Remote {
@@ -3909,6 +3913,7 @@ impl App {
         self.pending_repeat = None;
         self.adjacent_lyrics.clear();
         self.remote_previous = None;
+        self.pending_remote_previous = None;
         self.previous_metadata_requested = None;
         self.lyrics_uri = None;
         self.lyrics = Loadable::NotLoaded;
@@ -8210,6 +8215,7 @@ impl App {
     /// Keeps a cluster push and asks for the queue again when what the
     /// device has queued changed, so Next in queue follows another app.
     fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
+        self.preview_remote_previous_push(&view);
         let changed = self
             .remote_queue
             .as_ref()
@@ -8218,6 +8224,33 @@ impl App {
         if changed && self.remote_queue_view().is_some() {
             self.recheck_visible_queue();
         }
+    }
+
+    /// Show the receiver's first new track without waiting for the Web API.
+    fn preview_remote_previous_push(&mut self, view: &crate::player::RemoteQueueView) {
+        let Some(pending) = &self.pending_remote_previous else {
+            return;
+        };
+        if pending.at.elapsed() >= PLAYBACK_HOLD {
+            self.pending_remote_previous = None;
+            return;
+        }
+        let Target::Remote(device) = self.target() else {
+            return;
+        };
+        if view.device != pending.device
+            || device.as_deref().is_some_and(|id| id != view.device)
+            || view.track == pending.from
+            || !view.track.starts_with("spotify:track:")
+        {
+            return;
+        }
+        log::info!(
+            "Connect Previous: track arrived in a push after {} ms",
+            pending.at.elapsed().as_millis()
+        );
+        self.expect_track(view.track.clone(), 0);
+        self.prepare_previous_track(&view.track);
     }
 
     /// Puts the songs the device playing elsewhere lists as queued by hand
@@ -9484,6 +9517,28 @@ impl App {
                             state,
                             received_at: Instant::now(),
                         });
+                        if let Some(pending) = &self.pending_remote_previous
+                            && pending.at.elapsed() < PLAYBACK_HOLD
+                            && self.remote.as_ref().is_some_and(|remote| {
+                                let device = remote
+                                    .state
+                                    .device
+                                    .as_ref()
+                                    .and_then(|device| device.id.as_deref());
+                                device.is_none_or(|id| id == pending.device)
+                                    && remote
+                                        .state
+                                        .item
+                                        .as_ref()
+                                        .is_some_and(|track| track.uri() != pending.from)
+                            })
+                        {
+                            log::info!(
+                                "Connect Previous: track arrived in a playback poll after {} ms",
+                                pending.at.elapsed().as_millis()
+                            );
+                            self.pending_remote_previous = None;
+                        }
                         // Previous shows this song from here once it has passed.
                         if let Some(PlayableItem::Track(track)) = self
                             .remote
@@ -11074,6 +11129,9 @@ impl App {
                     Err(error) => {
                         self.optimistic_playing = None;
                         self.pending_remote_position = None;
+                        if action == RemoteAction::Previous {
+                            self.pending_remote_previous = None;
+                        }
                         if action == RemoteAction::Repeat {
                             self.pending_repeat = None;
                         }
@@ -12846,7 +12904,7 @@ impl App {
     /// Whether Previous goes to the song before rather than restarting this
     /// one, by the three-second rule librespot and Spotify's devices follow.
     fn previous_steps_back(&self) -> bool {
-        self.previous_position() <= RESTART_BEFORE_PREVIOUS
+        self.previous_position() < RESTART_BEFORE_PREVIOUS
     }
 
     fn previous_position(&self) -> u32 {
@@ -12887,6 +12945,27 @@ impl App {
         let (_, before) = self.remote_previous.as_ref()?;
         let at = before.iter().rposition(|uri| *uri == shown)?;
         at.checked_sub(1).map(|index| before[index].clone())
+    }
+
+    fn wait_for_remote_previous(&mut self, device: Option<&str>) {
+        let pending = self.current_track_uri().and_then(|from| {
+            let device = device.or_else(|| {
+                self.remote_queue
+                    .as_ref()
+                    .filter(|view| {
+                        view.track == from
+                            && !view.device.is_empty()
+                            && Some(view.device.as_str()) != self.local_device_id.as_deref()
+                    })
+                    .map(|view| view.device.as_str())
+            })?;
+            Some(PendingRemotePrevious {
+                device: device.to_owned(),
+                from,
+                at: Instant::now(),
+            })
+        });
+        self.pending_remote_previous = pending;
     }
 
     fn prepare_previous_track(&mut self, uri: &str) {
@@ -14112,8 +14191,17 @@ impl App {
             }
             self.leave_lyrics_fullscreen(ctx);
         }
-        if self.changes_song_by_hand(&action) {
+        let changes_song = self.changes_song_by_hand(&action);
+        if changes_song {
             self.leave_repeat_one();
+        }
+        if changes_song
+            || matches!(
+                action,
+                Action::Previous | Action::Seek(_) | Action::SeekBy(_) | Action::Transfer(_)
+            )
+        {
+            self.pending_remote_previous = None;
         }
         // A control used while a song waits for its radio acts on that
         // song, so the song goes out first.
@@ -14371,10 +14459,8 @@ impl App {
             Action::Previous => {
                 self.resume_load = None;
                 let position = self.previous_position();
-                let steps_back = position <= RESTART_BEFORE_PREVIOUS;
-                let before = (position <= RESTART_BEFORE_PREVIOUS - REMOTE_PREVIOUS_MARGIN)
-                    .then(|| self.remote_song_before())
-                    .flatten();
+                let steps_back = position < RESTART_BEFORE_PREVIOUS;
+                let before = steps_back.then(|| self.remote_song_before()).flatten();
                 // Next names its expected destination so the row moves before
                 // the engine does. Discard that expectation, or a quick Next,
                 // Previous leaves the row marker stuck on the skipped-to song.
@@ -14391,8 +14477,19 @@ impl App {
                         } else if let Some(uri) = &before {
                             self.pending_remote_position = None;
                             self.expect_track(uri.clone(), 0);
+                        } else {
+                            self.wait_for_remote_previous(device_id.as_deref());
                         }
                         self.remote(RemoteAction::Previous, device_id);
+                        let preview = match &before {
+                            Some(uri) if self.cached_track_preview(uri, 0).is_some() => {
+                                "previous track ready"
+                            }
+                            Some(_) => "previous track needs details",
+                            None if steps_back => "waiting for the receiver to identify the track",
+                            None => "restart current track",
+                        };
+                        log::info!("Connect Previous at {position} ms: {preview}");
                         if let Some(uri) = before {
                             self.prepare_previous_track(&uri);
                         }
@@ -22287,12 +22384,14 @@ mod tests {
         assert_eq!(shown.uri, "spotify:track:a", "a second quick Previous");
         assert_eq!(shown.position_ms, 0);
 
-        // Just under three seconds the device may get the command past the
-        // mark and restart the song, so no song before is guessed.
         app.intent_track = None;
         app.remote = Some(playing(2_500));
         app.apply(Action::Previous, &ctx);
-        assert_eq!(app.current_track_uri().as_deref(), Some("spotify:track:c"));
+        assert_eq!(
+            app.current_track_uri().as_deref(),
+            Some("spotify:track:b"),
+            "the second before the restart cutoff still previews a known track"
+        );
 
         app.intent_track = None;
         app.remote = Some(playing(60_000));
@@ -22320,6 +22419,50 @@ mod tests {
         assert!(intent.at >= click_at);
         assert_eq!(intent.uri, "spotify:track:c");
         assert_eq!(app.requested_track_preview().unwrap().position_ms, 0);
+    }
+
+    #[test]
+    fn connect_previous_can_show_the_track_before_a_playback_poll_answers() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        let song = |id: &str| Track {
+            id: Some(id.into()),
+            uri: format!("spotify:track:{id}"),
+            name: id.into(),
+            duration_ms: 30_000,
+            ..Default::default()
+        };
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                item: Some(PlayableItem::Track(song("b"))),
+                progress_ms: Some(1_000),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        app.track_cache.insert("a".into(), song("a"));
+        let view = crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: "spotify:track:b".into(),
+            ..Default::default()
+        };
+        app.note_remote_queue(view.clone());
+        app.apply(Action::Previous, &egui::Context::default());
+        assert!(app.pending_remote_previous.is_some());
+        app.note_remote_queue(crate::player::RemoteQueueView {
+            device: "other device".into(),
+            track: "spotify:track:a".into(),
+            ..view.clone()
+        });
+        assert_eq!(app.now_playing().unwrap().uri, "spotify:track:b");
+        app.note_remote_queue(crate::player::RemoteQueueView {
+            track: "spotify:track:a".into(),
+            ..view
+        });
+        assert_eq!(app.now_playing().unwrap().uri, "spotify:track:a");
+        assert_eq!(app.now_playing_live().unwrap().uri, "spotify:track:b");
+        assert!(app.pending_remote_previous.is_none());
     }
 
     /// A track is removed from Next up as soon as it starts.

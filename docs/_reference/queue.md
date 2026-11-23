@@ -185,6 +185,8 @@ counts once, and the notification reports only the rows actually added.
     device confirms earlier drops. Spotifast sends them in order using the
     latest confirmed queue revision. If playback advances or another app
     changes the affected rows, pick up the song again from the updated list.
+    On the built-in player, the queue refreshes when a song starts, so you
+    can reorder while it plays or while it is paused.
 
     Drag from a playlist into the queue to add songs to the listening
     session. Drop a song from either queue section onto an editable

@@ -852,7 +852,8 @@ album, and each artist their page, as in the player bar.
 
 The player bar slides away after three seconds without input and comes back
 over the lyrics when you move the mouse, scroll, click or press a key. It
-stays while the pointer rests on it or one of its menus is open. Press **Q**
+stays while the pointer rests on it or one of its menus is open. The pointer,
+**Lyrics** title, and **Leave full screen** button fade together. Press **Q**
 for the queue beside the lyrics, on a dark pane in either theme.
 
 Press **V** in full screen lyrics to put MilkDrop behind the words in place of

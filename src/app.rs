@@ -7881,11 +7881,14 @@ impl App {
     fn queue_edit_allowed(&self, insert: bool) -> bool {
         (self.offline && self.queue_locally_reorderable()
             || self.queue_player_view().is_some_and(|view| {
-                (if insert { view.can_insert } else { view.can_reorder })
-                    && (self.queue_edit_in_flight()
-                        || self.queue_locally_reorderable()
-                        || !view.rows.is_empty()
-                        || self.queue.get().is_some_and(|queue| queue.queue.is_empty()))
+                (if insert {
+                    view.can_insert
+                } else {
+                    view.can_reorder
+                }) && (self.queue_edit_in_flight()
+                    || self.queue_locally_reorderable()
+                    || !view.rows.is_empty()
+                    || self.queue.get().is_some_and(|queue| queue.queue.is_empty()))
             }))
             && self.pending_queue_adds.is_empty()
             && !self
@@ -8272,7 +8275,7 @@ impl App {
             ),
             crate::model::QueueRefusal::Locked => {
                 let target = self.target();
-                let view = self.remote_queue_view();
+                let view = self.queue_player_view();
                 let allowed = view.is_some_and(|view| view.can_reorder);
                 let albums = self
                     .pending_queue_batches
@@ -8291,8 +8294,13 @@ impl App {
                     if allowed { "allowed" } else { "not allowed" },
                     self.pending_queue_adds.len(),
                 );
-                if matches!(target, Target::Local) {
+                if matches!(target, Target::Local) && !self.local.is_active() {
                     gettext(self.locale, "Play a song to reorder the queue")
+                } else if matches!(target, Target::Local) && view.is_none() {
+                    gettext(
+                        self.locale,
+                        "The queue is still updating. Try again in a moment.",
+                    )
                 } else if view.is_none() {
                     gettext(
                         self.locale,
@@ -11042,7 +11050,9 @@ impl App {
                         self.send_queue_edit();
                     }
                     Err(error) if applies => {
-                        let manual_len = self.manual_queue.starts_with(&last.new_manual)
+                        let manual_len = self
+                            .manual_queue
+                            .starts_with(&last.new_manual)
                             .then_some(last.new_manual.len());
                         if let Loadable::Loaded(queue) = &mut self.queue
                             && queue.queue.len() == last.shown_len
@@ -21752,6 +21762,89 @@ mod tests {
             is_playing: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_local_queue_can_reorder_as_soon_as_the_playing_song_has_a_snapshot() {
+        let mut app = app_with_local_manual_queue();
+        app.offline = false;
+        app.local_device_id = Some("this-computer".into());
+        let now = app.current_track_uri().unwrap();
+        app.local_queue = Some(crate::player::RemoteQueueView {
+            device: app.local_device_id.clone().unwrap(),
+            track: "spotify:track:previous".into(),
+            can_reorder: true,
+            ..Default::default()
+        });
+        app.local.playback = Playback::Playing;
+        assert!(!app.can_edit_play_order());
+        let mut view = app.local_queue.clone().unwrap();
+        view.track = now;
+        app.note_local_queue(view);
+        assert!(app.can_edit_play_order());
+        assert_eq!(app.local.playback, Playback::Playing);
+    }
+
+    #[test]
+    fn consecutive_connect_queue_drags_keep_the_latest_order_visible() {
+        let mut app = headless_app();
+        app.local_ready = false;
+        let now = "spotify:track:now";
+        let [a, b, c] = ["spotify:track:a", "spotify:track:b", "spotify:track:c"];
+        app.remote = Some(RemoteSnapshot {
+            state: sonos_playing(now),
+            received_at: Instant::now(),
+        });
+        let view = |rows: [&str; 3]| crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: now.into(),
+            rows: rows.into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            can_reorder: true,
+            ..Default::default()
+        };
+        app.remote_queue = Some(view([a, b, c]));
+        let report = |seq| ApiResponse::Queue {
+            seq,
+            result: Ok(loaded_queue(now, &[a, c, b]).get().unwrap().clone()),
+        };
+        app.handle_api(report(app.queue_seq));
+        assert_eq!(queue_uris(&app).1, [a, b, c]);
+
+        let drag = |app: &mut App, index: usize, slot: usize| {
+            let item = app.queue.get().unwrap().queue[index].clone();
+            let track = DragTrack {
+                title: item.name().to_string(),
+                image: None,
+                items: vec![item],
+                from: Some((UPCOMING_ROW.into(), index as u32)),
+                source_playlist: None,
+                queue_origin: app.queue_origin(),
+            };
+            app.drop_in_playback_queue(track, slot, false);
+        };
+        drag(&mut app, 1, 0);
+        drag(&mut app, 2, 1);
+        assert_eq!(app.queue_edits.len(), 2);
+        app.handle_api(report(app.queue_seq));
+        assert_eq!(queue_uris(&app).1, [b, c, a]);
+
+        app.handle_api(ApiResponse::QueueEdited {
+            request: app.queue_edits.front().unwrap().request,
+            result: Ok(view([b, a, c])),
+        });
+        assert_eq!(app.queue_edits.len(), 1);
+        assert_eq!(queue_uris(&app).1, [b, c, a]);
+
+        app.handle_api(ApiResponse::QueueEdited {
+            request: app.queue_edits.front().unwrap().request,
+            result: Err(crate::api::ApiError::Status {
+                status: 409,
+                message: "Another client changed the queue".into(),
+            }),
+        });
+        assert!(app.queue_edits.is_empty());
+        assert_eq!(queue_uris(&app).1, [b, a, c]);
+        app.backend.shutdown();
     }
 
     /// The answer to a poll sent after everything asked so far.

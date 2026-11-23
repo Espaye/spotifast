@@ -950,35 +950,53 @@ fn retire_landed(target: &mut Option<SkipTarget>, playing: Option<&str>) {
     }
 }
 
-/// Retires the engine's skip target as each Connect state update shows
-/// the row it goes to playing.
-async fn retire_landed_skips(
+/// Publishes local queue changes and retires a skip once its row lands.
+async fn watch_local_queue(
     mut states: tokio::sync::watch::Receiver<Option<PlayerState>>,
+    mut events: tokio::sync::mpsc::UnboundedReceiver<PlayerEvent>,
+    player: Arc<Player>,
     target: Arc<Mutex<Option<SkipTarget>>>,
     device: String,
     notify: Notify,
 ) {
     let mut shown = RemoteQueueView::default();
-    while states.changed().await.is_ok() {
-        // Out of the watch before the target is locked: a skip holds the
-        // target while it reads the watch.
-        let (playing, queue) = {
-            let state = states.borrow_and_update();
-            let state = state.as_ref();
-            (
-                state.and_then(playing_key),
-                state.map(|state| RemoteQueueView::from_state(device.clone(), state)),
-            )
-        };
-        retire_landed(
-            &mut target.lock().unwrap_or_else(|p| p.into_inner()),
-            playing.as_deref(),
-        );
-        if let Some(queue) = queue
-            && queue != shown
-        {
-            shown = queue.clone();
-            notify(EngineEvent::LocalQueue(queue));
+    states.mark_changed();
+    loop {
+        tokio::select! {
+            changed = states.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                // A skip holds the target while it reads the watch.
+                let (playing, queue) = {
+                    let state = states.borrow_and_update();
+                    let state = state.as_ref();
+                    (
+                        state.and_then(playing_key),
+                        state.map(|state| RemoteQueueView::from_state(device.clone(), state)),
+                    )
+                };
+                retire_landed(
+                    &mut target.lock().unwrap_or_else(|p| p.into_inner()),
+                    playing.as_deref(),
+                );
+                if let Some(queue) = queue
+                    && queue != shown
+                {
+                    shown = queue.clone();
+                    notify(EngineEvent::LocalQueue(queue));
+                }
+            }
+            event = events.recv() => match event {
+                Some(PlayerEvent::Playing { .. }) => {
+                    // Spirc can skip publishing Playing when the position agrees.
+                    // SetQueue is a notification: Spirc republishes its own state
+                    // and doesn't read the payload or change the queue.
+                    player.emit_set_queue_event(String::new(), None, Vec::new(), Vec::new());
+                }
+                Some(_) => {}
+                None => return,
+            },
         }
     }
 }
@@ -1062,6 +1080,16 @@ impl Engine {
             notify(EngineEvent::State(current.clone()));
         }
 
+        let skip_target: Arc<Mutex<Option<SkipTarget>>> = Arc::default();
+        tokio::spawn(watch_local_queue(
+            spirc.watch_player_state(),
+            player.get_player_event_channel(),
+            Arc::clone(&player),
+            Arc::clone(&skip_target),
+            config.device_id(),
+            Arc::clone(&notify),
+        ));
+
         let shutting_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let closing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let interrupted: Arc<Mutex<Option<Interrupted>>> = Arc::default();
@@ -1086,14 +1114,6 @@ impl Engine {
                 ended_notify(EngineEvent::SessionEnded);
             }
         });
-
-        let skip_target: Arc<Mutex<Option<SkipTarget>>> = Arc::default();
-        tokio::spawn(retire_landed_skips(
-            spirc.watch_player_state(),
-            Arc::clone(&skip_target),
-            config.device_id(),
-            Arc::clone(&notify),
-        ));
 
         let device_id = config.device_id();
         Ok(Self {

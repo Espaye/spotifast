@@ -475,6 +475,45 @@ pub fn forget_fullscreen_controls(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<(f64, bool)>(controls_id()));
 }
 
+/// System cursors only show or hide. Draw the idle pointer while it fades
+/// so it uses the same opacity as the full-screen header.
+pub fn fade_fullscreen_cursor(ctx: &egui::Context, controls: f32) {
+    if controls >= 1.0 || ctx.output(|output| output.cursor_icon) == egui::CursorIcon::None {
+        return;
+    }
+    ctx.set_cursor_icon(egui::CursorIcon::None);
+    let Some(at) = ctx.pointer_hover_pos().filter(|_| controls > 0.0) else {
+        return;
+    };
+    let points = [
+        vec2(0.0, 0.0),
+        vec2(0.0, 18.0),
+        vec2(4.5, 13.5),
+        vec2(8.0, 21.0),
+        vec2(11.0, 19.5),
+        vec2(7.5, 12.0),
+        vec2(14.0, 12.0),
+    ]
+    .map(|offset| at + offset);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        controls_id().with("cursor"),
+    ));
+    let mut arrow = egui::Mesh::default();
+    let fill = Color32::WHITE.gamma_multiply(controls);
+    for point in points {
+        arrow.colored_vertex(point, fill);
+    }
+    for [a, b, c] in [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]] {
+        arrow.add_triangle(a, b, c);
+    }
+    painter.add(egui::Shape::mesh(arrow));
+    painter.add(egui::Shape::closed_line(
+        points.to_vec(),
+        egui::Stroke::new(1.0, Color32::BLACK.gamma_multiply(controls)),
+    ));
+}
+
 /// Full screen lyrics over the whole window. The player bar comes and goes
 /// over the bottom of it, so the room the layout uses stops above the bar
 /// and never moves; `controls` is how much of the bar and the scroll bar
@@ -1642,6 +1681,39 @@ mod tests {
         });
         output.textures_delta.clear();
         shown
+    }
+
+    #[test]
+    fn the_fullscreen_cursor_uses_the_controls_opacity() {
+        let ctx = egui::Context::default();
+        for controls in [1.0, 0.75, 0.25, 0.0] {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::PointerMoved(pos2(100.0, 100.0))],
+                    ..Default::default()
+                },
+                |ui| super::fade_fullscreen_cursor(ui.ctx(), controls),
+            );
+            output.textures_delta.clear();
+            let arrow = output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Mesh(mesh) if mesh.vertices.len() == 7 => Some(mesh),
+                _ => None,
+            });
+            if 0.0 < controls && controls < 1.0 {
+                let expected = egui::Color32::WHITE.gamma_multiply(controls);
+                assert!(arrow.unwrap().vertices.iter().all(|v| v.color == expected));
+            } else {
+                assert!(arrow.is_none());
+            }
+            assert_eq!(
+                output.platform_output.cursor_icon,
+                if controls == 1.0 {
+                    egui::CursorIcon::Default
+                } else {
+                    egui::CursorIcon::None
+                },
+            );
+        }
     }
 
     #[test]

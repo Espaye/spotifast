@@ -7809,6 +7809,7 @@ impl App {
     /// rows as a fresh list instead used to take seconds, threw the
     /// context away, and left Spotify's copy of the queue to reappear.
     fn play_queue_item(&mut self, index: usize, uri: String) {
+        self.adopt_local_manual_queue();
         // A newer choice outranks a song still waiting for its radio.
         self.song_radio = None;
         self.resume_load = None;
@@ -8229,8 +8230,29 @@ impl App {
     fn note_local_queue(&mut self, view: crate::player::RemoteQueueView) {
         let changed = self.local_queue.as_ref() != Some(&view);
         self.local_queue = Some(view);
+        self.adopt_local_manual_queue();
         if changed && self.queue_locally_reorderable() {
             self.recheck_visible_queue();
+        }
+    }
+
+    /// Imported and externally queued copies belong to the next local rewrite too.
+    fn adopt_local_manual_queue(&mut self) {
+        if !self.queue_locally_reorderable()
+            || !self.pending_queue_adds.is_empty()
+            || self.queue_edit_in_flight()
+            || self.queue_reorder_pending.is_some()
+            || self.queue_cleared.is_some()
+            || self.queue_removed.is_some()
+            || self.queue_skip_in_flight()
+        {
+            return;
+        }
+        if let Some(view) = self.queue_player_view()
+            && self.manual_queue != view.queued
+        {
+            self.manual_queue = view.queued.clone();
+            self.session_dirty = true;
         }
     }
 
@@ -8746,6 +8768,7 @@ impl App {
             self.remove_from_remote_queue(rows);
             return;
         }
+        self.adopt_local_manual_queue();
         let queued_len = self.queued_rows_len();
         let Loadable::Loaded(queue) = &self.queue else {
             return;
@@ -8812,6 +8835,7 @@ impl App {
             self.clear_remote_queue();
             return;
         }
+        self.adopt_local_manual_queue();
         self.pending_album_queues.clear();
         self.last_album_queue = None;
         // `queue_one` writes every queued song to both lists, so they hold
@@ -13494,6 +13518,7 @@ impl App {
     }
 
     fn show_queued_song(&mut self, uri: &str, label: &str) {
+        self.adopt_local_manual_queue();
         let item = self.optimistic_queue_item(uri, label);
         self.pending_queue_adds.push(PendingQueueAdd {
             item: item.clone(),
@@ -14718,6 +14743,7 @@ impl App {
                     self.move_in_remote_queue(from, to);
                     return;
                 }
+                self.adopt_local_manual_queue();
                 let queued_len = self.queued_rows_len();
                 if from >= queued_len || to > queued_len || from == to || to == from + 1 {
                     return;
@@ -14754,6 +14780,7 @@ impl App {
                     self.queue_many(songs);
                     return;
                 }
+                self.adopt_local_manual_queue();
                 let position = position.min(self.queued_rows_len());
                 let items: Vec<PlayableItem> = items
                     .into_iter()
@@ -25104,6 +25131,53 @@ mod tests {
                 assert!(app.backend.take_player_commands().is_empty());
                 app.backend.shutdown();
             }
+        }
+    }
+
+    #[test]
+    fn local_rewrites_keep_manual_copies_imported_from_another_player() {
+        let ctx = egui::Context::default();
+        for clear in [false, true] {
+            let mut app = app_with_local_manual_queue();
+            app.backend.set_offline(true);
+            app.local_device_id = Some("this-computer".into());
+            app.manual_queue.clear();
+            let imported = vec!["spotify:track:a".to_string(), "spotify:track:a".to_string()];
+            app.queue = loaded_queue(
+                "spotify:track:playing",
+                &["spotify:track:a", "spotify:track:a", "spotify:track:ctx"],
+            );
+            let view = crate::player::RemoteQueueView {
+                device: "this-computer".into(),
+                track: "spotify:track:playing".into(),
+                queued: imported.clone(),
+                ..Default::default()
+            };
+            app.note_local_queue(view.clone());
+            assert_eq!(app.manual_queue, imported);
+            app.backend.take_player_commands();
+            if clear {
+                app.clear_queue();
+                assert!(app.manual_queue.is_empty());
+                assert_eq!(queue_uris(&app).1, ["spotify:track:ctx"]);
+                assert!(matches!(
+                    app.backend.take_player_commands().as_slice(),
+                    [PlayerCommand::ClearQueue]
+                ));
+            } else {
+                app.apply(Action::PlayNext { items: vec![queued_song("spotify:track:new")] }, &ctx);
+                let expected = ["spotify:track:new", "spotify:track:a", "spotify:track:a"];
+                assert_eq!(app.manual_queue, expected);
+                let commands = app.backend.take_player_commands();
+                assert_eq!(commands.len(), 4);
+                for (command, uri) in commands.iter().skip(1).zip(expected) {
+                    assert!(matches!(command, PlayerCommand::AddToQueue(queued) if queued == uri));
+                }
+            }
+            // A pre-edit engine report must not put the imported order back.
+            app.note_local_queue(view);
+            assert_eq!(app.manual_queue.is_empty(), clear);
+            app.backend.shutdown();
         }
     }
 

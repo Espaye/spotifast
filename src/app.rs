@@ -13331,6 +13331,10 @@ impl App {
 
     fn transfer_remote(&mut self, device_id: String, play: bool) {
         self.selected_device = Some(device_id.clone());
+        if self.queue_target.is_some() {
+            // The queue stays editable on its new device at once.
+            self.bind_playback_queue();
+        }
         self.backend.api(ApiRequest::Transfer { device_id, play });
     }
 
@@ -24751,6 +24755,23 @@ mod tests {
         assert!(app.queue_seq > old_seq);
         assert_eq!(queue_uris(&app), shown);
         assert_eq!(app.pending_queue_adds.len(), 1);
+        app.backend.shutdown();
+    }
+
+    /// A transfer keeps the queue on show and editable on its new device.
+    #[test]
+    fn a_transfer_binds_the_shown_queue_to_its_new_device() {
+        let mut app = app_with_local_manual_queue();
+        app.backend.set_offline(true);
+        app.local_ready = false;
+        app.selected_device = Some("first".into());
+        app.bind_playback_queue();
+        let shown = queue_uris(&app);
+        let seq = app.queue_seq;
+        app.transfer("second".into());
+        assert_eq!(queue_uris(&app), shown);
+        assert!(app.queue_seq > seq, "a read asked of the first device is dropped");
+        assert!(app.queue_target == Some(app.playback_queue_target()));
         app.backend.shutdown();
     }
 

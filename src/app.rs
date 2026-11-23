@@ -7821,16 +7821,11 @@ impl App {
 
     fn bind_playback_queue(&mut self) {
         let target = self.playback_queue_target();
-        if let Some(old) = &self.queue_target
-            && *old != target
-        {
-            if old.0 == target.0 && old.1.is_none() {
-                // Learning an anonymous player's id invalidates the old read,
-                // but does not undo additions made before its first push.
-                self.queue_seq += 1;
-            } else {
-                self.forget_playback_queue();
-            }
+        if self.queue_target.as_ref().is_some_and(|old| *old != target) {
+            // A read asked of the old target no longer answers for the
+            // queue. The rows stay: a transfer carries the queue with it,
+            // and the next read replaces them if it did not.
+            self.queue_seq += 1;
         }
         self.queue_target = Some(target);
     }
@@ -13308,7 +13303,6 @@ impl App {
         }
         if Some(device_id.as_str()) == self.local_device_id.as_deref() {
             if !matches!(self.target(), Target::Local) {
-                self.forget_playback_queue();
                 self.local_queue = None;
             }
             self.selected_device = None;
@@ -13336,9 +13330,6 @@ impl App {
     }
 
     fn transfer_remote(&mut self, device_id: String, play: bool) {
-        if self.playback_queue_target().1.as_deref() != Some(device_id.as_str()) {
-            self.forget_playback_queue();
-        }
         self.selected_device = Some(device_id.clone());
         self.backend.api(ApiRequest::Transfer { device_id, play });
     }
@@ -13688,16 +13679,15 @@ impl App {
                 Loadable::Loaded(queue) => self.queued_end(&queue.queue, &self.manual_queue),
                 _ => 0,
             };
-            if let Loadable::Loaded(queue) = &mut self.queue {
-                if let Some(row) = queue.queue[..queued_len]
+            if let Loadable::Loaded(queue) = &mut self.queue
+                && let Some(row) = queue.queue[..queued_len]
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| item.uri() == uri)
                     .nth(occurrence)
                     .map(|(row, _)| row)
-                {
-                    queue.queue.remove(row);
-                }
+            {
+                queue.queue.remove(row);
             }
             self.remove_manual_queue_row(index);
         }
@@ -24773,13 +24763,18 @@ mod tests {
         app.bind_playback_queue();
         let old_seq = app.queue_seq;
         let old = app.queue.get().unwrap().clone();
+        let shown = queue_uris(&app);
+        let manual = app.manual_queue.clone();
         app.selected_device = Some("second".into());
+        let mut late = old.clone();
+        late.queue.truncate(1);
         app.handle_api(ApiResponse::Queue {
             seq: old_seq,
-            result: Ok(old.clone()),
+            result: Ok(late),
         });
-        assert!(app.queue.get().is_none());
-        assert!(app.manual_queue.is_empty());
+        assert!(app.queue_seq > old_seq, "the old device's read is dropped");
+        assert_eq!(queue_uris(&app), shown, "its rows stay until a new read");
+        assert_eq!(app.manual_queue, manual);
         app.show_queued_song("spotify:track:new", "New");
         app.remote_queue = Some(crate::player::RemoteQueueView {
             device: "second".into(),

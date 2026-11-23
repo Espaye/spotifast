@@ -339,8 +339,23 @@ response has no cover, the page shows its placeholder instead of an old image.
 Song lists with covers (playlists, Liked Songs and the queue) also download the
 covers of the songs within two screens above and below the visible rows, once
 the visible rows' own covers have arrived or failed, so a song scrolled into
-view shows its cover at once. These use the same artwork URLs and cache as the
-visible rows and add no Web API request.
+view shows its cover at once. The Albums, Artists and Podcasts grids in Your
+Library do the same for the cards within a screen above and below. These use
+the same artwork URLs and cache as the visible rows and add no Web API request.
+
+Resting the pointer on an album's card for a quarter of a second, in Your
+Library, search results or an artist's discography, requests that album
+ahead of the click, so its page opens complete. Only one such request is on
+its way at a time, it waits behind requests you made, and passing over a
+card requests nothing. An album fetched this way and never opened is the
+first page Spotifast lets go of. Resting on a device button requests the
+device list and looks for receivers on the local network, unless the list
+is less than 12 seconds old, and the picker opened within 5 seconds shows
+that answer without asking again.
+
+On a connection the system reports as metered (Windows), none of this is
+fetched ahead: covers load as they come into view, albums when opened, and
+the device list when the picker opens.
 
 Since 0.8.0, album and playlist scrollbars can request a distant track
 page through the existing session or Web API read path, without fetching all

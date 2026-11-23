@@ -1033,6 +1033,8 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     });
     if devices.clicked() {
         app.actions.push(Action::ToggleDevicesPopup);
+    } else if devices.hovered() {
+        app.actions.push(Action::WarmDevices);
     }
     let queue_open = app.show_queue_panel || matches!(app.page(), Page::Queue);
     let queue_button = theme::toggle_icon_button(

@@ -507,6 +507,10 @@ fn whole_rows(clip: Rect, start_y: f32, count: usize, row_height: f32) -> (usize
 /// heights of the visible list each way.
 const COVERS_AHEAD: f32 = 2.0;
 
+/// The same reach for card grids, whose covers are larger and many to a
+/// row.
+const CARDS_AHEAD: f32 = 1.0;
+
 /// Fetches and makes the covers of the songs within two screens above and
 /// below those [`virtual_rows`] lays out, so a song scrolled into view
 /// shows its cover at once instead of a placeholder. Call it just before
@@ -527,29 +531,66 @@ pub fn warm_row_covers<'a>(
     compact: bool,
     item: impl Fn(usize) -> Option<&'a PlayableItem>,
 ) {
-    if count == 0 || row_height <= 0.0 {
+    let size = row_cover_size(compact);
+    let pixels = app.art_px(size);
+    let url = |row: usize| item(row).and_then(|item| app.item_image(item, pixels));
+    warm_covers(ui, app, (count, 1), row_height, COVERS_AHEAD, size, url);
+}
+
+/// Fetches and makes the covers of the cards within a screen above and
+/// below those [`virtual_wrapped_cards`] lays out, by the same rules as
+/// [`warm_row_covers`]. Call it just before `virtual_wrapped_cards`, with
+/// the same card count and height; `url` gives the cover of a card.
+pub fn warm_card_covers(
+    ui: &Ui,
+    app: &App,
+    count: usize,
+    card_height: f32,
+    url: impl Fn(usize) -> Option<String>,
+) {
+    let columns = grid_columns(ui.available_width());
+    let url = |index: usize| if index < count { url(index) } else { None };
+    let rows = (count.div_ceil(columns), columns);
+    warm_covers(ui, app, rows, card_height + CARD_GAP, CARDS_AHEAD, CARD_ART, url);
+}
+
+/// Fetches and makes the covers `screens` heights of the visible list above
+/// and below the rows on screen, `size` points wide. `rows` is the count of
+/// rows and how many covers each holds; `url` gives a cover by its index.
+/// Nothing is fetched on a metered connection.
+fn warm_covers(
+    ui: &Ui,
+    app: &App,
+    (count, per_row): (usize, usize),
+    row_height: f32,
+    screens: f32,
+    size: f32,
+    url: impl Fn(usize) -> Option<String>,
+) {
+    if count == 0 || per_row == 0 || row_height <= 0.0 || app.metered() {
         return;
     }
     let clip = ui.clip_rect();
     let start_y = ui.cursor().top();
-    let size = row_cover_size(compact);
-    let pixels = app.art_px(size);
     let art = app.backend.art();
-    let url = |row: usize| item(row).and_then(|item| app.item_image(item, pixels));
     let (first, last) = whole_rows(clip, start_y, count, row_height);
-    let settled = |url: String| art.is_settled(&url);
-    if !(first..last).filter_map(&url).all(settled) {
+    let settled = (first * per_row..last * per_row)
+        .filter_map(&url)
+        .all(|cover| art.is_settled(&cover));
+    if !settled {
         return;
     }
-    let reach = clip.height() * COVERS_AHEAD;
+    let reach = clip.height() * screens;
     let rows_at = |shift: f32| {
         let clip = clip.translate(vec2(0.0, shift));
         laid_out_rows(clip, start_y, count, row_height)
     };
     let (above, below) = (rows_at(-reach).0, rows_at(reach).1);
     for row in rows_ahead(first, last, above, below) {
-        if let Some(url) = url(row) {
-            cover_copy(ui, &url, Vec2::splat(size), Some(art));
+        for index in row * per_row..(row + 1) * per_row {
+            if let Some(url) = url(index) {
+                cover_copy(ui, &url, Vec2::splat(size), Some(art));
+            }
         }
     }
 }
@@ -589,9 +630,7 @@ pub fn virtual_wrapped_cards(
     }
     let spacing = CARD_GAP / 2.0;
     let row_width = ui.available_width().max(CARD_WIDTH);
-    let cards_per_row = ((row_width + spacing) / (CARD_WIDTH + spacing))
-        .floor()
-        .max(1.0) as usize;
+    let cards_per_row = grid_columns(row_width);
     let row_count = count.div_ceil(cards_per_row);
     // CARD_GAP is already in the row height. Do not also inherit item_spacing.y.
     let previous_spacing = ui.spacing().item_spacing;
@@ -611,6 +650,46 @@ pub fn virtual_wrapped_cards(
         ui.allocate_space(vec2(row_width, CARD_GAP));
     });
     ui.spacing_mut().item_spacing = previous_spacing;
+}
+
+/// How many cards a row of [`virtual_wrapped_cards`] `width` points wide
+/// holds.
+fn grid_columns(width: f32) -> usize {
+    let spacing = CARD_GAP / 2.0;
+    let width = width.max(CARD_WIDTH);
+    ((width + spacing) / (CARD_WIDTH + spacing)).floor().max(1.0) as usize
+}
+
+/// How long the pointer rests on a card before the page it opens is
+/// fetched ahead of the click. Passing over a card asks for nothing.
+const PRELOAD_REST: f64 = 0.25;
+
+/// Whether the pointer has now rested on `response` long enough to fetch
+/// what it opens. True once per visit.
+pub fn rested_on(ui: &Ui, response: &egui::Response) -> bool {
+    type Rest = (egui::Id, f64, bool);
+    let key = egui::Id::new("spotifast-card-rest");
+    let mine = ui
+        .data(|data| data.get_temp::<Rest>(key))
+        .filter(|(id, ..)| *id == response.id);
+    if !response.hovered() {
+        if mine.is_some() {
+            ui.data_mut(|data| data.remove::<Rest>(key));
+        }
+        return false;
+    }
+    let now = ui.input(|input| input.time);
+    let (since, done) = mine.map_or((now, false), |(_, since, done)| (since, done));
+    let rested = now - since;
+    let ready = !done && rested >= PRELOAD_REST;
+    if mine.is_none() || ready {
+        ui.data_mut(|data| data.insert_temp(key, (response.id, since, done || ready)));
+    }
+    if !done && !ready {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(PRELOAD_REST - rested));
+    }
+    ready
 }
 
 /// Asks for the next page when the user scrolls near the end of a list.
@@ -5487,6 +5566,60 @@ mod tests {
         );
         assert!(!painted.is_empty());
         assert_eq!(painted[0], 0);
+    }
+
+    /// The covers fetched ahead of a card grid are counted in its own
+    /// columns.
+    #[test]
+    fn card_grids_fetch_covers_by_their_own_columns() {
+        assert_eq!(grid_columns(100.0), 1);
+        assert_eq!(grid_columns(CARD_WIDTH * 2.0 + CARD_GAP / 2.0), 2);
+        assert_eq!(grid_columns(CARD_WIDTH * 2.0 + CARD_GAP / 2.0 - 1.0), 1);
+        let (mut tops, mut width) = (Vec::new(), 0.0);
+        let size = vec2(800.0, 400.0);
+        run(size, Rect::from_min_size(pos2(0.0, 0.0), size), Vec::new(), |ui| {
+            width = ui.available_width();
+            virtual_wrapped_cards(ui, 40, 180.0, |ui, _| tops.push(ui.min_rect().top()));
+        });
+        let first_row = tops.iter().take_while(|top| (**top - tops[0]).abs() < 0.5);
+        assert_eq!(first_row.count(), grid_columns(width));
+        assert!(grid_columns(width) > 1);
+    }
+
+    /// Passing over a card asks for nothing; resting on it asks once per
+    /// visit.
+    #[test]
+    fn a_card_asks_for_its_page_once_the_pointer_rests_on_it() {
+        let ctx = egui::Context::default();
+        let frame = |time: f64, pointer: Option<egui::Pos2>| {
+            let mut rested = [false; 2];
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 100.0))),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    for (index, left) in [0.0, 150.0].into_iter().enumerate() {
+                        let rect = Rect::from_min_size(pos2(left, 0.0), vec2(100.0, 100.0));
+                        let id = egui::Id::new(("rest-card", index));
+                        let response = ui.interact(rect, id, Sense::click());
+                        rested[index] = rested_on(ui, &response);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            rested
+        };
+        assert_eq!(frame(0.0, Some(pos2(50.0, 50.0))), [false; 2]);
+        assert_eq!(frame(0.1, None), [false; 2], "passing over asks for nothing");
+        assert_eq!(frame(0.4, None), [true, false]);
+        assert_eq!(frame(0.5, None), [false; 2], "once per visit");
+        assert_eq!(frame(0.6, Some(pos2(200.0, 50.0))), [false; 2]);
+        assert_eq!(frame(0.7, Some(pos2(50.0, 50.0))), [false; 2]);
+        assert_eq!(frame(0.8, None), [false; 2], "a new visit starts again");
+        assert_eq!(frame(1.1, None), [true, false]);
     }
 
     fn song(uri: &str) -> PlayableItem {

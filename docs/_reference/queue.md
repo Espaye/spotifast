@@ -191,7 +191,9 @@ counts once, and the notification reports only the rows actually added.
     above the Next up heading. The order comes from the active player's
     queue and each drop appears immediately. You can keep dragging while a
     device confirms earlier drops. Spotifast sends them in order using the
-    latest confirmed queue revision. If playback advances or another app
+    latest confirmed queue revision. Clear queue uses that same sequence.
+    Confirmation requires a new revision with the edited occurrences in
+    place; an addition appended meanwhile can stay. If playback advances or another app
     changes the affected rows, pick up the song again from the updated list.
     On the built-in player, the queue refreshes when a song starts, so you
     can reorder while it plays or while it is paused.

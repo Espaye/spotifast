@@ -8275,7 +8275,15 @@ impl App {
         })
     }
 
+    fn queue_view_is_older(view: &crate::player::RemoteQueueView, shown: Option<&crate::player::RemoteQueueView>) -> bool {
+        shown.is_some_and(|shown| shown.device == view.device
+            && shown.published_at.zip(view.published_at).is_some_and(|(shown, incoming)| shown > incoming))
+    }
+
     fn note_local_queue(&mut self, view: crate::player::RemoteQueueView) {
+        if Self::queue_view_is_older(&view, self.local_queue.as_ref()) {
+            return;
+        }
         let changed = self.local_queue.as_ref() != Some(&view);
         self.local_queue = Some(view);
         self.adopt_player_manual_queue();
@@ -8425,6 +8433,9 @@ impl App {
     /// Keeps a cluster push and asks for the queue again when what the
     /// device has queued changed, so Next in queue follows another app.
     fn note_remote_queue(&mut self, view: crate::player::RemoteQueueView) {
+        if Self::queue_view_is_older(&view, self.remote_queue.as_ref()) {
+            return;
+        }
         self.preview_remote_previous_push(&view);
         let changed = self
             .remote_queue
@@ -8657,116 +8668,39 @@ impl App {
         self.toast(message);
     }
 
-    /// Rewrites what the device playing elsewhere has queued by hand to
-    /// `queued`, already on show, with Connect's `set_queue`. Its queue is
-    /// held off like a local reorder's until it catches up: the last
-    /// cluster push still lists the old order, so a fetch shows it too.
-    fn send_remote_queue(&mut self, queued: Vec<String>) {
-        // No addition is pending while it can be edited, so none names a
-        // row of the old list.
-        self.manual_queue = queued.clone();
-        self.session_dirty = true;
-        self.queue_seq += 1;
-        self.queue_stale_retries = 0;
-        self.queue_reorder_pending = Some(Instant::now());
-        self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
-        let device_id = match self.target() {
-            Target::Remote(device_id) => device_id,
-            Target::Local => None,
-        };
-        self.backend.api(ApiRequest::SetQueue { device_id, queued });
-    }
-
-    /// Moves a row of Next in queue on the device playing elsewhere, from
-    /// shown index `from` to the slot before shown index `to`.
+    /// Legacy manual-row actions use the same positional edit path as a drag.
     fn move_in_remote_queue(&mut self, from: usize, to: usize) {
-        if !self.remote_queue_editable(|view| view.can_reorder) {
-            return;
-        }
-        let queued_len = self.queued_rows_len();
-        if from >= queued_len || to > queued_len || from == to || to == from + 1 {
-            return;
-        }
-        let Loadable::Loaded(queue) = &mut self.queue else {
+        let Some(item) = self.queue.get().and_then(|queue| queue.queue.get(from)).cloned() else {
             return;
         };
-        let item = queue.queue.remove(from);
-        queue
-            .queue
-            .insert(if to > from { to - 1 } else { to }, item);
-        let queued = queue.queue[..queued_len]
-            .iter()
-            .map(|item| item.uri().to_string())
-            .collect();
-        self.send_remote_queue(queued);
-    }
-
-    /// Takes the chosen rows out of Next in queue on the device playing
-    /// elsewhere. A row whose index no longer holds its song is left alone.
-    fn remove_from_remote_queue(&mut self, rows: Vec<(usize, String)>) {
-        if !self.remote_queue_editable(|view| view.can_remove) {
+        if from >= self.queued_rows_len() || to > self.queued_rows_len() {
             return;
         }
-        let queued_len = self.queued_rows_len();
-        let Loadable::Loaded(queue) = &mut self.queue else {
-            return;
+        let track = DragTrack {
+            title: item.name().to_string(),
+            image: None,
+            items: vec![item],
+            from: Some((QUEUED_ROW.into(), from as u32)),
+            source_playlist: None,
+            queue_origin: self.queue_origin(),
         };
-        let mut indexes: Vec<usize> = rows
-            .into_iter()
-            .filter(|(index, uri)| {
-                *index < queued_len
-                    && queue
-                        .queue
-                        .get(*index)
-                        .is_some_and(|item| item.uri() == uri)
-            })
-            .map(|(index, _)| index)
-            .collect();
-        indexes.sort_unstable();
-        indexes.dedup();
-        if indexes.is_empty() {
-            return;
-        }
-        let mut removed = std::collections::HashSet::new();
-        for &index in indexes.iter().rev() {
-            removed.insert(queue.queue.remove(index).uri().to_string());
-        }
-        let queued = queue.queue[..queued_len - indexes.len()]
-            .iter()
-            .map(|item| item.uri().to_string())
-            .collect();
-        if let Some((earlier, at)) = self.queue_removed.take()
-            && at.elapsed() < PLAYBACK_HOLD
-        {
-            removed.extend(earlier);
-        }
-        self.queue_removed = Some((removed, Instant::now()));
-        self.send_remote_queue(queued);
+        self.drop_in_playback_queue(track, to, true);
     }
 
-    /// Clears Next in queue on the device playing elsewhere, keeping the
-    /// rows its context plays next.
+    /// Clear is a positional removal, confirmed before the next rewrite.
     fn clear_remote_queue(&mut self) {
         if !self.remote_queue_editable(|view| view.can_remove) {
             return;
         }
-        let queued_len = self.queued_rows_len();
-        let Loadable::Loaded(queue) = &mut self.queue else {
-            return;
-        };
-        let cleared: std::collections::HashSet<String> = queue
-            .queue
-            .drain(..queued_len)
-            .map(|item| item.uri().to_string())
-            .collect();
-        if cleared.is_empty() {
-            return;
+        let rows = self.queue.get().map(|queue| queue.queue.iter()
+            .take(self.queued_rows_len()).enumerate()
+            .map(|(index, item)| (index, item.uri().to_string())).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if self.remove_play_order_rows(&rows) {
+            self.pending_album_queues.clear();
+            self.last_album_queue = None;
+            self.toast(gettext(self.locale, "Queue cleared"));
         }
-        self.pending_album_queues.clear();
-        self.last_album_queue = None;
-        self.queue_cleared = Some((cleared, Instant::now()));
-        self.send_remote_queue(Vec::new());
-        self.toast(gettext(self.locale, "Queue cleared"));
     }
 
     fn remove_play_order_rows(&mut self, rows: &[(usize, String)]) -> bool {
@@ -8815,7 +8749,6 @@ impl App {
             return;
         }
         if !self.queue_locally_reorderable() {
-            self.remove_from_remote_queue(rows);
             return;
         }
         self.adopt_player_manual_queue();
@@ -11482,9 +11415,17 @@ impl App {
                 match result {
                     Ok(view) if applies => {
                         if self.queue_locally_reorderable() {
-                            self.local_queue = Some(view);
-                        } else {
+                            if !Self::queue_view_is_older(&view, self.local_queue.as_ref()) {
+                                self.local_queue = Some(view);
+                            }
+                        } else if !Self::queue_view_is_older(&view, self.remote_queue.as_ref()) {
                             self.remote_queue = Some(view);
+                        }
+                        if self.queue_edits.is_empty()
+                            && let Some(mut queue) = self.queue.get().cloned()
+                            && self.align_queue_with_player(&mut queue)
+                        {
+                            self.queue = Loadable::Loaded(queue);
                         }
                         self.send_queue_edit();
                     }
@@ -11526,20 +11467,6 @@ impl App {
                     _ => self.queue_edits.clear(),
                 }
                 if !self.queue_edit_in_flight() {
-                    self.refresh_queue(true);
-                }
-            }
-            ApiResponse::QueueSet { result } => {
-                if let Err(error) = result {
-                    // Spotify's queue is right again: stop holding it off.
-                    self.queue_reorder_pending = None;
-                    self.queue_removed = None;
-                    self.queue_cleared = None;
-                    self.toast_error(
-                        // Translators: {error} is an error message.
-                        gettext(self.locale, "Couldn't change the queue: {error}")
-                            .replace("{error}", &error.to_string()),
-                    );
                     self.refresh_queue(true);
                 }
             }
@@ -22484,6 +22411,78 @@ mod tests {
         });
         assert!(app.queue_edits.is_empty());
         assert_eq!(queue_uris(&app).1, [b, a, c]);
+        app.backend.shutdown();
+    }
+
+    fn app_with_connect_edit_rows() -> App {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.offline = false;
+        app.local_ready = false;
+        let now = "spotify:track:now";
+        app.remote = Some(RemoteSnapshot { state: sonos_playing(now), received_at: Instant::now() });
+        app.queue = loaded_queue(now, &["spotify:track:a", "spotify:track:b", "spotify:track:c"]);
+        app.remote_queue = Some(crate::player::RemoteQueueView {
+            device: "sonos".into(), track: now.into(),
+            queued: vec!["spotify:track:a".into()],
+            rows: app.queue.get().unwrap().queue.iter().map(|item| (item.uri().to_string(), String::new())).collect(),
+            can_reorder: true, can_remove: true, can_insert: true,
+            ..Default::default()
+        });
+        app
+    }
+
+    #[test]
+    fn clear_waits_for_confirmation_before_a_following_context_drag() {
+        let mut app = app_with_connect_edit_rows();
+        app.clear_queue();
+        assert_eq!(queue_uris(&app).1, ["spotify:track:b", "spotify:track:c"]);
+        assert_eq!(app.queue_edits.len(), 1);
+        assert!(matches!(app.queue_edits[0].edit.operation,
+            crate::player::QueueEditOperation::Remove { .. }));
+        let track = DragTrack {
+            title: "C".into(), image: None, items: vec![queued_song("spotify:track:c")],
+            from: Some((UPCOMING_ROW.into(), 1)), source_playlist: None,
+            queue_origin: app.queue_origin(),
+        };
+        app.drop_in_playback_queue(track, 0, false);
+        assert_eq!(app.queue_edits.len(), 2);
+        assert_eq!(queue_uris(&app).1, ["spotify:track:c", "spotify:track:b"]);
+        let mut cleared = app.remote_queue.clone().unwrap();
+        cleared.queued.clear();
+        cleared.rows.remove(0);
+        app.handle_api(ApiResponse::QueueEdited {
+            request: app.queue_edits[0].request, result: Ok(cleared),
+        });
+        assert_eq!(app.queue_edits.len(), 1);
+        assert_eq!(app.queue_edits[0].edit.before, ["spotify:track:b", "spotify:track:c"]);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_queue_edit_acknowledgement_cannot_restore_an_older_push() {
+        let mut app = app_with_connect_edit_rows();
+        app.remote_queue.as_mut().unwrap().queued.clear();
+        let track = DragTrack {
+            title: "C".into(), image: None, items: vec![queued_song("spotify:track:c")],
+            from: Some((UPCOMING_ROW.into(), 2)), source_playlist: None,
+            queue_origin: app.queue_origin(),
+        };
+        app.drop_in_playback_queue(track, 0, false);
+        let request = app.queue_edits[0].request;
+        let mut acknowledged = app.remote_queue.clone().unwrap();
+        acknowledged.rows.rotate_right(1);
+        let at = Instant::now();
+        acknowledged.published_at = Some(at);
+        let mut newer = acknowledged.clone();
+        newer.rows.swap(1, 2);
+        newer.published_at = Some(at + Duration::from_millis(1));
+        app.note_remote_queue(newer.clone());
+        app.handle_api(ApiResponse::QueueEdited { request, result: Ok(acknowledged.clone()) });
+        assert_eq!(app.remote_queue.as_ref(), Some(&newer));
+        assert_eq!(queue_uris(&app).1, ["spotify:track:c", "spotify:track:b", "spotify:track:a"]);
+        app.note_remote_queue(acknowledged);
+        assert_eq!(app.remote_queue.as_ref(), Some(&newer), "late watcher events are ordered too");
         app.backend.shutdown();
     }
 

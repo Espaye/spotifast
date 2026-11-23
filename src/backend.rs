@@ -414,12 +414,6 @@ pub enum ApiRequest {
         uris: Vec<String>,
         device_id: Option<String>,
     },
-    /// Rewrites what another device has queued by hand to `queued`, in
-    /// order, with Connect's `set_queue`. The Web API has no such command.
-    SetQueue {
-        device_id: Option<String>,
-        queued: Vec<String>,
-    },
     EditQueue {
         device: String,
         request: u64,
@@ -691,9 +685,6 @@ pub enum ApiResponse {
     QueueBatchAdded {
         request: u64,
         added: usize,
-        result: ApiResult<()>,
-    },
-    QueueSet {
         result: ApiResult<()>,
     },
     QueueEdited {
@@ -5296,7 +5287,6 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
         | ApiRequest::AddManyToQueue { .. }
-        | ApiRequest::SetQueue { .. }
         | ApiRequest::EditQueue { .. } => Operation::Playback,
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
@@ -6342,12 +6332,6 @@ async fn handle(
                 "No Connect session for editing the queue".into(),
             )),
         },
-        // Only the Connect route can send it, and that needs local playback.
-        ApiRequest::SetQueue { .. } => ApiResponse::QueueSet {
-            result: Err(ApiError::Network(
-                "no Connect session to send the queue with".to_string(),
-            )),
-        },
     };
     if let Some(request) = retry
         && refused_as_restricted(&response)
@@ -6380,8 +6364,7 @@ fn command_device(request: &ApiRequest) -> Option<Option<&str>> {
         | ApiRequest::SkipTo { device_id, .. }
         | ApiRequest::ShufflePlay { device_id, .. }
         | ApiRequest::AddToQueue { device_id, .. }
-        | ApiRequest::AddManyToQueue { device_id, .. }
-        | ApiRequest::SetQueue { device_id, .. } => Some(device_id.as_deref()),
+        | ApiRequest::AddManyToQueue { device_id, .. } => Some(device_id.as_deref()),
         ApiRequest::Transfer { device_id, .. } => Some(Some(device_id)),
         _ => None,
     }
@@ -6554,31 +6537,6 @@ async fn over_connect(
                 result,
             }
         }
-        ApiRequest::SetQueue { device_id, queued } => {
-            // Any Connect device takes it, restricted or not.
-            let to = connect
-                .command_target(device_id.as_deref(), playing.as_deref())
-                .or_else(|| device_id.clone())
-                .or_else(|| playing.clone())?;
-            // In turn with skips, so it rewrites the rows they leave.
-            let _turn = connect.queue_skip_turn().await;
-            let result = match engine.remote_set_queue(&to, queued) {
-                Some((body, named)) => {
-                    log::info!(
-                        "queue set on another device: {named} of {} queued songs",
-                        queued.len()
-                    );
-                    crate::sonos::command(session, &to, &body).await
-                }
-                None => Err(ApiError::Network(
-                    "Spotify has not said what that device has queued".to_string(),
-                )),
-            };
-            if let Err(error) = &result {
-                log::info!("queue set on another device failed: {error}");
-            }
-            ApiResponse::QueueSet { result }
-        }
         _ => return None,
     })
 }
@@ -6590,7 +6548,26 @@ async fn edit_connect_queue(
     expected: &[String],
     manual: usize,
 ) -> ApiResult<crate::player::RemoteQueueView> {
-    let Some(state) = engine.queue_state(device) else {
+    edit_published_queue(device, edit, expected, manual,
+        || engine.queue_state(device),
+        |body| async move { crate::sonos::command(engine.session(), device, &body).await },
+    ).await
+}
+
+async fn edit_published_queue<R, S, F>(
+    device: &str,
+    edit: &crate::player::QueueEdit,
+    expected: &[String],
+    manual: usize,
+    mut read: R,
+    mut send: S,
+) -> ApiResult<crate::player::RemoteQueueView>
+where
+    R: FnMut() -> Option<crate::player::QueueSnapshot>,
+    S: FnMut(serde_json::Value) -> F,
+    F: std::future::Future<Output = ApiResult<()>>,
+{
+    let Some((state, _)) = read() else {
         return Err(ApiError::Status {
             status: 409,
             message: "The device's queue is unavailable".into(),
@@ -6608,24 +6585,19 @@ async fn edit_connect_queue(
     };
     // A successful command response does not yet supply the receiver's next
     // revision. Read its published queue before sending another rewrite.
-    let removes = matches!(
-        &edit.operation,
-        crate::player::QueueEditOperation::Remove { .. }
-    );
     tokio::time::timeout(Duration::from_secs(6), async {
-        crate::sonos::command(engine.session(), device, &body).await?;
+        send(body).await?;
         loop {
-            if let Some(current) = engine.queue_state(device) {
+            if let Some((current, published_at)) = read() {
                 if current.track.uri != state.track.uri || current.track.uid != state.track.uid {
                     return Err(ApiError::Status {
                         status: 409,
                         message: "The device's queue changed".into(),
                     });
                 }
-                let view = crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
-                if (!removes || current.next_tracks != state.next_tracks)
-                    && edit.confirmed(&view, expected, manual)
-                {
+                let mut view = crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
+                if edit.confirmed_state(&state, &current) && edit.confirmed(&view, expected, manual) {
+                    view.published_at = Some(published_at);
                     return Ok(view);
                 }
             }
@@ -10486,6 +10458,63 @@ mod tests {
             .unwrap();
         assert_eq!(crate::lyrics::cached(&none), None, "and gone in a week");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_rewrites_wait_for_revisions_and_allow_an_append_but_time_out_on_old_pushes() {
+        use librespot_protocol::player::{PlayerState, ProvidedTrack};
+        use crate::player::{QueueEdit, QueueEditOperation};
+        use std::cell::RefCell;
+        let row = |uri: &str, provider: &str| ProvidedTrack {
+            uri: uri.into(), uid: uri.into(), provider: provider.into(), ..Default::default()
+        };
+        let state = |revision: &str, rows| PlayerState {
+            track: protobuf::MessageField::some(row("now", "context")),
+            queue_revision: revision.into(), next_tracks: rows, ..Default::default()
+        };
+        let r0 = state("r0", vec![row("a", "queue"), row("b", "context"), row("c", "context")]);
+        let r1 = state("r1", vec![row("a", "queue"), row("b", "queue"), row("d", "queue"), row("c", "context")]);
+        let r2 = state("r2", vec![row("a", "queue"), row("d", "queue"), row("c", "context")]);
+        let pending = RefCell::new(VecDeque::from([r0.clone(), r0, r1.clone()]));
+        let bodies = RefCell::new(Vec::new());
+        let mut read = || {
+            let mut pending = pending.borrow_mut();
+            let state = if pending.len() > 1 { pending.pop_front() } else { pending.front().cloned() };
+            state.map(|state| (state, Instant::now()))
+        };
+        let mut send = |body| {
+            bodies.borrow_mut().push(body);
+            std::future::ready(Ok(()))
+        };
+        let first = QueueEdit {
+            playing: "now".into(), before: vec!["a".into(), "b".into(), "c".into()], manual: 1,
+            operation: QueueEditOperation::Move { from: 1, to: 1, into_manual: true },
+        };
+        edit_published_queue("device", &first, &["a".into(), "b".into(), "c".into()], 2, &mut read, &mut send).await.unwrap();
+        *pending.borrow_mut() = VecDeque::from([r1, r2.clone()]);
+        let second = QueueEdit {
+            playing: "now".into(), before: vec!["a".into(), "b".into(), "d".into(), "c".into()], manual: 3,
+            operation: QueueEditOperation::Remove { indexes: vec![1] },
+        };
+        edit_published_queue("device", &second, &["a".into(), "d".into(), "c".into()], 2, &mut read, &mut send).await.unwrap();
+        assert_eq!(bodies.borrow()[0]["command"]["queue_revision"], "r0");
+        assert_eq!(bodies.borrow()[1]["command"]["queue_revision"], "r1");
+        *pending.borrow_mut() = VecDeque::from([r2.clone()]);
+        let third = QueueEdit {
+            playing: "now".into(), before: vec!["a".into(), "d".into(), "c".into()], manual: 2,
+            operation: QueueEditOperation::Move { from: 2, to: 0, into_manual: true },
+        };
+        let result = edit_published_queue("device", &third, &["c".into(), "a".into(), "d".into()], 3, &mut read, &mut send).await;
+        assert!(matches!(result, Err(ApiError::Status { status: 504, .. })));
+        let mut late = r2;
+        late.queue_revision = "r3".into();
+        let mut c = late.next_tracks.remove(2);
+        c.provider = "queue".into();
+        late.next_tracks.insert(0, c);
+        *pending.borrow_mut() = VecDeque::from([late]);
+        let result = edit_published_queue("device", &third, &[], 0, &mut read, &mut send).await;
+        assert!(matches!(result, Err(ApiError::Status { status: 409, .. })));
+        assert_eq!(bodies.borrow().len(), 3, "a late push cannot validate old positions");
     }
 
     /// Avoids shared playlist search after a successful session read.

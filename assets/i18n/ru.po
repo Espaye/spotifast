@@ -4785,3 +4785,31 @@ msgstr "Couldn't change the queue: {error}"
 #: src/app.rs:8657
 msgid "This device does not let Spotifast insert into its queue"
 msgstr "This device does not let Spotifast insert into its queue"
+
+#: src/model.rs:668
+msgid "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+msgstr "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+
+#: src/ui/player_bar.rs:838
+msgid "Repeat is off. Click to repeat all."
+msgstr "Repeat is off. Click to repeat all."
+
+#: src/ui/player_bar.rs:844
+msgid "Repeating all. Click to repeat this song."
+msgstr "Repeating all. Click to repeat this song."
+
+#: src/ui/player_bar.rs:850
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "Repeating this song. Click to turn repeat off."
+
+#: src/ui/topbar.rs:627
+msgid "Show MilkDrop only"
+msgstr "Show MilkDrop only"
+
+#: src/ui/lyrics.rs:1071
+msgid "Sync lyrics"
+msgstr "Sync lyrics"
+
+#: src/ui/lyrics.rs:1047
+msgid "Toggle MilkDrop background (V)"
+msgstr "Toggle MilkDrop background (V)"

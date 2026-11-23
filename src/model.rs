@@ -665,7 +665,7 @@ impl TopPeriod {
             ),
             Self::LongTerm => gettext(
                 locale,
-                "Based on roughly the last year of listening, including new activity.",
+                "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it.",
             ),
         }
     }

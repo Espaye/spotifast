@@ -49,6 +49,10 @@ the same personalized read and has no fallback: the shelf appears once
 local playback has read it, and stays hidden for accounts Spotify gives no
 top mixes. If a refresh fails, the mixes already on screen remain.
 
+**Your top songs** shows Spotify's ranking for roughly the last four weeks,
+six months, or year. Spotify calculates each ranking from your listening
+activity and includes new activity as it processes it.
+
 **New releases** shows the latest albums, EPs and singles from the artists
 you follow, newest first. A card opens its release. The shelf's title opens
 the **New releases** page, which lists every song of those releases, newest
@@ -856,19 +860,18 @@ stays while the pointer rests on it or one of its menus is open. The pointer,
 **Lyrics** title, and **Leave full screen** button fade together. Press **Q**
 for the queue beside the lyrics, on a dark pane in either theme.
 
-Press **V** in full screen lyrics to put MilkDrop behind the words in place of
-the cover's art. Press it again to bring the art back; Spotifast remembers which you
+Click the MilkDrop icon or press **V** in full-screen lyrics to put MilkDrop
+behind the words in place of the cover's art. Press it again to bring the art back; Spotifast remembers which you
 chose. **N** and **P** change the preset there. The picture is dimmed as far as
 it takes to keep the words clear, and holds still while the music is paused.
 It uses the presets you have: with none, the art stays. It follows the sound
 after the equalizer and before the volume, like every visualizer.
 
-Double-click the album art in full screen lyrics to leave MilkDrop alone on the
-screen, edge to edge and at full brightness, even if it was off. Move the mouse
-to see the player's controls for a few seconds; the cursor hides with them.
-Any other click brings everything back as it was, and **Esc** leaves full
-screen. **V**, **N** and **P** still work. A song with no art, or a computer
-with no MilkDrop to show, stays as it is.
+To watch MilkDrop on its own, right-click the visualiser button in the
+main window and choose **Show MilkDrop only**. Move the mouse to reveal the
+player controls. Click the animation or press **Esc** to return to the
+main window. You can also open the visualiser window and double-click it
+or press **F** for full screen.
 
 Since 0.10.0, quitting while lyrics are full screen no longer leaves
 the next launch stuck in full screen: the window returns to its previous size.

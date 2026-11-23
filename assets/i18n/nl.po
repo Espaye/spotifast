@@ -4247,8 +4247,14 @@ msgstr "Alles wordt herhaald. Klik om dit nummer te herhalen."
 msgid "Repeating this song. Click to turn repeat off."
 msgstr "Dit nummer wordt herhaald. Klik om herhalen uit te zetten."
 
-msgid "Based on roughly the last year of listening, including new activity."
-msgstr "Gebaseerd op ongeveer het afgelopen jaar, inclusief wat je onlangs hebt beluisterd."
+msgid "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+msgstr "Spotify maakt deze ranglijst op basis van ongeveer een jaar luisteren. Nieuwe luisteractiviteit telt mee zodra Spotify die verwerkt."
+
+msgid "Toggle MilkDrop background (V)"
+msgstr "MilkDrop-achtergrond aan of uit (V)"
+
+msgid "Show MilkDrop only"
+msgstr "Alleen MilkDrop tonen"
 
 #~ msgid "3. Pair once in Spotify"
 #~ msgstr "3. Eenmalig koppelen in Spotify"

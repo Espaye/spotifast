@@ -128,8 +128,9 @@ react to music playing on your computer, in a resizable window or full screen.
 </video>
 
 MilkDrop can also play behind your lyrics in full screen, dimmed until the
-words are clear, with the line being sung in the accent colour. Click the album
-art and everything else steps aside for MilkDrop, edge to edge.
+words are clear, with the line being sung in the accent colour. Use the
+MilkDrop icon in full-screen lyrics to change the background, or open the
+visualiser from the main window to watch it on its own.
 
 <video class="milkdrop-showcase lyrics-showcase" autoplay loop muted playsinline preload="metadata" poster="/assets/images/lyrics-milkdrop-poster.jpg" aria-label="Full screen lyrics with MilkDrop behind the words, then MilkDrop alone">
   <source src="/assets/images/lyrics-milkdrop.mp4" type="video/mp4">

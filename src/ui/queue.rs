@@ -589,7 +589,7 @@ fn rows(
             show_saved_heart: false,
         };
         let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
-        widgets::edge_faded(ui, row_height, |ui| widgets::track_row(ui, app, row));
+        widgets::edge_faded(ui, row_height, |ui| widgets::queue_track_row(ui, app, row));
         // A drag that started on this row names it, so dropping the playing
         // song back on the queue does not queue it again.
         if !dragging && let Some(payload) = egui::DragAndDrop::payload::<DragTrack>(ui.ctx()) {
@@ -946,7 +946,7 @@ fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shif
     else {
         return;
     };
-    widgets::track_row(
+    widgets::queue_track_row(
         ui,
         app,
         TrackRow {

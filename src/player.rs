@@ -572,31 +572,49 @@ fn queue_command(state: &PlayerState, next: Vec<serde_json::Value>) -> serde_jso
     })
 }
 
-/// A single edit against the visible prefix the listener dragged over.
+/// A single edit against the visible part of the active player's queue.
 #[derive(Clone, Debug)]
 pub struct QueueEdit {
     pub playing: String,
     pub before: Vec<String>,
     pub manual: usize,
-    pub from: Option<usize>,
-    pub to: usize,
-    pub into_manual: bool,
-    pub added: Vec<String>,
+    pub operation: QueueEditOperation,
+}
+
+#[derive(Clone, Debug)]
+pub enum QueueEditOperation {
+    Move {
+        from: usize,
+        to: usize,
+        into_manual: bool,
+    },
+    Insert {
+        to: usize,
+        into_manual: bool,
+        added: Vec<String>,
+    },
+    Remove {
+        indexes: Vec<usize>,
+    },
 }
 
 impl QueueEdit {
     pub(crate) fn command(&self, state: &PlayerState) -> Option<serde_json::Value> {
         let restrictions = &state.restrictions;
+        let blocked = match &self.operation {
+            QueueEditOperation::Move { .. } => {
+                &restrictions.disallow_reordering_in_next_tracks_reasons
+            }
+            QueueEditOperation::Insert { .. } => {
+                &restrictions.disallow_inserting_into_next_tracks_reasons
+            }
+            QueueEditOperation::Remove { .. } => {
+                &restrictions.disallow_removing_from_next_tracks_reasons
+            }
+        };
         if state.track.uri != self.playing
             || !restrictions.disallow_set_queue_reasons.is_empty()
-            || (self.from.is_some()
-                && !restrictions
-                    .disallow_reordering_in_next_tracks_reasons
-                    .is_empty())
-            || (self.from.is_none()
-                && !restrictions
-                    .disallow_inserting_into_next_tracks_reasons
-                    .is_empty())
+            || !blocked.is_empty()
         {
             return None;
         }
@@ -606,9 +624,6 @@ impl QueueEdit {
         next.sort_by_key(|row| row.provider != QUEUE_PROVIDER);
         let visible = visible_queue(&next);
         if self.before.len() > visible.len()
-            || self.to > self.before.len()
-            || (self.into_manual && self.to > self.manual)
-            || (!self.into_manual && self.to < self.manual)
             || self.before.iter().enumerate().any(|(i, uri)| {
                 let row = &next[visible[i]];
                 row.uri != *uri || (row.provider == QUEUE_PROVIDER) != (i < self.manual)
@@ -616,19 +631,46 @@ impl QueueEdit {
         {
             return None;
         }
+        let (from, to, into_manual, added) = match &self.operation {
+            QueueEditOperation::Move {
+                from,
+                to,
+                into_manual,
+            } => (Some(*from), *to, *into_manual, &[][..]),
+            QueueEditOperation::Insert {
+                to,
+                into_manual,
+                added,
+            } => (None, *to, *into_manual, added.as_slice()),
+            QueueEditOperation::Remove { indexes } => {
+                let mut removed = indexes
+                    .iter()
+                    .map(|&i| visible[..self.before.len()].get(i).copied())
+                    .collect::<Option<Vec<_>>>()?;
+                removed.sort_unstable();
+                removed.dedup();
+                for index in removed.into_iter().rev() {
+                    next.remove(index);
+                }
+                return Some(queue_command(state, next.iter().map(track_json).collect()));
+            }
+        };
+        if to > self.before.len()
+            || (into_manual && to > self.manual)
+            || (!into_manual && to < self.manual)
+        {
+            return None;
+        }
         let mut at = visible
-            .get(self.to)
+            .get(to)
             .copied()
             .unwrap_or_else(|| visible.last().map_or(0, |last| last + 1));
-        let mut insert = if let Some(from) = self.from {
-            if from >= self.before.len() || !self.added.is_empty() {
-                return None;
-            }
-            let index = visible[from];
+        let mut insert = if let Some(from) = from {
+            let index = *visible[..self.before.len()].get(from)?;
             at -= usize::from(index < at);
             vec![next.remove(index)]
         } else {
-            self.added
+            added
                 .iter()
                 .map(|uri| ProvidedTrack {
                     uri: uri.clone(),
@@ -637,7 +679,7 @@ impl QueueEdit {
                 .collect()
         };
         for row in &mut insert {
-            if self.into_manual {
+            if into_manual {
                 row.provider = QUEUE_PROVIDER.into();
                 row.metadata.insert("is_queued".into(), "true".into());
             } else if row.provider.is_empty() || row.provider == QUEUE_PROVIDER {
@@ -1513,9 +1555,14 @@ impl Engine {
                 occurrence,
                 skips,
             } => {
-                for _ in 0..self.queue_skips(&uri, occurrence, skips) {
-                    spirc.next()?;
+                let Some(removals) = self.local_skip(&uri, occurrence, skips)? else {
+                    return Ok(());
+                };
+                // Remove from the bottom up so each index stays valid.
+                for (index, uri) in removals.into_iter().rev() {
+                    spirc.remove_next_track(index, uri)?;
                 }
+                spirc.next()?;
             }
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,
@@ -1569,11 +1616,12 @@ impl Engine {
         Ok(())
     }
 
-    /// How many Nexts reach a queue row, counted in the engine's own list.
-    /// Spotify's copy of the queue, which the rows on screen come from, can
-    /// lag behind it, still lists songs librespot passes over, and cannot
-    /// show where a skip still on its way lands.
-    fn queue_skips(&self, uri: &str, occurrence: usize, fallback: usize) -> usize {
+    fn local_skip(
+        &self,
+        uri: &str,
+        occurrence: usize,
+        shown: usize,
+    ) -> Result<Option<Vec<(usize, SpotifyUri)>>> {
         let mut target = self.skip_target.lock().unwrap_or_else(|p| p.into_inner());
         if target
             .as_ref()
@@ -1581,36 +1629,27 @@ impl Engine {
         {
             *target = None;
         }
-        let found = {
-            let watch = self.spirc.watch_player_state();
-            let state = watch.borrow();
-            Option::as_ref(&*state).and_then(|state| {
-                queue_skip(
-                    state,
-                    target.as_ref().map(|target| target.key.as_str()),
-                    uri,
-                    occurrence,
-                )
-            })
-        };
-        match found {
-            Some(skip) => {
-                log::info!(
-                    "queue skip to {uri}: {} next, the row is {fallback} down on screen",
-                    skip.skips
-                );
-                *target = Some(SkipTarget {
-                    key: skip.lands,
-                    at: Instant::now(),
-                });
-                skip.skips
-            }
-            None => {
-                log::info!("queue skip to {uri}: not in the engine's list, {fallback} next");
-                *target = None;
-                fallback
-            }
+        let watch = self.spirc.watch_player_state();
+        let state = watch.borrow();
+        let pending = target.as_ref().map(|target| target.key.as_str());
+        let state = state.as_ref().context("The queue is still updating")?;
+        let skip = queue_skip(state, pending, uri, occurrence)
+            .context("The song is no longer in this computer's queue")?;
+        if skip.skips == 0 {
+            return Ok(None);
         }
+        let removals = local_skip_rows(state, pending, &skip.key)
+            .map(|(index, uri)| Ok((index, SpotifyUri::from_uri(uri)?)))
+            .collect::<Result<Vec<_>>>()?;
+        log::info!(
+            "queue skip to {uri}: {} removed and one Next, the row is {shown} down on screen",
+            removals.len()
+        );
+        *target = Some(SkipTarget {
+            key: skip.lands,
+            at: Instant::now(),
+        });
+        Ok(Some(removals))
     }
 
     /// Moves the row a queue skip counts from on to where the Next about to
@@ -1746,6 +1785,25 @@ fn queue_skip(
         key: next_key(next, at),
         lands: next_key(next, lands),
     })
+}
+
+/// Find the rows that would play before the selected occurrence.
+fn local_skip_rows<'a>(
+    state: &'a PlayerState,
+    pending: Option<&str>,
+    chosen: &str,
+) -> impl Iterator<Item = (usize, &'a str)> {
+    let next = &state.next_tracks;
+    let from = skip_from(state, pending);
+    let to = (from..next.len())
+        .find(|&at| next_key(next, at) == chosen)
+        .unwrap_or(from);
+    next[from..to]
+        .iter()
+        .filter(|row| row.metadata.get("hidden").is_none_or(|flag| flag != "true"))
+        .enumerate()
+        .filter(|(_, row)| next_stops_on(row))
+        .map(|(index, row)| (index, row.uri.as_str()))
 }
 
 /// What to pick up: `resume` as it was when the session dropped, or where a
@@ -2794,10 +2852,11 @@ mod tests {
             playing: "now".into(),
             before: vec!["a".into(); 3],
             manual: 1,
-            from: Some(2),
-            to: 0,
-            into_manual: true,
-            added: vec![],
+            operation: super::QueueEditOperation::Move {
+                from: 2,
+                to: 0,
+                into_manual: true,
+            },
         };
         let body = edit.command(&state).unwrap();
         let next = body["command"]["next_tracks"].as_array().unwrap();
@@ -2833,10 +2892,11 @@ mod tests {
             playing: before.track,
             before: before.rows.into_iter().map(|(uri, _)| uri).collect(),
             manual: 1,
-            from: Some(0),
-            to: 2,
-            into_manual: false,
-            added: vec![],
+            operation: super::QueueEditOperation::Move {
+                from: 0,
+                to: 2,
+                into_manual: false,
+            },
         };
         let body = edit.command(&state).unwrap();
         assert_eq!(body["command"]["queue_revision"], "revision-from-receiver");
@@ -2856,6 +2916,65 @@ mod tests {
             &["a".into(), "b".into(), "a".into()],
             0,
         ));
+    }
+
+    #[test]
+    fn removing_a_context_copy_keeps_other_copies_and_requires_remove_permission() {
+        let mut state = player_state(
+            provided("now", "n", "context"),
+            vec![
+                provided("a", "manual", "queue"),
+                provided("a", "first", "context"),
+                provided("spotify:delimiter", "delimiter1", "context"),
+                provided("a", "second", "context"),
+                provided("tail", "t", "autoplay"),
+            ],
+        );
+        let edit = super::QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(); 3],
+            manual: 1,
+            operation: super::QueueEditOperation::Remove { indexes: vec![2] },
+        };
+        let body = edit.command(&state).unwrap();
+        let next = body["command"]["next_tracks"].as_array().unwrap();
+        assert_eq!(
+            next.iter()
+                .map(|row| row["uid"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["manual", "first", "delimiter1", "t"],
+        );
+        state
+            .restrictions
+            .mut_or_insert_default()
+            .disallow_removing_from_next_tracks_reasons
+            .push("restricted".into());
+        assert!(edit.command(&state).is_none());
+    }
+
+    #[test]
+    fn a_local_skip_removes_the_rows_above_the_chosen_copy() {
+        let mut delimiter = provided("spotify:delimiter", "delimiter1", "context");
+        delimiter.metadata.insert("hidden".into(), "true".into());
+        let state = player_state(
+            provided("now", "n", "context"),
+            vec![
+                provided("a", "manual", "queue"),
+                delimiter,
+                provided("b", "unavailable", "unavailable"),
+                provided("c", "before", "context"),
+                provided("a", "chosen", "context"),
+                provided("tail", "t", "autoplay"),
+            ],
+        );
+        assert_eq!(
+            super::local_skip_rows(&state, None, "chosen").collect::<Vec<_>>(),
+            [(0, "a"), (2, "c")],
+        );
+        assert_eq!(
+            super::local_skip_rows(&state, Some("manual"), "chosen").collect::<Vec<_>>(),
+            [(1, "c")],
+        );
     }
 
     /// A Next up click counts the rows librespot's Next stops on, which the

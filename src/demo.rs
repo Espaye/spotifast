@@ -5224,11 +5224,11 @@ mod tests {
         (ctx, app)
     }
 
-    /// The cover opens MilkDrop alone; any click brings back just what was
-    /// there; the controls come with the mouse and go again.
+    /// The immersive view hides the lyrics, shows controls on movement,
+    /// and restores the original backdrop on exit.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn the_cover_opens_milkdrop_alone_and_any_click_comes_back() {
+    fn immersive_milkdrop_restores_the_previous_backdrop() {
         use egui::PointerButton::Primary;
         const LINE: &str = "Streetlights blinking down the river road";
         const BAR: &str = "1:23";
@@ -5245,7 +5245,8 @@ mod tests {
             "lyrics to begin with"
         );
         step(&ctx, &mut app, Vec::new());
-        step(&ctx, &mut app, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        step(&ctx, &mut app, Vec::new());
         assert!(
             !app.settings.lyrics_milkdrop,
             "the backdrop's memory is safe"
@@ -5281,7 +5282,8 @@ mod tests {
         app.actions.push(Action::ToggleLyricsMilkdrop);
         timed(&ctx, &mut app, 45.0, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 45.1, Vec::new());
-        timed(&ctx, &mut app, 45.2, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 45.2, Vec::new());
         timed(&ctx, &mut app, 45.3, Vec::new());
         timed(&ctx, &mut app, 45.4, Vec::new());
         assert!(app.immersive());
@@ -5294,7 +5296,8 @@ mod tests {
         // Esc leaves full screen as ever, and the backdrop as it was.
         timed(&ctx, &mut app, 49.8, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 49.9, Vec::new());
-        timed(&ctx, &mut app, 50.0, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 50.0, Vec::new());
         timed(&ctx, &mut app, 50.1, Vec::new());
         timed(&ctx, &mut app, 50.2, Vec::new());
         assert!(app.immersive());
@@ -5316,7 +5319,8 @@ mod tests {
         // V stays a choice of its own: MilkDrop off, and remembered.
         timed(&ctx, &mut app, 54.8, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 54.9, Vec::new());
-        timed(&ctx, &mut app, 55.0, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 55.0, Vec::new());
         timed(&ctx, &mut app, 55.1, Vec::new());
         timed(&ctx, &mut app, 55.2, Vec::new());
         assert!(app.immersive());
@@ -5335,10 +5339,10 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// With no MilkDrop, or no art to click, nothing changes.
+    /// Artwork clicks leave the backdrop alone, including when MilkDrop is ready.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn the_cover_changes_nothing_without_milkdrop_or_art() {
+    fn clicking_the_lyrics_cover_leaves_the_backdrop_alone() {
         use crate::milkdrop::pane::Picture;
         use egui::PointerButton::Primary;
         let (ctx, mut app) = immersive_app("immersive-none");
@@ -5353,12 +5357,8 @@ mod tests {
         assert!(!app.immersive());
         assert!(!app.milkdrop_behind_lyrics(), "and the backdrop as it was");
 
-        let (ctx, mut app) = immersive_app("immersive-no-art");
-        if let Some(remote) = &mut app.remote
-            && let Some(PlayableItem::Track(track)) = &mut remote.state.item
-        {
-            track.album = None;
-        }
+        app.backend.shutdown();
+        let (ctx, mut app) = immersive_app("immersive-with-art");
         timed(&ctx, &mut app, 10.0, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 10.1, Vec::new());
         timed(&ctx, &mut app, 10.2, pointer_click(cover, Primary));
@@ -5368,11 +5368,11 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// A click on nothing in full screen lyrics is the backdrop's switch, and
-    /// nothing else that happens there touches it.
+    /// The header button switches the backdrop. Clicking the lyrics or
+    /// empty space leaves it alone.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn only_a_click_on_nothing_switches_the_lyrics_backdrop() {
+    fn the_lyrics_header_button_switches_the_backdrop() {
         use egui::PointerButton::Primary;
         let (ctx, mut app) = accessible_app("lyrics-backdrop-click");
         app.backend.set_offline(true);
@@ -5402,14 +5402,33 @@ mod tests {
             let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
             output.textures_delta.clear();
         };
+        let toggle_backdrop = |ctx: &egui::Context, app: &mut App| {
+            let tree = accessible_frame(ctx, app, vec![]);
+            let button = accessible_node(
+                &tree,
+                "Toggle MilkDrop background (V)",
+                egui::accesskit::Role::Button,
+            );
+            accessible_frame(
+                ctx,
+                app,
+                vec![accessible_action(
+                    button,
+                    egui::accesskit::Action::Click,
+                    None,
+                )],
+            );
+        };
+        toggle_backdrop(&ctx, &mut app);
+        assert!(app.milkdrop_behind_lyrics());
+        assert!(app.settings.lyrics_milkdrop);
+        assert!(!app.immersive());
+        toggle_backdrop(&ctx, &mut app);
+        assert!(!app.milkdrop_behind_lyrics());
+
         run(&ctx, &mut app, vec![egui::Event::PointerMoved(empty)]);
         run(&ctx, &mut app, pointer_click(empty, Primary));
-        assert!(app.milkdrop_behind_lyrics(), "a click turns it on");
-        assert!(app.settings.lyrics_milkdrop, "remembered as V is");
-        run(&ctx, &mut app, Vec::new());
-        run(&ctx, &mut app, pointer_click(empty, Primary));
-        assert!(!app.milkdrop_behind_lyrics(), "and off");
-        run(&ctx, &mut app, Vec::new());
+        assert!(!app.milkdrop_behind_lyrics());
 
         // A drag is no click.
         let press = |pos, pressed| egui::Event::PointerButton {
@@ -5440,12 +5459,11 @@ mod tests {
         run(&ctx, &mut app, pointer_click(line, Primary));
         assert!(!app.milkdrop_behind_lyrics(), "an untimed line");
 
-        // A double click is two clicks, back where it started, and leaves
-        // nothing: full screen has no double click of its own.
+        // A double click in empty space leaves both modes as they are.
         run(&ctx, &mut app, vec![egui::Event::PointerMoved(empty)]);
         frame_clicks_close_together(&ctx, &mut app, empty);
         assert!(app.lyrics_fullscreen.is_some());
-        assert!(!app.milkdrop_behind_lyrics(), "off, on, off");
+        assert!(!app.milkdrop_behind_lyrics());
 
         // The bar's button is a control: it leaves and comes back, and the
         // backdrop stays out of it.
@@ -11272,9 +11290,8 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// Right-clicking a song under Playing next offers to take it out of
-    /// the queue, and doing so removes that row; a Next up row, which
-    /// plays from the context, offers no such entry (#721).
+    /// The queue menu works on an artist link and removes the chosen row
+    /// from either section.
     #[test]
     fn a_queued_rows_menu_removes_it_from_the_queue() {
         use egui::accesskit::Role;
@@ -11307,27 +11324,43 @@ mod tests {
                 ((bounds.y0 + bounds.y1) / 2.0) as f32,
             )
         };
-        let has_remove = |tree: &egui::accesskit::TreeUpdate| {
-            tree.nodes
-                .iter()
-                .any(|(_, node)| node.label() == Some("Remove from queue"))
-        };
-
         let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let next_up = row_center(&tree, "Otomo");
+        let center = row_center(&tree, "Otomo");
+        let artist = tree
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                let bounds = node.bounds()?;
+                (node.role() == Role::Link
+                    && bounds.x0 >= 900.0
+                    && bounds.y0 <= f64::from(center.y) + 24.0
+                    && bounds.y0 >= f64::from(center.y))
+                .then_some(bounds)
+            })
+            .expect("artist link in the Next up row");
+        let next_up = egui::pos2(
+            ((artist.x0 + artist.x1) / 2.0) as f32,
+            ((artist.y0 + artist.y1) / 2.0) as f32,
+        );
+        let context_count = app.queue.get().unwrap().queue.len();
         accessible_frame(
             &ctx,
             &mut app,
             pointer_click(next_up, egui::PointerButton::Secondary),
         );
         let tree = accessible_frame(&ctx, &mut app, vec![]);
-        accessible_node(&tree, "Add to queue", Role::Button);
-        assert!(!has_remove(&tree), "a Next up row cannot be removed");
+        let remove = accessible_node(&tree, "Remove from queue", Role::Button);
         accessible_frame(
             &ctx,
             &mut app,
-            vec![keyboard(egui::Key::Escape, egui::Modifiers::NONE)],
+            vec![accessible_action(
+                remove,
+                egui::accesskit::Action::Click,
+                None,
+            )],
         );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(app.queue.get().unwrap().queue.len(), context_count - 1);
 
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         let queued = row_center(&tree, "Queued 1");

@@ -6576,6 +6576,10 @@ async fn edit_connect_queue(
     };
     // A successful command response does not yet supply the receiver's next
     // revision. Read its published queue before sending another rewrite.
+    let removes = matches!(
+        &edit.operation,
+        crate::player::QueueEditOperation::Remove { .. }
+    );
     tokio::time::timeout(Duration::from_secs(6), async {
         crate::sonos::command(engine.session(), device, &body).await?;
         loop {
@@ -6587,7 +6591,9 @@ async fn edit_connect_queue(
                     });
                 }
                 let view = crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
-                if edit.confirmed(&view, expected, manual) {
+                if (!removes || current.next_tracks != state.next_tracks)
+                    && edit.confirmed(&view, expected, manual)
+                {
                     return Ok(view);
                 }
             }

@@ -130,7 +130,9 @@ not consume a queue row or restore an older queue saved on this computer.
 
 5. **Playing a row from the queue skips to it.** The rows above it are
    skipped and removed, as if you had pressed Next down to it. The rows
-   below it stay, and the playlist keeps going afterwards. Until the player
+   below it stay, and the playlist keeps going afterwards. This computer's
+   player removes the preceding rows from its upcoming list and starts the
+   chosen song with one skip. Until the player
    reaches the song, here or on another device, the chosen row stays the
    playing one and the songs passed on the way show nowhere: not as the
    song playing, not in the player bar, and not as a queue in which the
@@ -195,10 +197,9 @@ counts once, and the notification reports only the rows actually added.
     from the active player. On append-only devices, a playlist drag can
     still add songs to the end of Next in queue.
 
-12. **A song you queued can be removed on its own.** Right-click a row
-    under *Next in queue*, or open its **…** menu, and choose **Remove
-    from queue**. Only that row leaves: other copies of the song stay, and
-    so do the context's rows. Like a move, this rewrites the queue, so it is
-    offered on this computer and on another device whose Connect state
-    allows removing. The context's rows have no such entry, because they
-    play from the current context.
+12. **Remove an upcoming song from the play order.** Right-click anywhere
+    on a row under *Next in queue*, *Next from* or *Next up*, or open its
+    **…** menu, and choose **Remove from queue**. Only the selected occurrence
+    leaves the current play order. Saved playlists and albums stay intact.
+    The option is available on this computer's built-in player and on
+    compatible Connect devices that allow removal.

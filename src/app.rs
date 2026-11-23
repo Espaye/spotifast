@@ -416,6 +416,8 @@ struct ArtistMetadataRead {
 struct Immersive {
     /// Whether MilkDrop was behind the lyrics before; it goes back to that.
     backdrop_was: bool,
+    /// Whether opening MilkDrop also entered full screen.
+    entered_fullscreen: bool,
     /// A frame has arrived, so the lyrics, cover and bars have gone.
     showing: bool,
     /// Until when the controls show, on the input clock.
@@ -7961,13 +7963,17 @@ impl App {
             playing: origin.playing.clone(),
             before: origin.rows[..end].to_vec(),
             manual: origin.manual,
-            from,
-            to: slot,
-            into_manual: manual,
-            added: if from.is_none() {
-                items.iter().map(|item| item.uri().to_string()).collect()
-            } else {
-                Vec::new()
+            operation: match from {
+                Some(from) => crate::player::QueueEditOperation::Move {
+                    from,
+                    to: slot,
+                    into_manual: manual,
+                },
+                None => crate::player::QueueEditOperation::Insert {
+                    to: slot,
+                    into_manual: manual,
+                    added: items.iter().map(|item| item.uri().to_string()).collect(),
+                },
             },
         };
         let Loadable::Loaded(queue) = &mut self.queue else {
@@ -7986,14 +7992,34 @@ impl App {
         };
         let manual_count = origin.manual - usize::from(from.is_some_and(|i| i < origin.manual))
             + if manual { count } else { 0 };
-        let new_manual: Vec<_> = queue.queue[..manual_count]
+        self.submit_queue_edit(
+            device,
+            edit,
+            before,
+            manual_count,
+            end + if from.is_none() { count } else { 0 },
+        );
+    }
+
+    fn submit_queue_edit(
+        &mut self,
+        device: String,
+        edit: crate::player::QueueEdit,
+        before: Vec<PlayableItem>,
+        manual_count: usize,
+        expected_len: usize,
+    ) {
+        let Some(queue) = self.queue.get() else {
+            return;
+        };
+        let new_manual = queue.queue[..manual_count]
             .iter()
             .map(|item| item.uri().to_string())
-            .collect();
+            .collect::<Vec<_>>();
         let expected = queue
             .queue
             .iter()
-            .take(end + if from.is_none() { count } else { 0 })
+            .take(expected_len)
             .map(|item| item.uri().to_string())
             .collect();
         let old_manual = std::mem::replace(&mut self.manual_queue, new_manual.clone());
@@ -8258,10 +8284,32 @@ impl App {
         self.queue_removable() && self.queued_rows_len() > 0
     }
 
-    /// Whether the queue row at `index` is in Next in queue and can be
-    /// taken out of it.
     pub fn can_remove_from_queue(&self, index: usize) -> bool {
-        self.queue_removable() && index < self.queued_rows_len()
+        self.can_remove_play_order_row(index)
+            || (self.queue_removable() && index < self.queued_rows_len())
+    }
+
+    fn can_remove_play_order_row(&self, index: usize) -> bool {
+        let Some(row) = self.queue.get().and_then(|queue| queue.queue.get(index)) else {
+            return false;
+        };
+        let target = self.target();
+        (self.offline && self.queue_locally_reorderable()
+            || self.queue_player_view().is_some_and(|view| {
+                view.can_remove
+                    && (self.queue_edit_in_flight()
+                        || view
+                            .rows
+                            .get(index)
+                            .is_some_and(|(uri, _)| uri == row.uri()))
+            }))
+            && self.pending_queue_adds.is_empty()
+            && !self
+                .pending_queue_batches
+                .values()
+                .any(|writing| *writing == target)
+            && self.queue_reorder_pending.is_none()
+            && !self.queue_skip_in_flight()
     }
 
     /// Says why a song dropped on the open queue stayed where it was, and
@@ -8434,12 +8482,49 @@ impl App {
         self.toast(gettext(self.locale, "Queue cleared"));
     }
 
-    /// Takes the chosen rows out of Playing next. Neither the Web API nor
-    /// librespot can remove one queued song, so like a move this rewrites
-    /// the local engine's queue, and only that one. A row whose index no
-    /// longer holds its song is left alone.
+    fn remove_play_order_rows(&mut self, rows: &[(usize, String)]) -> bool {
+        let Some(origin) = self.queue_origin() else {
+            return false;
+        };
+        let device = match origin.device {
+            Some(device) => device,
+            None if self.offline => String::new(),
+            None => return false,
+        };
+        let mut indexes = rows
+            .iter()
+            .filter_map(|(index, uri)| {
+                (origin.rows.get(*index) == Some(uri) && self.can_remove_play_order_row(*index))
+                    .then_some(*index)
+            })
+            .collect::<Vec<_>>();
+        indexes.sort_unstable();
+        indexes.dedup();
+        if indexes.is_empty() {
+            return false;
+        }
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return false;
+        };
+        let before = queue.queue.clone();
+        let manual_count = origin.manual - indexes.iter().filter(|&&i| i < origin.manual).count();
+        let end = (indexes[indexes.len() - 1] + 2).min(origin.rows.len());
+        let expected_len = end - indexes.len();
+        for &index in indexes.iter().rev() {
+            queue.queue.remove(index);
+        }
+        let edit = crate::player::QueueEdit {
+            playing: origin.playing,
+            before: origin.rows[..end].to_vec(),
+            manual: origin.manual,
+            operation: crate::player::QueueEditOperation::Remove { indexes },
+        };
+        self.submit_queue_edit(device, edit, before, manual_count, expected_len);
+        true
+    }
+
     fn remove_from_queue(&mut self, rows: Vec<(usize, String)>) {
-        if !self.queue_removable() {
+        if self.remove_play_order_rows(&rows) || !self.queue_removable() {
             return;
         }
         if !self.queue_locally_reorderable() {
@@ -15590,9 +15675,14 @@ impl App {
                 }
             }
             Action::EnterImmersive => {
-                if self.lyrics_fullscreen.is_some() && self.immersive.is_none() {
+                if self.immersive.is_none() {
+                    let entered_fullscreen = self.lyrics_fullscreen.is_none();
+                    if entered_fullscreen {
+                        self.apply(Action::SetLyricsFullscreen(true), ctx);
+                    }
                     self.immersive = Some(Immersive {
                         backdrop_was: self.milkdrop_backdrop,
+                        entered_fullscreen,
                         showing: false,
                         controls_until: 0.0,
                     });
@@ -15601,7 +15691,13 @@ impl App {
                     self.fetch_presets_if_none(ctx);
                 }
             }
-            Action::LeaveImmersive => self.end_immersive(),
+            Action::LeaveImmersive => {
+                if self.immersive.is_some_and(|mode| mode.entered_fullscreen) {
+                    self.leave_lyrics_fullscreen(ctx);
+                } else {
+                    self.end_immersive();
+                }
+            }
             Action::ToggleLyricsMilkdrop => {
                 // Off is a choice of its own, and there is nothing left to be
                 // immersed in; the mode's memory of the backdrop goes with it.
@@ -21798,7 +21894,10 @@ mod tests {
         let view = |rows: [&str; 3]| crate::player::RemoteQueueView {
             device: "sonos".into(),
             track: now.into(),
-            rows: rows.into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            rows: rows
+                .into_iter()
+                .map(|uri| (uri.into(), uri.into()))
+                .collect(),
             can_reorder: true,
             ..Default::default()
         };

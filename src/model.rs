@@ -1090,8 +1090,8 @@ impl DragTrack {
 pub enum QueueRefusal {
     /// It was the Now playing row: the song is already playing.
     NowPlaying,
-    /// It was a row of Next in queue, which cannot be moved now.
-    Locked,
+    /// The attempted move or insert is unavailable for this queue.
+    Locked { insert: bool },
 }
 
 /// Where the playing songs come from, as the queue's header names it.

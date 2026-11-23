@@ -4686,3 +4686,49 @@ msgstr ""
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "歌詞の動きを減らす"
+
+#: src/ui/queue.rs:640 src/ui/queue.rs:941
+msgid "Next in queue"
+msgstr "Next in queue"
+
+#: src/ui/queue.rs:729
+msgid "Next from:"
+msgstr "Next from:"
+
+#: src/app.rs:8621
+msgid "This song is already playing"
+msgstr "This song is already playing"
+
+#: src/app.rs:8645
+msgid "Play a song to reorder the queue"
+msgstr "Play a song to reorder the queue"
+
+#: src/app.rs:8649 src/app.rs:8666
+msgid "The queue is still updating. Try again in a moment."
+msgstr "The queue is still updating. Try again in a moment."
+
+#: src/app.rs:8654
+msgid "Spotifast has not seen this device's queue yet. Try again in a moment."
+msgstr "Spotifast has not seen this device's queue yet. Try again in a moment."
+
+#: src/app.rs:8663
+msgid "The songs just added are still on their way. Try again in a moment."
+msgstr "The songs just added are still on their way. Try again in a moment."
+
+#: src/app.rs:8659
+msgid "This device does not let Spotifast reorder its queue"
+msgstr "This device does not let Spotifast reorder its queue"
+
+#: src/app.rs:8103
+msgid "The queue changed. Drag the song again."
+msgstr "The queue changed. Drag the song again."
+
+#: src/app.rs:11465
+#. Translators: {error} is the reason the queue edit failed.
+#, rust-format
+msgid "Couldn't change the queue: {error}"
+msgstr "Couldn't change the queue: {error}"
+
+#: src/app.rs:8657
+msgid "This device does not let Spotifast insert into its queue"
+msgstr "This device does not let Spotifast insert into its queue"

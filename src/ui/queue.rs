@@ -395,15 +395,17 @@ enum Landing {
 /// How to handle a drop in the manual section. A drop in Next up always
 /// edits the playback order on the device.
 fn landing_of(app: &App, track: &DragTrack) -> Landing {
+    let insert = !matches!(track.from.as_ref().map(|(origin, _)| origin.as_str()),
+        Some(NOW_PLAYING_ROW | QUEUED_ROW | UPCOMING_ROW));
     match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
         Some(NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::NowPlaying),
         Some(QUEUED_ROW | UPCOMING_ROW) if app.can_edit_play_order() => Landing::Edit,
         _ if app.queue_edit_in_flight() && !app.can_insert_in_play_order() => {
-            Landing::Refused(QueueRefusal::Locked)
+            Landing::Refused(QueueRefusal::Locked { insert })
         }
         Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
-        Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked),
-        Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Locked),
+        Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked { insert }),
+        Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Locked { insert }),
         _ if app.can_insert_in_play_order() => Landing::Edit,
         _ if app.queue_locally_reorderable() => Landing::Insert,
         _ => Landing::Append,
@@ -454,7 +456,7 @@ struct QueueSlot {
 fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<QueueSlot>) {
     let context = slot.is_some_and(|slot| !slot.manual);
     let landing = if context && !matches!(landing, Landing::Edit | Landing::Refused(_)) {
-        Landing::Refused(QueueRefusal::Locked)
+        Landing::Refused(QueueRefusal::Locked { insert: matches!(landing, Landing::Insert | Landing::Append) })
     } else {
         landing
     };

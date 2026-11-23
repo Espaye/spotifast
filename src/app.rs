@@ -8067,14 +8067,14 @@ impl App {
             Some(QUEUED_ROW | UPCOMING_ROW | NOW_PLAYING_ROW)
         );
         if !self.queue_edit_allowed(inserts) {
-            self.refuse_queue_drop(QueueRefusal::Locked);
+            self.refuse_queue_drop(QueueRefusal::Locked { insert: inserts });
             return;
         }
         let Some(origin) = self.queue_origin() else {
             return;
         };
         let Some(device) = origin.device.clone() else {
-            self.refuse_queue_drop(QueueRefusal::Locked);
+            self.refuse_queue_drop(QueueRefusal::Locked { insert: inserts });
             return;
         };
         if slot > origin.rows.len()
@@ -8619,10 +8619,10 @@ impl App {
                 // Translators: Shown when the playing song is dragged from the queue's Now playing row onto the queue.
                 "This song is already playing",
             ),
-            crate::model::QueueRefusal::Locked => {
+            crate::model::QueueRefusal::Locked { insert } => {
                 let target = self.target();
                 let view = self.queue_player_view();
-                let allowed = view.is_some_and(|view| view.can_reorder);
+                let allowed = view.is_some_and(|view| if insert { view.can_insert } else { view.can_reorder });
                 let albums = self
                     .pending_queue_batches
                     .values()
@@ -8652,16 +8652,17 @@ impl App {
                         self.locale,
                         "Spotifast has not seen this device's queue yet. Try again in a moment.",
                     )
-                } else if allowed {
+                } else if !allowed && insert {
+                    gettext(self.locale, "This device does not let Spotifast insert into its queue")
+                } else if !allowed {
+                    gettext(self.locale, "This device does not let Spotifast reorder its queue")
+                } else if !self.pending_queue_adds.is_empty() || albums > 0 {
                     gettext(
                         self.locale,
                         "The songs just added are still on their way. Try again in a moment.",
                     )
                 } else {
-                    gettext(
-                        self.locale,
-                        "This device does not let Spotifast reorder its queue",
-                    )
+                    gettext(self.locale, "The queue is still updating. Try again in a moment.")
                 }
             }
         };
@@ -22430,6 +22431,18 @@ mod tests {
             ..Default::default()
         });
         app
+    }
+
+    #[test]
+    fn a_refused_insert_names_the_insert_restriction_in_dutch() {
+        let mut app = app_with_connect_edit_rows();
+        app.locale = Locale::Dutch;
+        app.remote_queue.as_mut().unwrap().can_insert = false;
+        app.refuse_queue_drop(QueueRefusal::Locked { insert: true });
+        assert_eq!(app.toasts.last().unwrap().message,
+            "Op dit apparaat kan Spotifast geen nummers in de wachtrij invoegen");
+        assert!(app.pending_queue_adds.is_empty());
+        app.backend.shutdown();
     }
 
     #[test]

@@ -11211,8 +11211,10 @@ mod tests {
     /// the queue can be reordered or inserted into positionally.
     fn seed_queued_songs(app: &mut App) -> Vec<String> {
         app.local_ready = true;
+        let now = app.now_playing().unwrap();
         app.local.track = Some(crate::player::LocalTrack {
-            uri: app.now_playing().unwrap().uri,
+            uri: now.uri,
+            title: now.title,
             ..Default::default()
         });
         app.local.playback = crate::player::Playback::Paused;

@@ -609,7 +609,9 @@ command logs one line with counts.
 
 Positional queue drags and removal of an individual upcoming song use the
 rows published by the built-in player or the active Connect device. The Web
-API supplies track details. If its queue response covers fewer songs than
+API supplies track details. A failed metadata refresh keeps the loaded rows;
+a matching player snapshot can also supply the list without that response.
+If its queue response covers fewer songs than
 the player's list, Spotifast looks up the missing details in batches over
 the same-account playback session. It reuses known details, limits the
 lookup to one batch at a time, and waits before retrying a failed lookup.

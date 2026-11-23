@@ -83,6 +83,9 @@ not consume a queue row or restore an older queue saved on this computer.
    A long queue can show more songs than Spotify includes in its first
    response. Their titles, covers and durations fill in as the details arrive.
 
+   The built-in and Connect player lists are used as reported, including
+   repeated songs. Only the Web API fallback needs padding removed.
+
    Spotify pads a short queue by going round it again, back to the playing
    song, even with Repeat off. With Repeat off, Spotifast leaves out the
    rows from where the list comes back round, so a song started on its own,

@@ -9767,10 +9767,24 @@ impl App {
                     // A newer request supersedes this response.
                     return;
                 }
-                if let Ok(fetched) = &mut result {
-                    if !self.align_queue_with_player(fetched) {
-                        self.follow_remote_queue(fetched);
+                if result.is_err() {
+                    let mut fallback = self.queue.get().cloned().unwrap_or_else(|| Queue {
+                        currently_playing: self.current_track_uri().map(|uri| {
+                            self.optimistic_queue_item(&uri, &uri)
+                        }),
+                        queue: Vec::new(),
+                    });
+                    self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
+                    if self.align_queue_with_player(&mut fallback) {
+                        result = Ok(fallback);
+                    } else if self.queue.get().is_some() {
+                        return;
                     }
+                }
+                if let Ok(fetched) = &mut result
+                    && !self.align_queue_with_player(fetched)
+                {
+                    self.follow_remote_queue(fetched);
                     self.drop_queue_padding(fetched);
                 }
                 // Partial reads and read failures must preserve optimistic
@@ -22831,6 +22845,54 @@ mod tests {
             vec![a; 10],
             "with Repeat on it does play again"
         );
+    }
+
+    #[test]
+    fn player_queue_rows_are_real_even_when_their_uris_repeat() {
+        let mut app = app_with_local_manual_queue();
+        app.backend.set_offline(true);
+        app.local_device_id = Some("this-computer".into());
+        let now = "spotify:track:playing";
+        let b = "spotify:track:b";
+        app.manual_queue.clear();
+        app.local_queue = Some(crate::player::RemoteQueueView {
+            device: "this-computer".into(),
+            track: now.into(),
+            rows: [b, now, b].into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            ..Default::default()
+        });
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(loaded_queue(now, &[b, now, b]).get().unwrap().clone()),
+        });
+        assert_eq!(queue_uris(&app).1, [b, now, b]);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_failed_queue_refresh_keeps_rows_and_can_use_the_player_snapshot() {
+        for snapshot in [false, true] {
+            let mut app = app_with_local_manual_queue();
+            app.backend.set_offline(true);
+            app.local_device_id = Some("this-computer".into());
+            let expected = queue_uris(&app);
+            if snapshot {
+                app.local_queue = Some(crate::player::RemoteQueueView {
+                    device: "this-computer".into(),
+                    track: expected.0.clone().unwrap(),
+                    rows: expected.1.iter().map(|uri| (uri.clone(), uri.clone())).collect(),
+                    ..Default::default()
+                });
+                app.queue = Loadable::Loading;
+            }
+            app.handle_api(ApiResponse::Queue {
+                seq: app.queue_seq,
+                result: Err(crate::api::ApiError::Status { status: 503, message: "Unavailable".into() }),
+            });
+            assert_eq!(queue_uris(&app), expected);
+            assert!(app.queue_recheck_at.is_some());
+            app.backend.shutdown();
+        }
     }
 
     /// A queue saved with Spotify's padding, as earlier versions saved it,

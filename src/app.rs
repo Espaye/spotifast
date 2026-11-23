@@ -323,6 +323,8 @@ struct PendingQueueAdd {
     at: Instant,
     /// Position in `manual_queue`, adjusted whenever an earlier row leaves.
     manual_index: usize,
+    /// The manual occurrence count that must be reported to confirm this copy.
+    required_count: usize,
     /// Remote write and position within it, until Spotify accepts this copy.
     write: Option<(u64, usize)>,
 }
@@ -7857,7 +7859,7 @@ impl App {
             self.refresh_queue(true);
             return;
         }
-        self.adopt_local_manual_queue();
+        self.adopt_player_manual_queue();
         // A newer choice outranks a song still waiting for its radio.
         self.song_radio = None;
         self.resume_load = None;
@@ -8182,7 +8184,8 @@ impl App {
             .take(expected_len)
             .map(|item| item.uri().to_string())
             .collect();
-        let old_manual = std::mem::replace(&mut self.manual_queue, new_manual.clone());
+        let old_manual = before.iter().take(edit.manual).map(|item| item.uri().to_string()).collect();
+        self.manual_queue = new_manual.clone();
         self.session_dirty = true;
         // The offline demo has no receiver to acknowledge an edit.
         if self.offline {
@@ -8275,16 +8278,15 @@ impl App {
     fn note_local_queue(&mut self, view: crate::player::RemoteQueueView) {
         let changed = self.local_queue.as_ref() != Some(&view);
         self.local_queue = Some(view);
-        self.adopt_local_manual_queue();
+        self.adopt_player_manual_queue();
         if changed && self.queue_locally_reorderable() {
             self.recheck_visible_queue();
         }
     }
 
     /// Imported and externally queued copies belong to the next local rewrite too.
-    fn adopt_local_manual_queue(&mut self) {
-        if !self.queue_locally_reorderable()
-            || !self.pending_queue_adds.is_empty()
+    fn adopt_player_manual_queue(&mut self) {
+        if !self.pending_queue_adds.is_empty()
             || self.queue_edit_in_flight()
             || self.queue_reorder_pending.is_some()
             || self.queue_cleared.is_some()
@@ -8816,7 +8818,7 @@ impl App {
             self.remove_from_remote_queue(rows);
             return;
         }
-        self.adopt_local_manual_queue();
+        self.adopt_player_manual_queue();
         let queued_len = self.queued_rows_len();
         let Loadable::Loaded(queue) = &self.queue else {
             return;
@@ -8883,7 +8885,7 @@ impl App {
             self.clear_remote_queue();
             return;
         }
-        self.adopt_local_manual_queue();
+        self.adopt_player_manual_queue();
         self.pending_album_queues.clear();
         self.last_album_queue = None;
         // `queue_one` writes every queued song to both lists, so they hold
@@ -9023,13 +9025,16 @@ impl App {
     }
 
     fn remove_manual_queue_row(&mut self, index: usize) {
-        self.manual_queue.remove(index);
+        let removed = self.manual_queue.remove(index);
         self.pending_queue_adds.retain_mut(|addition| {
             if addition.manual_index == index {
                 return false;
             }
             if addition.manual_index > index {
                 addition.manual_index -= 1;
+            }
+            if addition.item.uri() == removed {
+                addition.required_count = addition.required_count.saturating_sub(1).max(1);
             }
             true
         });
@@ -11484,24 +11489,33 @@ impl App {
                         self.send_queue_edit();
                     }
                     Err(error) if applies => {
-                        let manual_len = self
-                            .manual_queue
-                            .starts_with(&last.new_manual)
-                            .then_some(last.new_manual.len());
-                        if let Loadable::Loaded(queue) = &mut self.queue
-                            && queue.queue.len() == last.shown_len
-                            && queue
-                                .queue
-                                .iter()
-                                .take(last.expected.len())
-                                .map(PlayableItem::uri)
-                                .eq(last.expected.iter().map(String::as_str))
-                        {
-                            queue.queue = first.before;
-                        }
-                        if let Some(manual_len) = manual_len {
-                            self.manual_queue.splice(..manual_len, first.old_manual);
-                            self.session_dirty = true;
+                        if self.manual_queue.starts_with(&last.new_manual) {
+                            let extra = self.manual_queue.len() - last.new_manual.len();
+                            if let Loadable::Loaded(queue) = &mut self.queue
+                                && queue.queue.len() == last.shown_len + extra
+                            {
+                                let at = last.new_manual.len();
+                                let mut without_adds = queue.queue.clone();
+                                let added: Vec<_> = without_adds.drain(at..at + extra).collect();
+                                if without_adds.iter().take(last.expected.len())
+                                    .map(PlayableItem::uri).eq(last.expected.iter().map(String::as_str))
+                                {
+                                    let mut restored = first.before;
+                                    restored.splice(first.edit.manual..first.edit.manual, added);
+                                    queue.queue = restored;
+                                    for addition in &mut self.pending_queue_adds {
+                                        if addition.manual_index >= at {
+                                            addition.manual_index = first.old_manual.len() + addition.manual_index - at;
+                                        }
+                                    }
+                                    self.manual_queue.splice(..at, first.old_manual);
+                                    for addition in &mut self.pending_queue_adds {
+                                        addition.required_count = self.manual_queue[..=addition.manual_index]
+                                            .iter().filter(|uri| uri.as_str() == addition.item.uri()).count();
+                                    }
+                                    self.session_dirty = true;
+                                }
+                            }
                         }
                         self.queue_edits.clear();
                         self.toast_error(
@@ -13593,13 +13607,26 @@ impl App {
         self.write_queue_adds(vec![uri], pending_start);
     }
 
+    fn queue_add_required_count(&self, uri: &str) -> usize {
+        let shown = self.queue.get().map_or(0, |queue| {
+            queue.queue[..self.queued_rows_len()].iter().filter(|item| item.uri() == uri).count()
+        });
+        let pending = self.pending_queue_adds.iter()
+            .filter(|addition| addition.item.uri() == uri)
+            .map(|addition| addition.required_count)
+            .max().unwrap_or(0);
+        shown.max(pending) + 1
+    }
+
     fn show_queued_song(&mut self, uri: &str, label: &str) {
-        self.adopt_local_manual_queue();
+        self.adopt_player_manual_queue();
+        let required_count = self.queue_add_required_count(uri);
         let item = self.optimistic_queue_item(uri, label);
         self.pending_queue_adds.push(PendingQueueAdd {
             item: item.clone(),
             at: Instant::now(),
             manual_index: self.manual_queue.len(),
+            required_count,
             write: None,
         });
         if let Loadable::Loaded(queue) = &self.queue {
@@ -13841,20 +13868,10 @@ impl App {
         for item in &queue.queue[..queued_len] {
             *listed.entry(item.uri().to_string()).or_insert(0) += 1;
         }
-        // A fetched or currently playing addition is no longer pending.
-        let current = self.current_track_uri();
+        // An existing copy, including the currently playing song, cannot
+        // confirm a new occurrence. Playback consumes its own pending row.
         self.pending_queue_adds.retain(|addition| {
-            let uri = addition.item.uri();
-            if current.as_deref() == Some(uri) {
-                return false;
-            }
-            match listed.get_mut(uri) {
-                Some(left) if *left > 0 => {
-                    *left -= 1;
-                    false
-                }
-                _ => true,
-            }
+            listed.get(addition.item.uri()).copied().unwrap_or(0) < addition.required_count
         });
         let missing: Vec<PlayableItem> = self
             .pending_queue_adds
@@ -14818,7 +14835,7 @@ impl App {
                     self.move_in_remote_queue(from, to);
                     return;
                 }
-                self.adopt_local_manual_queue();
+                self.adopt_player_manual_queue();
                 let queued_len = self.queued_rows_len();
                 if from >= queued_len || to > queued_len || from == to || to == from + 1 {
                     return;
@@ -14855,7 +14872,7 @@ impl App {
                     self.queue_many(songs);
                     return;
                 }
-                self.adopt_local_manual_queue();
+                self.adopt_player_manual_queue();
                 let position = position.min(self.queued_rows_len());
                 let items: Vec<PlayableItem> = items
                     .into_iter()
@@ -14880,10 +14897,12 @@ impl App {
                             addition.manual_index += 1;
                         }
                     }
+                    let required_count = self.queue_add_required_count(&uri);
                     self.pending_queue_adds.push(PendingQueueAdd {
                         item: item.clone(),
                         at: Instant::now(),
                         manual_index: at,
+                        required_count,
                         write: None,
                     });
                     if let Loadable::Loaded(queue) = &mut self.queue {
@@ -22468,6 +22487,52 @@ mod tests {
         app.backend.shutdown();
     }
 
+    #[test]
+    fn a_failed_edit_rebases_an_intervening_add_before_its_own_failure() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.offline = false;
+        app.local_ready = false;
+        let now = "spotify:track:now";
+        let [a, b, c, d] = ["spotify:track:a", "spotify:track:b", "spotify:track:c", "spotify:track:d"];
+        app.remote = Some(RemoteSnapshot { state: sonos_playing(now), received_at: Instant::now() });
+        app.remote_queue = Some(crate::player::RemoteQueueView {
+            device: "sonos".into(),
+            track: now.into(),
+            queued: vec![a.into()],
+            rows: [a, b, c].into_iter().map(|uri| (uri.into(), uri.into())).collect(),
+            can_reorder: true,
+            ..Default::default()
+        });
+        app.queue = loaded_queue(now, &[a, b, c]);
+        let track = DragTrack {
+            title: "B".into(), image: None, items: vec![queued_song(b)],
+            from: Some((UPCOMING_ROW.into(), 1)), source_playlist: None,
+            queue_origin: app.queue_origin(),
+        };
+        app.drop_in_playback_queue(track, 1, true);
+        let edit = app.queue_edits.front().unwrap().request;
+        app.show_queued_song(d, "D");
+        app.write_queue_adds(vec![d.into()], 0);
+        let write = app.album_queue_serial;
+        assert_eq!(queue_uris(&app).1, [a, b, d, c]);
+        app.handle_api(ApiResponse::QueueEdited {
+            request: edit,
+            result: Err(crate::api::ApiError::Status { status: 409, message: "Changed".into() }),
+        });
+        assert_eq!(queue_uris(&app).1, [a, d, b, c]);
+        assert_eq!(app.manual_queue, [a, d]);
+        assert_eq!(app.pending_queue_adds[0].manual_index, 1);
+        app.handle_api(ApiResponse::QueueBatchAdded {
+            request: write, added: 0,
+            result: Err(crate::api::ApiError::Status { status: 403, message: "Rejected".into() }),
+        });
+        assert_eq!(queue_uris(&app).1, [a, b, c]);
+        assert_eq!(app.manual_queue, [a]);
+        assert!(app.pending_queue_adds.is_empty());
+        app.backend.shutdown();
+    }
+
     /// The answer to a poll sent after everything asked so far.
     fn report_sonos_playing(app: &mut App, uri: &str) {
         app.remote_poll_seq += 1;
@@ -23014,20 +23079,46 @@ mod tests {
 
     /// A pending addition is not restored after its track starts.
     #[test]
+    fn an_existing_manual_or_playing_copy_cannot_confirm_a_new_add() {
+        for playing in [false, true] {
+            let mut app = app_with_local_manual_queue();
+            app.backend.set_offline(true);
+            let a = "spotify:track:a";
+            let current = if playing { a } else { "spotify:track:playing" };
+            app.local.track.as_mut().unwrap().uri = current.into();
+            app.manual_queue = vec![a.into()];
+            app.queue = loaded_queue(current, &[a, "spotify:track:ctx"]);
+            app.show_queued_song(a, "A");
+            assert_eq!(app.pending_queue_adds[0].required_count, 2);
+            app.queue = loaded_queue(current, &[a, "spotify:track:ctx"]);
+            app.reconcile_pending_queue();
+            assert_eq!(app.pending_queue_adds.len(), 1);
+            assert_eq!(queue_uris(&app).1, [a, a, "spotify:track:ctx"]);
+            app.queue = loaded_queue(current, &[a, a, "spotify:track:ctx"]);
+            app.reconcile_pending_queue();
+            assert!(app.pending_queue_adds.is_empty());
+            app.backend.shutdown();
+        }
+    }
+
+    #[test]
     fn a_played_pending_add_is_not_put_back() {
         let mut app = headless_app();
         app.pending_queue_adds = vec![PendingQueueAdd {
             item: queued_song("spotify:track:b"),
             at: Instant::now(),
             manual_index: 0,
+            required_count: 1,
             write: None,
         }];
+        app.manual_queue = vec!["spotify:track:b".into()];
         app.local.track = Some(crate::player::LocalTrack {
             uri: "spotify:track:b".into(),
             ..Default::default()
         });
         app.local.playback = Playback::Playing;
         app.queue = loaded_queue("spotify:track:b", &["spotify:track:c"]);
+        app.consume_manual_queue_head("spotify:track:b");
         app.reconcile_pending_queue();
         let (_, next) = queue_uris(&app);
         assert_eq!(next, vec!["spotify:track:c"], "no resurrected row on top");
@@ -24753,6 +24844,7 @@ mod tests {
             item: queued_song("spotify:track:c"),
             at: Instant::now(),
             manual_index: 1,
+            required_count: 1,
             write: None,
         }];
         // Spotify's answer knows b already but not c yet.
@@ -25145,18 +25237,21 @@ mod tests {
                 item: queued_song("spotify:track:m0"),
                 at: Instant::now(),
                 manual_index: 0,
+                required_count: 1,
                 write: None,
             },
             PendingQueueAdd {
                 item: queued_song("spotify:track:m1"),
                 at: Instant::now(),
                 manual_index: 1,
+                required_count: 1,
                 write: None,
             },
             PendingQueueAdd {
                 item: queued_song("spotify:track:m2"),
                 at: Instant::now(),
                 manual_index: 2,
+                required_count: 1,
                 write: None,
             },
         ];
@@ -25553,6 +25648,7 @@ mod tests {
             item: queued_song("spotify:track:a"),
             at: Instant::now(),
             manual_index: 2,
+            required_count: 1,
             write: None,
         }];
         let ctx = egui::Context::default();
@@ -25675,12 +25771,14 @@ mod tests {
                 item: queued_song("spotify:track:m0"),
                 at: Instant::now(),
                 manual_index: 0,
+                required_count: 1,
                 write: None,
             },
             PendingQueueAdd {
                 item: queued_song("spotify:track:m1"),
                 at: Instant::now(),
                 manual_index: 1,
+                required_count: 1,
                 write: None,
             },
         ];

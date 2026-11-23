@@ -699,14 +699,13 @@ impl QueueEdit {
     }
 
     pub fn confirmed(&self, view: &RemoteQueueView, expected: &[String], manual: usize) -> bool {
+        let prefix = manual.min(expected.len());
         view.track == self.playing
-            && view.queued.len() == manual
-            && view
-                .rows
-                .iter()
-                .take(expected.len())
-                .map(|(uri, _)| uri)
-                .eq(expected.iter())
+            && view.queued.len() >= manual
+            && view.queued.iter().take(prefix).eq(expected[..prefix].iter())
+            && view.rows.iter().skip(view.queued.len())
+                .take(expected.len().saturating_sub(manual))
+                .map(|(uri, _)| uri).eq(expected[prefix..].iter())
     }
 }
 
@@ -2923,6 +2922,26 @@ mod tests {
             &["a".into(), "b".into(), "a".into()],
             0,
         ));
+    }
+
+    #[test]
+    fn an_appended_manual_row_does_not_hide_a_confirmed_edit() {
+        let edit = super::QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into(), "c".into()],
+            manual: 1,
+            operation: super::QueueEditOperation::Move { from: 1, to: 1, into_manual: true },
+        };
+        let view = super::RemoteQueueView {
+            track: "now".into(),
+            queued: vec!["a".into(), "b".into(), "d".into()],
+            rows: ["a", "b", "d", "c"].into_iter().map(|uri| (uri.into(), String::new())).collect(),
+            ..Default::default()
+        };
+        assert!(edit.confirmed(&view, &["a".into(), "b".into(), "c".into()], 2));
+        let mut wrong = view;
+        wrong.queued.swap(0, 1);
+        assert!(!edit.confirmed(&wrong, &["a".into(), "b".into(), "c".into()], 2));
     }
 
     #[test]

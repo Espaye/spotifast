@@ -644,6 +644,9 @@ pub struct App {
     /// reject a fetch whose queued rows still show the pre-move order.
     queue_reorder_pending: Option<Instant>,
     queue_edits: VecDeque<PendingQueueEdit>,
+    /// When the speaker's snapshot that confirmed the last queue edit was
+    /// taken. That snapshot's rows hold even when there are none.
+    queue_confirmed_at: Option<Instant>,
     local_queue: Option<crate::player::RemoteQueueView>,
     /// Songs taken out of Playing next one by one, and when, used to
     /// reject a fetch that still has one right after the queued rows.
@@ -1469,6 +1472,7 @@ impl App {
             queue_shuffle_pending: None,
             queue_reorder_pending: None,
             queue_edits: VecDeque::new(),
+            queue_confirmed_at: None,
             local_queue: None,
             queue_removed: None,
             remote_queue: None,
@@ -7806,6 +7810,7 @@ impl App {
         self.pending_album_queues.clear();
         self.last_album_queue = None;
         self.queue_edits.clear();
+        self.queue_confirmed_at = None;
         self.queue_cleared = None;
         self.queue_removed = None;
         self.queue_reorder_pending = None;
@@ -8379,7 +8384,10 @@ impl App {
             || self.queue_skip_in_flight()
             || (!self.queue_locally_reorderable()
                 && view.rows.is_empty()
-                && !fetched.queue.is_empty())
+                && !fetched.queue.is_empty()
+                // An empty push may only lack the queue, unless it is the
+                // one that confirmed an edit, such as Clear.
+                && (view.published_at.is_none() || view.published_at != self.queue_confirmed_at))
             || fetched.currently_playing.as_ref().map(PlayableItem::uri)
                 != Some(view.track.as_str())
         {
@@ -11511,6 +11519,7 @@ impl App {
                                 self.local_queue = Some(view);
                             }
                         } else if !Self::queue_view_is_older(&view, self.remote_queue.as_ref()) {
+                            self.queue_confirmed_at = view.published_at;
                             self.remote_queue = Some(view);
                         }
                         if self.queue_edits.is_empty()
@@ -22581,6 +22590,35 @@ mod tests {
             crate::player::QueueEditOperation::Remove { indexes } if *indexes == [0, 1]
         ));
         assert_eq!(queue_uris(&app).1, ["spotify:track:c"]);
+        app.backend.shutdown();
+    }
+
+    /// A speaker's confirmed empty queue outlasts a lagging read that still
+    /// lists the song just cleared.
+    #[test]
+    fn a_confirmed_empty_speaker_queue_outlasts_a_stale_read() {
+        let mut app = app_with_connect_edit_rows();
+        let (now, a) = ("spotify:track:now", "spotify:track:a");
+        app.queue = loaded_queue(now, &[a]);
+        let view = app.remote_queue.as_mut().unwrap();
+        view.rows.truncate(1);
+        view.published_at = Some(Instant::now());
+        app.clear_queue();
+        assert_eq!(app.queue_edits.len(), 1);
+        let mut cleared = app.remote_queue.clone().unwrap();
+        cleared.queued.clear();
+        cleared.rows.clear();
+        cleared.published_at = Some(Instant::now());
+        app.handle_api(ApiResponse::QueueEdited {
+            request: app.queue_edits[0].request,
+            result: Ok(cleared),
+        });
+        assert!(queue_uris(&app).1.is_empty());
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(loaded_queue(now, &[a]).get().unwrap().clone()),
+        });
+        assert!(queue_uris(&app).1.is_empty(), "the stale read cannot bring it back");
         app.backend.shutdown();
     }
 

@@ -7821,13 +7821,40 @@ impl App {
 
     fn bind_playback_queue(&mut self) {
         let target = self.playback_queue_target();
-        if self.queue_target.as_ref().is_some_and(|old| *old != target) {
-            // A read asked of the old target no longer answers for the
-            // queue. The rows stay: a transfer carries the queue with it,
-            // and the next read replaces them if it did not.
-            self.queue_seq += 1;
+        let Some(old) = self.queue_target.replace(target.clone()) else {
+            return;
+        };
+        if old == target {
+            return;
         }
-        self.queue_target = Some(target);
+        // A read asked of the old target no longer answers for the queue.
+        // The rows stay: a transfer carries the queue with it, and the next
+        // read replaces them if it did not.
+        self.queue_seq += 1;
+        // Learning the id of a device that had none is no move.
+        let moved = std::mem::discriminant(&old.0) != std::mem::discriminant(&target.0)
+            || matches!((&old.1, &target.1), (Some(was), Some(now)) if was != now);
+        if moved {
+            self.retire_device_queue_work();
+        }
+    }
+
+    /// Edits, adds, holds and a skip answer for the device they were asked
+    /// of. Once playback leaves it, their late answers must not roll back,
+    /// hold or block the next device's queue, and an add it refused must
+    /// not be replayed there. The rows and the manual list stay on show
+    /// until that device's own queue replaces them.
+    fn retire_device_queue_work(&mut self) {
+        self.queue_stale_retries = 0;
+        self.pending_queue_adds.clear();
+        self.pending_queue_batches.clear();
+        self.queue_edits.clear();
+        self.queue_cleared = None;
+        self.queue_removed = None;
+        self.queue_reorder_pending = None;
+        self.queue_shuffle_pending = None;
+        self.queue_skip = None;
+        self.queue_skip_unanswered = 0;
     }
 
     fn refresh_queue(&mut self, force: bool) {
@@ -24778,6 +24805,41 @@ mod tests {
             "a read asked of the first device is dropped"
         );
         assert!(app.queue_target == Some(app.playback_queue_target()));
+        app.backend.shutdown();
+    }
+
+    /// The rows go along with playback, but the old device's pending work
+    /// stays behind: its late answers cannot roll back or hold the new
+    /// device's queue, and its refused adds are not replayed there.
+    #[test]
+    fn a_device_change_retires_the_old_devices_pending_queue_work() {
+        let mut app = app_with_connect_edit_rows();
+        app.bind_playback_queue();
+        app.clear_queue();
+        let request = app.queue_edits[0].request;
+        app.show_queued_song("spotify:track:new", "New");
+        app.queue_skip = Some(("spotify:track:c".into(), Instant::now()));
+        app.queue_skip_unanswered = 1;
+        app.queue_reorder_pending = Some(Instant::now());
+        assert_eq!(app.pending_queue_adds.len(), 1);
+        let shown = queue_uris(&app);
+        let manual = app.manual_queue.clone();
+        app.transfer("speaker".into());
+        assert!(app.queue_edits.is_empty());
+        assert!(app.pending_queue_adds.is_empty());
+        assert!(app.pending_queue_batches.is_empty());
+        assert!(app.queue_skip.is_none());
+        assert_eq!(app.queue_skip_unanswered, 0);
+        assert!(app.queue_reorder_pending.is_none());
+        assert_eq!(queue_uris(&app), shown);
+        assert_eq!(app.manual_queue, manual);
+        let toasts = app.toasts.len();
+        app.handle_api(ApiResponse::QueueEdited {
+            request,
+            result: Err(crate::api::ApiError::RateLimited),
+        });
+        assert_eq!(queue_uris(&app), shown, "the old device's failure rolls nothing back");
+        assert_eq!(app.toasts.len(), toasts);
         app.backend.shutdown();
     }
 

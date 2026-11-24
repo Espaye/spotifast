@@ -1,0 +1,10 @@
+# NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS (see shoot-live.sh). Full screen
+# lyrics with the pointer drawn where it clicked. At 1280x800 the gap between
+# the cover and the words is at x 540, the header's MilkDrop button at
+# 1179,38; at 800x600 the empty margin left of the words is at x 50 and the
+# button at 635,38. Eight seconds let MilkDrop start, then a small move brings
+# the player bar back.
+near-miss home 1280x800 lyrics-fullscreen-view mousemove 540 330 sleep 0.5 click 1 sleep 8 mousemove 541 331 sleep 1
+button-click home 1280x800 lyrics-fullscreen-view mousemove 1179 38 sleep 0.5 click 1 sleep 8 mousemove 1179 64 sleep 1
+near-miss home 800x600 lyrics-fullscreen-view mousemove 50 300 sleep 0.5 click 1 sleep 8 mousemove 51 301 sleep 1
+button-click home 800x600 lyrics-fullscreen-view mousemove 635 38 sleep 0.5 click 1 sleep 8 mousemove 635 64 sleep 1

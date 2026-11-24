@@ -11,8 +11,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: queue
-            ref: f1d3d4be760b165a35545ab2e9ea2406c0b8bfed
+          - name: before
+            ref: eaaf3c6c12be1f97bc0043a3686d9b407df216f8
+          - name: after
+            ref: 8fa95f90dd0115935a0c401ca9b411bb21bd6e5e
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,10 +44,13 @@ jobs:
       - name: Shoot
         if: false
         run: bash tools/.github/capture/shoot-round30.sh "$PWD/app/target/debug/spotifast" shots
-      - name: Live
+      - name: Live clicks
+        run: bash tools/.github/capture/shoot-live.sh "$PWD/app/target/debug/spotifast" shots/clicks tools/.github/capture/live-milkdrop-clicks.txt
+      - name: Live hover
+        if: always()
         env:
           DRAW_MOUSE: 0
-        run: bash tools/.github/capture/shoot-live.sh "$PWD/app/target/debug/spotifast" shots/live tools/.github/capture/live-round32.txt
+        run: bash tools/.github/capture/shoot-live.sh "$PWD/app/target/debug/spotifast" shots/hover tools/.github/capture/live-milkdrop-hover.txt
       - if: always()
         uses: actions/upload-artifact@v4
         with:

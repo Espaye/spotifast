@@ -1,0 +1,5 @@
+# NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS (see shoot-live.sh). The pointer
+# over the header's MilkDrop button, shot with DRAW_MOUSE=0 so the tooltip
+# and the icon show.
+button-hover home 1280x800 lyrics-fullscreen-view mousemove 1179 38 sleep 1.5
+button-hover home 800x600 lyrics-fullscreen-view mousemove 635 38 sleep 1.5

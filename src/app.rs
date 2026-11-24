@@ -14197,6 +14197,64 @@ impl App {
         }
     }
 
+    /// Some lists leave a song's release date out, and Spotify shows an
+    /// added song with it at once. Take it from a copy of the song or its
+    /// album already read.
+    fn with_known_release_date(&self, item: PlayableItem) -> PlayableItem {
+        let PlayableItem::Track(mut track) = item else {
+            return item;
+        };
+        if track
+            .album
+            .as_ref()
+            .is_some_and(|album| album.release_date.is_some())
+        {
+            return PlayableItem::Track(track);
+        }
+        let queue = self
+            .queue
+            .get()
+            .into_iter()
+            .flat_map(|queue| queue.currently_playing.iter().chain(&queue.queue));
+        let known = self
+            .track_cache
+            .values()
+            .chain(
+                self.playlist_pages
+                    .values()
+                    .flat_map(|page| &page.items.items)
+                    .filter_map(PlaylistItem::playable)
+                    .chain(queue)
+                    .filter_map(|item| match item {
+                        PlayableItem::Track(track) => Some(track),
+                        PlayableItem::Episode(_) => None,
+                    }),
+            )
+            .chain(self.library.liked.items.iter().map(|saved| &saved.track))
+            .chain(self.recents.items.iter().map(|entry| &entry.track))
+            .find(|known| {
+                known.uri == track.uri
+                    && known
+                        .album
+                        .as_ref()
+                        .is_some_and(|album| album.release_date.is_some())
+            })
+            .and_then(|known| known.album.clone());
+        let from_album = track
+            .album
+            .as_ref()
+            .and_then(|album| self.album_pages.get(&album.id))
+            .and_then(|page| page.album.get())
+            .and_then(|album| album.release_date.clone());
+        match &mut track.album {
+            Some(album) => {
+                album.release_date = known.and_then(|known| known.release_date).or(from_album);
+            }
+            None => track.album = known,
+        }
+        PlayableItem::Track(track)
+    }
+
     fn add_to_playlist_now(
         &mut self,
         playlist_id: String,
@@ -14207,6 +14265,10 @@ impl App {
         if items.is_empty() {
             return;
         }
+        let items: Vec<_> = items
+            .into_iter()
+            .map(|item| self.with_known_release_date(item))
+            .collect();
         self.playlist_busy = true;
         for item in &items {
             if let PlayableItem::Track(track) = item {
@@ -33543,6 +33605,64 @@ mod tests {
                 ..
             }) if duplicate_uris == &["spotify:track:honey"]
         ));
+    }
+
+    /// A song dragged from a list that left its release date out shows the
+    /// date at once in the playlist it was added to.
+    #[test]
+    fn an_added_song_takes_a_known_release_date() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.playlist_pages.insert(
+            "best".into(),
+            PlaylistPage {
+                items: PagedList {
+                    items: vec![cached_playlist_row("spotify:track:one")],
+                    total: Some(1),
+                    loaded_once: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let song = |release_date: Option<&str>| crate::api::models::Track {
+            id: Some("honey".into()),
+            uri: "spotify:track:honey".into(),
+            name: "Honey".into(),
+            album: Some(crate::api::models::Album {
+                id: "sweet".into(),
+                release_date: release_date.map(str::to_owned),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        app.track_cache
+            .insert("honey".into(), song(Some("1987-03-09")));
+        app.add_to_playlist_now(
+            "best".into(),
+            "Best".into(),
+            vec![PlayableItem::Track(song(None))],
+            None,
+        );
+        let page = &app.playlist_pages["best"];
+        let added = page
+            .items
+            .items
+            .iter()
+            .filter_map(PlaylistItem::playable)
+            .find_map(|item| match item {
+                PlayableItem::Track(track) if track.uri == "spotify:track:honey" => Some(track),
+                _ => None,
+            })
+            .expect("the added row");
+        assert_eq!(
+            added
+                .album
+                .as_ref()
+                .and_then(|album| album.release_date.as_deref()),
+            Some("1987-03-09")
+        );
+        app.backend.shutdown();
     }
 
     #[test]

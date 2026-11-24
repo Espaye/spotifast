@@ -1,0 +1,9 @@
+# NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS (see shoot-live.sh). 1280x800:
+# player bar 88 high, transport row at y 748 centred on x 640, the saved
+# heart and the right-hand buttons at y 756.
+bar-heart playlist:pl0 1280x800 - mousemove 178 756 sleep 1.5
+bar-devices playlist:pl0 1280x800 - mousemove 1074 756 sleep 1.5
+bar-volume playlist:pl0 1280x800 - mousemove 1182 756 sleep 1
+bar-repeat playlist:pl0 1280x800 - mousemove 722 748 sleep 2
+lyrics-scrolled home 1280x800 lyrics-fullscreen-view mousemove 640 400 click 4 sleep 0.2 click 4 sleep 0.2 click 4 sleep 1.5
+lyrics-still home 1280x800 lyrics-fullscreen-view mousemove 640 400 sleep 7

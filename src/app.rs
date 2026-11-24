@@ -22628,7 +22628,10 @@ mod tests {
             seq: app.queue_seq,
             result: Ok(loaded_queue(now, &[a]).get().unwrap().clone()),
         });
-        assert!(queue_uris(&app).1.is_empty(), "the stale read cannot bring it back");
+        assert!(
+            queue_uris(&app).1.is_empty(),
+            "the stale read cannot bring it back"
+        );
         app.backend.shutdown();
     }
 
@@ -24913,7 +24916,11 @@ mod tests {
             request,
             result: Err(crate::api::ApiError::RateLimited),
         });
-        assert_eq!(queue_uris(&app), shown, "the old device's failure rolls nothing back");
+        assert_eq!(
+            queue_uris(&app),
+            shown,
+            "the old device's failure rolls nothing back"
+        );
         assert_eq!(app.toasts.len(), toasts);
         app.backend.shutdown();
     }
@@ -25627,7 +25634,11 @@ mod tests {
     fn a_context_copy_cannot_confirm_a_built_in_add() {
         let mut app = app_with_local_manual_queue();
         app.backend.set_offline(true);
-        let (now, a, b) = ("spotify:track:playing", "spotify:track:a", "spotify:track:b");
+        let (now, a, b) = (
+            "spotify:track:playing",
+            "spotify:track:a",
+            "spotify:track:b",
+        );
         app.local_device_id = Some("this-computer".into());
         app.manual_queue.clear();
         app.queue = loaded_queue(now, &[a, b]);

@@ -8761,6 +8761,15 @@ impl App {
         if !self.remote_queue_editable(|view| view.can_remove) {
             return;
         }
+        // A push can be ahead of the rows on show, such as after another
+        // client reordered them. Show the device's own order first, so the
+        // rows cleared are the ones it holds.
+        self.adopt_player_manual_queue();
+        if let Some(mut queue) = self.queue.get().cloned()
+            && self.align_queue_with_player(&mut queue)
+        {
+            self.queue = Loadable::Loaded(queue);
+        }
         let rows = self
             .queue
             .get()
@@ -22554,6 +22563,24 @@ mod tests {
             "Op dit apparaat kan Spotifast geen nummers in de wachtrij invoegen"
         );
         assert!(app.pending_queue_adds.is_empty());
+        app.backend.shutdown();
+    }
+
+    /// Clear removes what the device holds, even when its latest push
+    /// reordered Next in queue before a read could show that.
+    #[test]
+    fn clear_follows_a_push_that_reordered_next_in_queue() {
+        let mut app = app_with_connect_edit_rows();
+        let view = app.remote_queue.as_mut().unwrap();
+        view.queued = vec!["spotify:track:b".into(), "spotify:track:a".into()];
+        view.rows.swap(0, 1);
+        app.clear_queue();
+        assert_eq!(app.queue_edits.len(), 1);
+        assert!(matches!(
+            &app.queue_edits[0].edit.operation,
+            crate::player::QueueEditOperation::Remove { indexes } if *indexes == [0, 1]
+        ));
+        assert_eq!(queue_uris(&app).1, ["spotify:track:c"]);
         app.backend.shutdown();
     }
 

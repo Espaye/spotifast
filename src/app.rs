@@ -13902,11 +13902,21 @@ impl App {
             return;
         };
         // Only a copy among the queued rows confirms an addition: the
-        // playing context may hold the same song further down.
-        let queued_len = self.queued_end(&queue.queue, &self.manual_queue);
+        // playing context may hold the same song further down. This
+        // computer's player lists its queued rows as soon as it takes them;
+        // the Web API's rows tell them apart only by position.
         let mut listed: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        for item in &queue.queue[..queued_len] {
-            *listed.entry(item.uri().to_string()).or_insert(0) += 1;
+        if self.queue_locally_reorderable()
+            && let Some(view) = self.queue_player_view()
+        {
+            for uri in &view.queued {
+                *listed.entry(uri.clone()).or_insert(0) += 1;
+            }
+        } else {
+            let queued_len = self.queued_end(&queue.queue, &self.manual_queue);
+            for item in &queue.queue[..queued_len] {
+                *listed.entry(item.uri().to_string()).or_insert(0) += 1;
+            }
         }
         // An existing copy, including the currently playing song, cannot
         // confirm a new occurrence. Playback consumes its own pending row.
@@ -25610,6 +25620,46 @@ mod tests {
 
     /// Local playback with three songs under Playing next and one context
     /// row after them, for the repeated-move tests (#598).
+    /// The context's own copy of a song further down cannot confirm the
+    /// same song added on this computer: the player's list of queued
+    /// songs does.
+    #[test]
+    fn a_context_copy_cannot_confirm_a_built_in_add() {
+        let mut app = app_with_local_manual_queue();
+        app.backend.set_offline(true);
+        let (now, a, b) = ("spotify:track:playing", "spotify:track:a", "spotify:track:b");
+        app.local_device_id = Some("this-computer".into());
+        app.manual_queue.clear();
+        app.queue = loaded_queue(now, &[a, b]);
+        let mut view = crate::player::RemoteQueueView {
+            device: "this-computer".into(),
+            track: now.into(),
+            rows: vec![(a.into(), String::new()), (b.into(), String::new())],
+            can_reorder: true,
+            ..Default::default()
+        };
+        app.local_queue = Some(view.clone());
+        app.show_queued_song(a, "A");
+        assert_eq!(queue_uris(&app).1, [a, a, b]);
+        let read = |rows: &[&str]| loaded_queue(now, rows).get().unwrap().clone();
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(read(&[a, b])),
+        });
+        assert_eq!(queue_uris(&app).1, [a, a, b], "the read predates the add");
+        assert_eq!(app.pending_queue_adds.len(), 1);
+        view.queued = vec![a.into()];
+        view.rows.insert(0, (a.into(), String::new()));
+        app.note_local_queue(view);
+        app.handle_api(ApiResponse::Queue {
+            seq: app.queue_seq,
+            result: Ok(read(&[a, a, b])),
+        });
+        assert!(app.pending_queue_adds.is_empty());
+        assert_eq!(queue_uris(&app).1, [a, a, b]);
+        app.backend.shutdown();
+    }
+
     fn app_with_local_manual_queue() -> App {
         let mut app = headless_app();
         app.auth = AuthStatus::Connected {

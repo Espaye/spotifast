@@ -4,7 +4,8 @@
 # tooltip, scroll and drag states that --demo-shot cannot hold. STEPS_FILE
 # lines: NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS... with SHOW "-" for none.
 # Each line runs in dark and light in fresh XDG directories; the still shows
-# the pointer. The window sits at 0,0 on a display with no window manager.
+# the pointer unless DRAW_MOUSE=0. The window sits at 0,0 on a display with
+# no window manager.
 set -u
 bin=$1 out=$2 steps=$3
 mkdir -p "$out"
@@ -27,7 +28,7 @@ while read -r name page size show rest; do
     sleep 8
     # shellcheck disable=SC2086
     DISPLAY=:77 xdotool mousemove 5 5 sleep 0.3 $rest || { echo "FAILED steps $name"; failed=1; }
-    ffmpeg -loglevel error -y -f x11grab -draw_mouse 1 -video_size "$size" -i :77 -frames:v 1 \
+    ffmpeg -loglevel error -y -f x11grab -draw_mouse "${DRAW_MOUSE:-1}" -video_size "$size" -i :77 -frames:v 1 \
       "$out/$name-$size-$theme.png" || { echo "FAILED $name $size $theme"; failed=1; }
     DISPLAY=:77 xdotool mouseup 1 2>/dev/null
     kill $app 2>/dev/null

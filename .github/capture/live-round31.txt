@@ -1,0 +1,10 @@
+# NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS (see shoot-live.sh). 1280x800:
+# player bar 88 high, transport row at y 748 centred on x 640, the saved
+# heart and the right-hand buttons at y 756. The queue panel's rows sit at
+# x 1060, Otomo at y 212 and 48 apart; the drag ends between Closer and
+# Counterpart, with the button still held.
+bar-heart playlist:pl0 1280x800 - mousemove 178 756 sleep 1.5
+bar-devices playlist:pl0 1280x800 - mousemove 1074 756 sleep 1.5
+bar-volume playlist:pl0 1280x800 - mousemove 1182 756 sleep 1
+bar-repeat playlist:pl0 1280x800 - mousemove 722 748 sleep 2
+queue-drag playlist:pl0 1280x800 queue mousemove 1060 212 sleep 0.5 mousedown 1 sleep 0.3 mousemove 1060 222 sleep 0.2 mousemove 1060 260 sleep 0.2 mousemove 1060 320 sleep 0.2 mousemove 1060 380 sleep 0.2 mousemove 1060 424 sleep 1

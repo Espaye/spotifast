@@ -15,12 +15,8 @@ jobs:
             ref: eaaf3c6c12be1f97bc0043a3686d9b407df216f8
           - name: queue
             ref: c4028f948bafcb4411e2c10de6ff1da5c5d90773
-          - name: save-playlist
-            ref: b80b9241adc3efcd1a1b90ae56cf36d4e6b4e316
           - name: bar
             ref: 419927ff521554df93fc0371ec4f5924a6f3369a
-          - name: lyrics
-            ref: 8be55cb135635f6d0041e6889e0ecb0879b828b6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,8 +46,9 @@ jobs:
       - name: Shoot
         run: bash tools/.github/capture/shoot-round30.sh "$PWD/app/target/debug/spotifast" shots
       - name: Live
-        if: matrix.name == 'before' || matrix.name == 'bar' || matrix.name == 'lyrics'
-        run: bash tools/.github/capture/shoot-live.sh "$PWD/app/target/debug/spotifast" shots/live tools/.github/capture/live-round30.txt
+        env:
+          DRAW_MOUSE: 0
+        run: bash tools/.github/capture/shoot-live.sh "$PWD/app/target/debug/spotifast" shots/live tools/.github/capture/live-round31.txt
       - if: always()
         uses: actions/upload-artifact@v4
         with:

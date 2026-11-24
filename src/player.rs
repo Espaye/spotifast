@@ -676,40 +676,20 @@ impl QueueEdit {
 
     /// Confirm the complete rewrite, including duplicate identities and the tail.
     pub(crate) fn confirmed_state(&self, before: &PlayerState, current: &PlayerState) -> bool {
-        if current.queue_revision.is_empty() || current.queue_revision == before.queue_revision {
+        if current.queue_revision.is_empty() {
             return false;
         }
         let Some(wanted) = self.tracks(before) else {
             return false;
         };
-        let mut actual = current.next_tracks.clone();
-        actual.sort_by_key(|row| row.provider != QUEUE_PROVIDER);
-        let manual = wanted
-            .iter()
-            .take_while(|row| row.provider == QUEUE_PROVIDER)
-            .count();
-        let actual_manual = actual
-            .iter()
-            .take_while(|row| row.provider == QUEUE_PROVIDER)
-            .count();
-        if actual_manual < manual || actual.len() - actual_manual != wanted.len() - manual {
-            return false;
+        if current.queue_revision == before.queue_revision {
+            // librespot hashes the URIs alone, so a move between sections
+            // keeps its revision. Rows carrying the UIDs sent, which the
+            // old rows do not, still prove the rewrite.
+            return !rows_match(&wanted, before, before, true)
+                && rows_match(&wanted, before, current, true);
         }
-        let original_uids: std::collections::HashSet<_> = before
-            .next_tracks
-            .iter()
-            .filter(|row| !row.uid.is_empty())
-            .map(|row| row.uid.as_str())
-            .collect();
-        wanted
-            .iter()
-            .zip(actual[..manual].iter().chain(&actual[actual_manual..]))
-            .all(|(wanted, actual)| {
-                wanted.uri == actual.uri
-                    && wanted.provider == actual.provider
-                    && wanted.metadata.get("hidden") == actual.metadata.get("hidden")
-                    && (!original_uids.contains(actual.uid.as_str()) || wanted.uid == actual.uid)
-            })
+        rows_match(&wanted, before, current, false)
     }
 
     pub fn confirmed(&self, view: &RemoteQueueView, expected: &[String], manual: usize) -> bool {
@@ -729,6 +709,45 @@ impl QueueEdit {
                 .map(|(uri, _)| uri)
                 .eq(expected[prefix..].iter())
     }
+}
+
+/// Whether `current`'s rows are `wanted`. A row keeping one of `before`'s
+/// UIDs must keep the one sent; `exact_uids` asks that of every row.
+fn rows_match(
+    wanted: &[ProvidedTrack],
+    before: &PlayerState,
+    current: &PlayerState,
+    exact_uids: bool,
+) -> bool {
+    let mut actual = current.next_tracks.clone();
+    actual.sort_by_key(|row| row.provider != QUEUE_PROVIDER);
+    let manual = wanted
+        .iter()
+        .take_while(|row| row.provider == QUEUE_PROVIDER)
+        .count();
+    let actual_manual = actual
+        .iter()
+        .take_while(|row| row.provider == QUEUE_PROVIDER)
+        .count();
+    if actual_manual < manual || actual.len() - actual_manual != wanted.len() - manual {
+        return false;
+    }
+    let original_uids: std::collections::HashSet<_> = before
+        .next_tracks
+        .iter()
+        .filter(|row| !row.uid.is_empty())
+        .map(|row| row.uid.as_str())
+        .collect();
+    wanted
+        .iter()
+        .zip(actual[..manual].iter().chain(&actual[actual_manual..]))
+        .all(|(wanted, actual)| {
+            wanted.uri == actual.uri
+                && wanted.provider == actual.provider
+                && wanted.metadata.get("hidden") == actual.metadata.get("hidden")
+                && (wanted.uid == actual.uid
+                    || (!exact_uids && !original_uids.contains(actual.uid.as_str())))
+        })
 }
 
 /// What the device that plays has coming up, as the latest cluster push
@@ -2983,6 +3002,43 @@ mod tests {
             !edit.confirmed_state(&state, &confirmed),
             "the untouched tail still matters"
         );
+    }
+
+    #[test]
+    fn a_move_into_next_in_queue_confirms_under_librespots_unchanged_revision() {
+        // #given the first Next from row dragged to the end of Next in queue,
+        // which leaves the URIs, and so librespot's revision, as they were
+        let mut state = player_state(
+            provided("now", "n", "context"),
+            vec![
+                provided("a", "manual", "queue"),
+                provided("b", "first", "context"),
+                provided("c", "second", "context"),
+            ],
+        );
+        state.queue_revision = "r0".into();
+        let edit = super::QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into()],
+            manual: 1,
+            operation: super::QueueEditOperation::Move {
+                from: 1,
+                to: 1,
+                into_manual: true,
+            },
+        };
+        assert!(!edit.confirmed_state(&state, &state));
+        // #when the receiver publishes the rows sent #then they confirm it
+        let mut applied = state.clone();
+        applied.next_tracks[1].provider = "queue".into();
+        assert!(edit.confirmed_state(&state, &applied));
+        // #when the rows lack the UIDs sent #then only a new revision can
+        for row in &mut applied.next_tracks {
+            row.uid = format!("fresh-{}", row.uid);
+        }
+        assert!(!edit.confirmed_state(&state, &applied));
+        applied.queue_revision = "r1".into();
+        assert!(edit.confirmed_state(&state, &applied));
     }
 
     #[test]

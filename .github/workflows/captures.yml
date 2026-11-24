@@ -12,9 +12,15 @@ jobs:
       matrix:
         include:
           - name: before
-            ref: 52863632b246988e5f17c34dd1eb5001e8c1c8bf
-          - name: after
-            ref: 6c3301a688aa178b53de2d6b8950e2011a46ae43
+            ref: eaaf3c6c12be1f97bc0043a3686d9b407df216f8
+          - name: queue
+            ref: 3a107092de242784d755fa2f134304bc92ff7f9c
+          - name: save-playlist
+            ref: 486f9fe59ad545edc1bd7ba4348dc7cb5f154101
+          - name: bar
+            ref: 71c3a90fb61f94f66b9e7347508e7e5f28f07c42
+          - name: lyrics
+            ref: 8be55cb135635f6d0041e6889e0ecb0879b828b6
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,16 +41,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app
-          key: captures-${{ matrix.name }}
+          key: captures-${{ matrix.name == 'before' && 'before' || 'after' }}
       - name: Bright covers
-        run: python3 tools/.github/capture/patch_covers.py app/src/demo.rs
-      - name: Removed song
-        run: python3 tools/.github/capture/patch_unavailable.py app/src/demo.rs
+        run: python3 tools/.github/capture/patch_covers.py app/src/demo.rs || echo "bright covers skipped"
       - name: Build
         working-directory: app
         run: cargo build --locked --features demo
       - name: Shoot
-        run: bash tools/.github/capture/shoot-unavailable.sh "$PWD/app/target/debug/spotifast" shots
+        run: bash tools/.github/capture/shoot-round30.sh "$PWD/app/target/debug/spotifast" shots
       - if: always()
         uses: actions/upload-artifact@v4
         with:

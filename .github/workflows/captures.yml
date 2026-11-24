@@ -14,7 +14,7 @@ jobs:
           - name: before
             ref: eaaf3c6c12be1f97bc0043a3686d9b407df216f8
           - name: queue
-            ref: 3a107092de242784d755fa2f134304bc92ff7f9c
+            ref: c4028f948bafcb4411e2c10de6ff1da5c5d90773
           - name: save-playlist
             ref: 486f9fe59ad545edc1bd7ba4348dc7cb5f154101
           - name: bar

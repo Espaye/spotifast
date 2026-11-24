@@ -1648,9 +1648,11 @@ mod tests {
         // #given full screen lyrics just opened #then the pointer shows
         at(0.0, moved(pos2(400.0, 300.0)));
         assert!(!super::fullscreen_controls_idle(&ctx));
-        // egui repaints at once after its first frame, which would let the
-        // next frame finish the whole slide.
+        // egui follows input with two immediate frames, and an immediate
+        // frame advances an animation by the real gap, which would finish the
+        // whole slide at once. Two quiet frames let it settle.
         at(1.0, Vec::new());
+        at(2.0, Vec::new());
         // #when three quiet seconds pass #then it hides while the bar still shows
         at(3.1, Vec::new());
         assert!(at(3.2, Vec::new()) > 0.0);

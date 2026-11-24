@@ -1,0 +1,7 @@
+# NAME PAGE WIDTHxHEIGHT SHOW XDOTOOL_STEPS (see shoot-live.sh). 1280x800
+# with the queue panel open: the playlist's first row, Kaleidoscope, at
+# y 404 with its title at x 420. Playback is on a Connect speaker, so a song
+# dragged in from the playlist joins the end of Next in queue, which is empty:
+# the drop line sits in the gap between Now playing and Next from, around
+# y 140 in the panel, with the button still held.
+queue-drop playlist:pl0 1280x800 queue mousemove 420 404 sleep 0.5 mousedown 1 sleep 0.3 mousemove 430 404 sleep 0.2 mousemove 520 380 sleep 0.2 mousemove 700 300 sleep 0.2 mousemove 900 200 sleep 0.2 mousemove 1060 150 sleep 0.2 mousemove 1080 140 sleep 1

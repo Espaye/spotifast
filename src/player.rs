@@ -716,7 +716,11 @@ impl QueueEdit {
         let prefix = manual.min(expected.len());
         view.track == self.playing
             && view.queued.len() >= manual
-            && view.queued.iter().take(prefix).eq(expected[..prefix].iter())
+            && view
+                .queued
+                .iter()
+                .take(prefix)
+                .eq(expected[..prefix].iter())
             && view
                 .rows
                 .iter()

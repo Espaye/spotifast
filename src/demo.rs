@@ -12046,8 +12046,7 @@ mod tests {
                 "the occurrence moved without a copy"
             );
             assert_eq!(
-                app.local.track_sequence,
-                sequence,
+                app.local.track_sequence, sequence,
                 "a queue drag does not start playback"
             );
             app.backend.shutdown();

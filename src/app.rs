@@ -22492,7 +22492,10 @@ mod tests {
             state: sonos_playing(now),
             received_at: Instant::now(),
         });
-        app.queue = loaded_queue(now, &["spotify:track:a", "spotify:track:b", "spotify:track:c"]);
+        app.queue = loaded_queue(
+            now,
+            &["spotify:track:a", "spotify:track:b", "spotify:track:c"],
+        );
         app.remote_queue = Some(crate::player::RemoteQueueView {
             device: "sonos".into(),
             track: now.into(),
@@ -24770,7 +24773,10 @@ mod tests {
         let seq = app.queue_seq;
         app.transfer("second".into());
         assert_eq!(queue_uris(&app), shown);
-        assert!(app.queue_seq > seq, "a read asked of the first device is dropped");
+        assert!(
+            app.queue_seq > seq,
+            "a read asked of the first device is dropped"
+        );
         assert!(app.queue_target == Some(app.playback_queue_target()));
         app.backend.shutdown();
     }

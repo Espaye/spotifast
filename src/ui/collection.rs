@@ -1565,7 +1565,11 @@ fn view_indices(
             }),
             SortColumn::Album => sort_by_album(&mut visible, sort.ascending, items),
             SortColumn::AddedBy => sort_by_text_key(&mut visible, sort.ascending, |index| {
-                items[index].2.as_ref().map(|(_, name)| name.to_lowercase()).unwrap_or_default()
+                items[index]
+                    .2
+                    .as_ref()
+                    .map(|(_, name)| name.to_lowercase())
+                    .unwrap_or_default()
             }),
             SortColumn::Plays => visible.sort_by_key(|&index| {
                 let count = play_counts.get(items[index].0.uri()).copied();
@@ -1916,7 +1920,10 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let owner_id = playlist.owner.id.as_deref();
             let others = other_adders(owner_id, &page.contributors, &user_id);
             let made_together = playlist.collaborative || !others.is_empty();
-            let mut byline = vec![(owner_name(app, playlist).to_string(), playlist.owner.id.clone().map(Page::User))];
+            let mut byline = vec![(
+                owner_name(app, playlist).to_string(),
+                playlist.owner.id.clone().map(Page::User),
+            )];
             if let Some(saves) = playlist.followers.as_ref().map(|followers| followers.total) {
                 byline.push((saves_text(app.locale, saves), None));
             }
@@ -2283,7 +2290,10 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
 
 fn playlist_loading_hero(app: &mut App, ui: &mut egui::Ui, playlist: &Playlist) {
     let images = hero_images(&playlist.images, None, false, HeroArt::of(app));
-    let mut byline = vec![(owner_name(app, playlist).to_string(), playlist.owner.id.clone().map(Page::User))];
+    let mut byline = vec![(
+        owner_name(app, playlist).to_string(),
+        playlist.owner.id.clone().map(Page::User),
+    )];
     let count = playlist.track_total();
     if count > 0 {
         byline.push((song_count(app.locale, count), None));

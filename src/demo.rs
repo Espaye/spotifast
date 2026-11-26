@@ -892,24 +892,53 @@ pub(crate) fn load_profile(app: &mut App) {
         page.top_tracks = Loadable::Loaded((0..6).map(track).collect());
         page.top_artists = Loadable::Loaded((0..6).map(artist).collect());
     }
-    if !page.has_session { return; }
-    let people: Vec<_> = demo_friends().into_iter().filter_map(|friend| Some(ProfileEntry {
-        page: Page::from_uri(&friend.user_uri)?, name: friend.user_name, image: friend.image_url
-    })).collect();
+    if !page.has_session {
+        return;
+    }
+    let people: Vec<_> = demo_friends()
+        .into_iter()
+        .filter_map(|friend| {
+            Some(ProfileEntry {
+                page: Page::from_uri(&friend.user_uri)?,
+                name: friend.user_name,
+                image: friend.image_url,
+            })
+        })
+        .collect();
     let mut following = people.clone();
     let artist = artist(0);
-    following.push(ProfileEntry { page: Page::Artist(artist.id), name: artist.name,
-        image: artist.images.first().map(|i| i.url.clone()) });
-    let playlists = (0..3).map(playlist).map(|p| ProfileEntry {
-        page: Page::Playlist(p.id), name: p.name, image: p.images.first().map(|i| i.url.clone())
-    }).collect();
-    let user = if page.own { UserProfile::default() } else {
-        UserProfile { name: people.iter().find(|e| e.page == Page::User(page.id.clone())).map(|e| e.name.clone()), image_url: None }
+    following.push(ProfileEntry {
+        page: Page::Artist(artist.id),
+        name: artist.name,
+        image: artist.images.first().map(|i| i.url.clone()),
+    });
+    let playlists = (0..3)
+        .map(playlist)
+        .map(|p| ProfileEntry {
+            page: Page::Playlist(p.id),
+            name: p.name,
+            image: p.images.first().map(|i| i.url.clone()),
+        })
+        .collect();
+    let user = if page.own {
+        UserProfile::default()
+    } else {
+        UserProfile {
+            name: people
+                .iter()
+                .find(|e| e.page == Page::User(page.id.clone()))
+                .map(|e| e.name.clone()),
+            image_url: None,
+        }
     };
     page.view = Loadable::Loaded(ProfileView {
-        user, playlist_count: Some(3), playlists: Some(playlists),
-        followers_count: Some(people.len() as u64), following_count: Some(following.len() as u64),
-        followers: people, following,
+        user,
+        playlist_count: Some(3),
+        playlists: Some(playlists),
+        followers_count: Some(people.len() as u64),
+        following_count: Some(following.len() as u64),
+        followers: people,
+        following,
     });
 }
 

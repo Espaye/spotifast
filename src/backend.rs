@@ -4927,7 +4927,10 @@ impl Worker {
     }
 
     fn fetch_profile(&self, id: String, generation: u64) {
-        let session = self.engine.as_ref().map(|engine| engine.session().clone())
+        let session = self
+            .engine
+            .as_ref()
+            .map(|engine| engine.session().clone())
             .filter(|s| same_account(&s.username(), self.api.account().as_ref()));
         let events = self.events.clone();
         let waker = self.waker.clone();
@@ -4938,7 +4941,9 @@ impl Worker {
                     _ = cancelled.changed() => None,
                     result = tokio::time::timeout(Duration::from_secs(20), session_reads::profile_view(&session, &id)) => result.ok().flatten()
                 }
-            } else { None };
+            } else {
+                None
+            };
             let _ = events.send(Event::Profile(generation, view.map(Box::new)));
             waker.wake();
         });
@@ -5137,7 +5142,8 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
-        | ApiRequest::ProfileArtists(_) | ApiRequest::ProfileTracks(_)
+        | ApiRequest::ProfileArtists(_)
+        | ApiRequest::ProfileTracks(_)
         | ApiRequest::SavedTracks { .. }
         | ApiRequest::SavedAlbums { .. }
         | ApiRequest::FollowedArtists { .. }
@@ -5671,8 +5677,14 @@ async fn handle(
     // another app is steering, say), and then refuses its player commands.
     let retry = command_device(&request).map(|_| request.clone());
     let response = match request {
-        ApiRequest::ProfileArtists(generation) => ApiResponse::ProfileArtists(generation, routed!(top_artists("short_term", 20)).map(|p| p.items)),
-        ApiRequest::ProfileTracks(generation) => ApiResponse::ProfileTracks(generation, routed!(top_tracks("short_term", 20, 0)).map(|p| p.items)),
+        ApiRequest::ProfileArtists(generation) => ApiResponse::ProfileArtists(
+            generation,
+            routed!(top_artists("short_term", 20)).map(|p| p.items),
+        ),
+        ApiRequest::ProfileTracks(generation) => ApiResponse::ProfileTracks(
+            generation,
+            routed!(top_tracks("short_term", 20, 0)).map(|p| p.items),
+        ),
         ApiRequest::Me => ApiResponse::Me(routed!(me())),
         ApiRequest::Devices => ApiResponse::Devices(routed!(devices())),
         ApiRequest::PlaybackState { seq } => ApiResponse::PlaybackState {

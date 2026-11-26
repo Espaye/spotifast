@@ -232,7 +232,9 @@ fn row(
                 ui,
                 |ui| {
                     if let Some(page) = page_of(&friend.user_uri) {
-                        if theme::link(ui, &friend.user_name, theme::semibold(13.5), palette.text).clicked() {
+                        if theme::link(ui, &friend.user_name, theme::semibold(13.5), palette.text)
+                            .clicked()
+                        {
                             action = Some(Action::Open(page));
                         }
                     } else {

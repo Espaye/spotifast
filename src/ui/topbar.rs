@@ -490,7 +490,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         });
                         super::widgets::menu_separator(ui, &palette);
                         if let Some(id) = app.user_id().map(str::to_owned)
-                            && super::widgets::menu_item(ui, &palette, Some(Icon::User), &gettext(locale, "Profile")) {
+                            && super::widgets::menu_item(
+                                ui,
+                                &palette,
+                                Some(Icon::User),
+                                &gettext(locale, "Profile"),
+                            )
+                        {
                             app.actions.push(Action::Open(Page::User(id)));
                         }
                         if super::widgets::menu_item(

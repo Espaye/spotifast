@@ -1174,18 +1174,31 @@ pub struct ProfileView {
 
 fn profile_entries(json: &serde_json::Value, key: &str, people: bool) -> Option<Vec<ProfileEntry>> {
     use crate::model::Page;
-    Some(json.get(key)?.as_array()?.iter().filter_map(|item| {
-        let uri = crate::link::canonical_context_uri(item.get("uri")?.as_str()?);
-        let page = Page::from_uri(&uri)?;
-        match (&page, people) {
-            (Page::Artist(_) | Page::User(_), true) | (Page::Playlist(_), false) => {}
-            _ => return None,
-        }
-        let name = item.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-            .unwrap_or_else(|| uri.rsplit(':').next().unwrap_or_default()).to_owned();
-        let image = item.get("image_url").and_then(|v| v.as_str()).and_then(image_url);
-        Some(ProfileEntry { page, name, image })
-    }).collect())
+    Some(
+        json.get(key)?
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                let uri = crate::link::canonical_context_uri(item.get("uri")?.as_str()?);
+                let page = Page::from_uri(&uri)?;
+                match (&page, people) {
+                    (Page::Artist(_) | Page::User(_), true) | (Page::Playlist(_), false) => {}
+                    _ => return None,
+                }
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| uri.rsplit(':').next().unwrap_or_default())
+                    .to_owned();
+                let image = item
+                    .get("image_url")
+                    .and_then(|v| v.as_str())
+                    .and_then(image_url);
+                Some(ProfileEntry { page, name, image })
+            })
+            .collect(),
+    )
 }
 
 pub async fn profile_view(session: &Session, id: &str) -> Option<ProfileView> {
@@ -1202,10 +1215,19 @@ pub async fn profile_view(session: &Session, id: &str) -> Option<ProfileView> {
     };
     if json["show_follows"].as_bool() != Some(false) {
         let (followers, following) = tokio::join!(
-            tokio::time::timeout(std::time::Duration::from_secs(8), client.get_user_followers(id)),
-            tokio::time::timeout(std::time::Duration::from_secs(8), client.get_user_following(id))
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.get_user_followers(id)
+            ),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.get_user_following(id)
+            )
         );
-        for (response, entries) in [(followers, &mut view.followers), (following, &mut view.following)] {
+        for (response, entries) in [
+            (followers, &mut view.followers),
+            (following, &mut view.following),
+        ] {
             if let Some(bytes) = response.ok().and_then(|result| result.ok())
                 && let Ok(list) = serde_json::from_slice(&bytes)
             {
@@ -2459,7 +2481,10 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].page, Page::User("juniper".into()));
         assert_eq!(entries[1].page, Page::Artist("abc".into()));
-        assert_eq!(entries[1].image.as_deref(), Some("https://i.scdn.co/image/ab12"));
+        assert_eq!(
+            entries[1].image.as_deref(),
+            Some("https://i.scdn.co/image/ab12")
+        );
         assert!(profile_entries(&json, "public_playlists", false).is_none());
     }
 

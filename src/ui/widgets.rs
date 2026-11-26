@@ -2180,7 +2180,11 @@ fn track_row_contents(
                 pos2(x, rect.top()),
                 pos2(x + cols.added_by - 12.0, rect.bottom()),
             );
-            let mut child = ui.new_child(UiBuilder::new().max_rect(cell).layout(Layout::left_to_right(Align::Center)));
+            let mut child = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(cell)
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
             child.set_clip_rect(cell.intersect(ui.clip_rect()));
             if theme::link(&mut child, name, theme::regular(13.0), palette.secondary).clicked() {
                 app.actions.push(Action::Open(Page::User(id.clone())));

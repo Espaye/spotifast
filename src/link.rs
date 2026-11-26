@@ -159,8 +159,13 @@ fn is_web_host(host: &str) -> bool {
 /// Spotify ids are base62; anything else on a link is not one, whatever
 /// hands it over.
 pub(crate) fn valid_user_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 256 && id != "." && id != ".."
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    !id.is_empty()
+        && id.len() <= 256
+        && id != "."
+        && id != ".."
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
 fn is_id(id: &str) -> bool {
@@ -249,11 +254,18 @@ mod tests {
     #[test]
     fn profile_links_open_a_persistable_page() {
         use crate::model::Page;
-        for link in ["spotify:user:a.listener", "https://open.spotify.com/user/a.listener"] {
+        for link in [
+            "spotify:user:a.listener",
+            "https://open.spotify.com/user/a.listener",
+        ] {
             let uri = parse(link).unwrap();
             assert_eq!(Page::from_uri(&uri), Some(Page::User("a.listener".into())));
         }
-        for page in [Page::User("a".into()), Page::Followers("a".into()), Page::Following("a".into())] {
+        for page in [
+            Page::User("a".into()),
+            Page::Followers("a".into()),
+            Page::Following("a".into()),
+        ] {
             assert_eq!(Page::decode(&page.encode()), Some(page));
         }
         assert!(parse("https://open.spotify.com/user/../other").is_none());

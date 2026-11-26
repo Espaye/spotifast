@@ -78,6 +78,13 @@ Spotifast uses separate credentials for Web API access and local playback:
    received counts visible. The artist query also carries the monthly listeners
    shown on the artist page.
 
+   Opening a profile reads Spotify's profile view and up to 50 public playlists
+   over the same account's playback session. When the profile permits it, the
+   session also asks for its public followers and following. The signed-in
+   listener's monthly top artists and tracks use the Web API's short-term
+   ranking. Without playback access, the listener's profile uses the Web API
+   account details and public playlists owned by that account.
+
    The **Listening activity** panel also needs this session. While the panel
    is open, and only then, the session reads Spotify's private
    `listening-activity/v1/feed` every 15 seconds through librespot's

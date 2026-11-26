@@ -231,7 +231,13 @@ fn row(
             egui::Sides::new().shrink_left().show(
                 ui,
                 |ui| {
-                    theme::text(ui, &friend.user_name, theme::semibold(13.5), palette.text);
+                    if let Some(page) = page_of(&friend.user_uri) {
+                        if theme::link(ui, &friend.user_name, theme::semibold(13.5), palette.text).clicked() {
+                            action = Some(Action::Open(page));
+                        }
+                    } else {
+                        theme::text(ui, &friend.user_name, theme::semibold(13.5), palette.text);
+                    }
                 },
                 |ui| {
                     if friend.playing {
@@ -385,6 +391,7 @@ fn page_of(uri: &str) -> Option<Page> {
         return Some(Page::Playlist(id));
     }
     match crate::util::uri_kind(uri)? {
+        "user" => Page::from_uri(uri),
         "album" => Some(Page::Album(id)),
         "artist" => Some(Page::Artist(id)),
         _ => None,

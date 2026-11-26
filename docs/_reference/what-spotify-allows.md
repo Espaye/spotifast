@@ -103,9 +103,10 @@ clients. Spotifast uses its session for:
   playability; unpublished rows stay visible without entering playback. The
   session collection service reads pre-save state and writes it only after the
   user presses the button. No Web API grant implements this operation.
-- **Display names and avatars** for the user IDs attached to songs in a
-  playlist and for a playlist's owner, from the profile view Spotify's own
-  clients read.
+- **Profiles** supply names and avatars for playlist owners and contributors,
+  public playlist counts and cards, and visible follower and following lists.
+  The Development Mode Web API no longer serves other people's profiles.
+  Your own monthly top artists and tracks come from the Web API.
 - **Precise EP types** for releases that the Web API groups with singles.
 - **Made for you** through Spotify's personalized Home section. This private
   request uses the playback session and an already verified Web API grant;

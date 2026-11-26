@@ -85,6 +85,9 @@ pub fn parse(text: &str) -> Option<String> {
         return None;
     };
     let kind = kind.to_ascii_lowercase();
+    if kind == "user" && segments.len() == 2 && valid_user_id(id) {
+        return Some(format!("spotify:user:{id}"));
+    }
     if !KINDS.contains(&kind.as_str()) || !is_id(id) {
         return None;
     }
@@ -155,6 +158,11 @@ fn is_web_host(host: &str) -> bool {
 
 /// Spotify ids are base62; anything else on a link is not one, whatever
 /// hands it over.
+pub(crate) fn valid_user_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && id != "." && id != ".."
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 fn is_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
@@ -238,6 +246,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn profile_links_open_a_persistable_page() {
+        use crate::model::Page;
+        for link in ["spotify:user:a.listener", "https://open.spotify.com/user/a.listener"] {
+            let uri = parse(link).unwrap();
+            assert_eq!(Page::from_uri(&uri), Some(Page::User("a.listener".into())));
+        }
+        for page in [Page::User("a".into()), Page::Followers("a".into()), Page::Following("a".into())] {
+            assert_eq!(Page::decode(&page.encode()), Some(page));
+        }
+        assert!(parse("https://open.spotify.com/user/../other").is_none());
+    }
+
     /// What is not a page here, or not Spotify's at all, is refused rather
     /// than guessed at.
     #[test]
@@ -248,7 +269,6 @@ mod tests {
             "spotify:",
             "spotify:track",
             "spotify:track:",
-            "spotify:user:carmine",
             "spotify:search:bad%0Aquery",
             "spotify:station:track:4uLU6hMCjMI75M1A2tKUQC",
             "spotify:local:Artist:Album:Song:180",
@@ -256,7 +276,6 @@ mod tests {
             "spotify:track:a b",
             "https://example.com/track/4uLU6hMCjMI75M1A2tKUQC",
             "https://open.spotify.com/",
-            "https://open.spotify.com/user/carmine",
             "https://open.spotify.com/intl-it/",
             "file:///etc/passwd",
             "4uLU6hMCjMI75M1A2tKUQC",

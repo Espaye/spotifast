@@ -594,6 +594,10 @@ pub struct App {
     playlist_cache_write_in_flight: bool,
     load_generation: u64,
     pub album_pages: HashMap<String, AlbumPage>,
+    pub profile: crate::model::ProfilePage,
+    pub profile: crate::model::ProfilePage,
+    #[cfg(any(test, feature = "demo"))]
+    pub demo_profiles: bool,
     pub artist_pages: HashMap<String, ArtistPage>,
     /// Never reset on page eviction or account reset, so old replies cannot match.
     artist_top_tracks_generation: u64,
@@ -1360,6 +1364,10 @@ impl App {
             playlist_cache_write_in_flight: false,
             load_generation: 0,
             album_pages: HashMap::new(),
+            profile: Default::default(),
+            profile: Default::default(),
+            #[cfg(any(test, feature = "demo"))]
+            demo_profiles: false,
             artist_pages: HashMap::new(),
             artist_top_tracks_generation: 0,
             show_pages: HashMap::new(),
@@ -3103,6 +3111,14 @@ impl App {
                 } => {
                     self.receive_account_caches(&account_id, generation, playlists, home);
                 }
+                Event::Profile(generation, view) => {
+                    if self.profile.generation == generation {
+                        let view = view.map(|v| *v).unwrap_or_default();
+                        self.set_user_name(self.profile.id.clone(), view.user.name.clone());
+                        self.set_user_image(self.profile.id.clone(), view.user.image_url.clone());
+                        self.profile.view = Loadable::Loaded(view);
+                    }
+                }
                 Event::FriendActivity { generation, result } => {
                     self.receive_friends(generation, result)
                 }
@@ -3493,6 +3509,9 @@ impl App {
                     self.load_made_for_you(false);
                 }
                 if became_ready {
+                    if matches!(self.page(), Page::User(_) | Page::Followers(_) | Page::Following(_)) {
+                        self.ensure_loaded(self.page().clone());
+                    }
                     self.reread_playlists_over_session();
                     let artists: Vec<_> = self
                         .artist_pages
@@ -3728,6 +3747,7 @@ impl App {
                     self.refresh_queue(true);
                 }
             }
+            Page::User(id) | Page::Followers(id) | Page::Following(id) => self.load_profile(id, true),
             Page::Settings => {}
         }
     }
@@ -3786,6 +3806,8 @@ impl App {
         self.hidden_songs_revision = self.hidden_songs_revision.wrapping_add(1);
         self.hidden_songs_requested = false;
         self.prerelease_request = None;
+        self.profile = Default::default();
+        self.profile = Default::default();
         self.artist_pages.clear();
         self.artist_prereleases.clear();
         self.artist_metadata_reads.clear();
@@ -6394,6 +6416,41 @@ impl App {
             )));
     }
 
+    fn load_profile(&mut self, id: String, force: bool) {
+        let own = self.user_id() == Some(id.as_str());
+        let has_session = self.local_ready;
+        if !self.network_reachable || (!force && self.profile.id == id && self.profile.own == own && self.profile.has_session == has_session) {
+            return;
+        }
+        self.load_generation += 1;
+        let generation = self.load_generation;
+        // A name and thumbnail on the previous profile already identify the
+        // selected person while the destination's own read is pending.
+        if let Some(entry) = self.profile.view.get()
+            .and_then(|view| view.followers.iter().chain(&view.following)
+                .find(|e| matches!(&e.page, Page::User(user) if user == &id))).cloned()
+        {
+            self.set_user_name(id.clone(), Some(entry.name));
+            self.set_user_image(id.clone(), entry.image);
+        }
+        self.profile = crate::model::ProfilePage { id: id.clone(), generation, own, has_session, ..Default::default() };
+        #[cfg(any(test, feature = "demo"))]
+        if self.demo_profiles {
+            crate::demo::load_profile(self);
+            return;
+        }
+        if has_session {
+            self.profile.view = Loadable::Loading;
+            self.backend.send(Command::Profile(id, generation));
+        }
+        if own {
+            self.profile.top_artists = Loadable::Loading;
+            self.profile.top_tracks = Loadable::Loading;
+            self.backend.api(ApiRequest::ProfileArtists(generation));
+            self.backend.api(ApiRequest::ProfileTracks(generation));
+        }
+    }
+
     pub fn ensure_loaded(&mut self, page: Page) {
         if !self.is_connected() {
             return;
@@ -6538,6 +6595,7 @@ impl App {
                     self.refresh_queue(true);
                 }
             }
+            Page::User(id) | Page::Followers(id) | Page::Following(id) => self.load_profile(id, false),
             Page::Settings => self.refresh_autostart(),
         }
     }
@@ -7188,6 +7246,7 @@ impl App {
 
     fn reload(&mut self, page: Page) {
         match &page {
+            Page::User(id) | Page::Followers(id) | Page::Following(id) => { self.load_profile(id.clone(), true); return; }
             Page::Home => self.load_home(true),
             Page::TopSongs => self.load_top_songs(true),
             Page::NewReleases => {
@@ -8618,6 +8677,12 @@ impl App {
                         }
                     }
                 }
+            }
+            ApiResponse::ProfileArtists(generation, result) => {
+                if generation == self.profile.generation && self.profile.own { self.profile.top_artists.refresh(result); }
+            }
+            ApiResponse::ProfileTracks(generation, result) => {
+                if generation == self.profile.generation && self.profile.own { self.profile.top_tracks.refresh(result); }
             }
             ApiResponse::TopArtists { generation, result } => {
                 if generation != self.home.generation {
@@ -13880,6 +13945,7 @@ impl App {
                     }
                 }
             }
+            Action::FilterPeople(filter) => self.profile.filter = filter,
             Action::OpenUrl(url) => {
                 // Open links off the UI thread with the platform-specific
                 // launcher used elsewhere in the app.
@@ -17838,6 +17904,30 @@ mod tests {
         );
         app.handle_auth(AuthStatus::SignedOut);
         assert_eq!(app.device_history, Default::default());
+    }
+
+    #[test]
+    fn profile_navigation_keeps_monthly_rankings_private_and_rejects_late_reads() {
+        let mut app = listener_app();
+        crate::demo::populate(&mut app);
+        app.open(Page::User("demo".into()));
+        assert!(app.profile.top_tracks.get().is_some());
+        let old = app.profile.generation;
+        app.open(Page::Following("demo".into()));
+        assert_eq!(app.profile.generation, old);
+        app.open(Page::User("ana".into()));
+        assert!(app.profile.top_tracks.get().is_none());
+        app.handle_backend_events(vec![Event::Profile(old, None)]);
+        assert!(app.profile.view.get().unwrap().following_count.is_some());
+        let current = app.profile.generation;
+        app.handle_backend_events(vec![Event::Profile(current, None)]);
+        let failed = app.profile.view.get().unwrap();
+        assert!(failed.followers.is_empty());
+        assert_eq!(app.user_names.get("ana").and_then(Option::as_deref), Some("Ana"));
+        app.local_ready = false;
+        app.open(Page::User("demo".into()));
+        assert!(app.profile.view.get().is_none());
+        assert!(app.profile.top_artists.get().is_some());
     }
 
     fn listener_app() -> App {

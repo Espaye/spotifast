@@ -1593,7 +1593,7 @@ pub struct TrackRow<'a> {
     pub show_album: bool,
     pub added_at: Option<&'a str>,
     /// Who put the song here, on playlists made together.
-    pub added_by: Option<&'a str>,
+    pub added_by: Option<&'a (String, String)>,
     pub show_added_by: bool,
     /// Spotify's play count for the song, on album pages and an artist's
     /// popular songs once the counts arrived.
@@ -2175,21 +2175,16 @@ fn track_row_contents(
     }
     // Added by.
     if cols.added_by > 0.0 {
-        if let Some(adder) = row.added_by {
+        if let Some((id, name)) = row.added_by {
             let cell = Rect::from_min_max(
                 pos2(x, rect.top()),
                 pos2(x + cols.added_by - 12.0, rect.bottom()),
             );
-            let clipped = painter.with_clip_rect(cell.intersect(ui.clip_rect()));
-            crate::bidi::paint_line(
-                &clipped,
-                cell.left(),
-                cell.right(),
-                cell.center().y,
-                adder,
-                theme::regular(13.0),
-                palette.secondary,
-            );
+            let mut child = ui.new_child(UiBuilder::new().max_rect(cell).layout(Layout::left_to_right(Align::Center)));
+            child.set_clip_rect(cell.intersect(ui.clip_rect()));
+            if theme::link(&mut child, name, theme::regular(13.0), palette.secondary).clicked() {
+                app.actions.push(Action::Open(Page::User(id.clone())));
+            }
         }
         x += cols.added_by;
     }
@@ -3035,7 +3030,7 @@ pub fn linked_shelf(
     clicked
 }
 
-fn shelf_cards(ui: &mut Ui, id: &str, add_contents: impl FnOnce(&mut Ui)) {
+pub(super) fn shelf_cards(ui: &mut Ui, id: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     crate::autoscroll::show(
         ui,

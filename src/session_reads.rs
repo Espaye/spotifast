@@ -1153,6 +1153,69 @@ fn profile_from_json(json: &serde_json::Value) -> UserProfile {
     }
 }
 
+/// A navigable card in Spotify's public profile view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileEntry {
+    pub page: crate::model::Page,
+    pub name: String,
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProfileView {
+    pub user: UserProfile,
+    pub playlist_count: Option<u64>,
+    pub followers_count: Option<u64>,
+    pub following_count: Option<u64>,
+    pub playlists: Option<Vec<ProfileEntry>>,
+    pub followers: Vec<ProfileEntry>,
+    pub following: Vec<ProfileEntry>,
+}
+
+fn profile_entries(json: &serde_json::Value, key: &str, people: bool) -> Option<Vec<ProfileEntry>> {
+    use crate::model::Page;
+    Some(json.get(key)?.as_array()?.iter().filter_map(|item| {
+        let uri = crate::link::canonical_context_uri(item.get("uri")?.as_str()?);
+        let page = Page::from_uri(&uri)?;
+        match (&page, people) {
+            (Page::Artist(_) | Page::User(_), true) | (Page::Playlist(_), false) => {}
+            _ => return None,
+        }
+        let name = item.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uri.rsplit(':').next().unwrap_or_default()).to_owned();
+        let image = item.get("image_url").and_then(|v| v.as_str()).and_then(image_url);
+        Some(ProfileEntry { page, name, image })
+    }).collect())
+}
+
+pub async fn profile_view(session: &Session, id: &str) -> Option<ProfileView> {
+    let client = session.spclient();
+    let bytes = client.get_user_profile(id, Some(50), Some(0)).await.ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let mut view = ProfileView {
+        user: profile_from_json(&json),
+        playlist_count: json["total_public_playlists_count"].as_u64(),
+        followers_count: json["followers_count"].as_u64(),
+        following_count: json["following_count"].as_u64(),
+        playlists: profile_entries(&json, "public_playlists", false),
+        ..Default::default()
+    };
+    if json["show_follows"].as_bool() != Some(false) {
+        let (followers, following) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(8), client.get_user_followers(id)),
+            tokio::time::timeout(std::time::Duration::from_secs(8), client.get_user_following(id))
+        );
+        for (response, entries) in [(followers, &mut view.followers), (following, &mut view.following)] {
+            if let Some(bytes) = response.ok().and_then(|result| result.ok())
+                && let Ok(list) = serde_json::from_slice(&bytes)
+            {
+                *entries = profile_entries(&list, "profiles", true).unwrap_or_default();
+            }
+        }
+    }
+    Some(view)
+}
+
 /// What one friend is listening to, or last played, with names to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FriendActivity {
@@ -2385,6 +2448,19 @@ mod tests {
             Some("2023-11-14T22:13:20Z")
         );
         assert_eq!(iso8601(0), None, "never recorded");
+    }
+
+    #[test]
+    fn mixed_profile_entries_keep_their_kind_and_ignore_unknown_uris() {
+        use crate::model::Page;
+        let json = serde_json::json!({"profiles":[{"uri":"spotify:user:juniper","name":"Juniper"},
+            {"uri":"spotify:artist:abc","image_url":"spotify:image:ab12"}, {"uri":"spotify:track:abc"}, {}]});
+        let entries = profile_entries(&json, "profiles", true).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].page, Page::User("juniper".into()));
+        assert_eq!(entries[1].page, Page::Artist("abc".into()));
+        assert_eq!(entries[1].image.as_deref(), Some("https://i.scdn.co/image/ab12"));
+        assert!(profile_entries(&json, "public_playlists", false).is_none());
     }
 
     /// The profile view gives a user's name and avatar; blanks and nulls

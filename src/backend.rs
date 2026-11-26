@@ -154,6 +154,8 @@ pub enum RecentsFor {
 
 #[derive(Clone, Debug)]
 pub enum ApiRequest {
+    ProfileArtists(u64),
+    ProfileTracks(u64),
     Me,
     Devices,
     PlaybackState {
@@ -417,6 +419,8 @@ impl ApiRequest {
 
 #[derive(Debug)]
 pub enum ApiResponse {
+    ProfileArtists(u64, ApiResult<Vec<Artist>>),
+    ProfileTracks(u64, ApiResult<Vec<Track>>),
     Me(ApiResult<User>),
     Devices(ApiResult<Vec<Device>>),
     PlaybackState {
@@ -891,6 +895,7 @@ pub enum Command {
     /// Read what friends are listening to through the streaming session,
     /// for the app's request generation.
     FriendActivity(u64),
+    Profile(String, u64),
     LoadLikedSongsCache {
         generation: u64,
     },
@@ -982,6 +987,7 @@ pub struct LyricsRequest {
 }
 
 pub enum Event {
+    Profile(u64, Option<Box<session_reads::ProfileView>>),
     Soloist(crate::soloist::Update),
     AudioCacheCleared(Result<crate::storage::AudioCleared, crate::storage::ClearAudioError>),
     /// The folder picked in the local files dialog; `None` when cancelled.
@@ -2797,6 +2803,7 @@ impl Worker {
                 }
                 Command::UserNames(ids) => self.fetch_user_names(ids),
                 Command::PlayCounts { uri, generation } => self.fetch_play_counts(uri, generation),
+                Command::Profile(id, generation) => self.fetch_profile(id, generation),
                 Command::FriendActivity(generation) => self.fetch_friend_activity(generation),
                 Command::LoadLikedSongsCache { generation } => {
                     if let Some(account) = self.api.account() {
@@ -4919,6 +4926,24 @@ impl Worker {
         });
     }
 
+    fn fetch_profile(&self, id: String, generation: u64) {
+        let session = self.engine.as_ref().map(|engine| engine.session().clone())
+            .filter(|s| same_account(&s.username(), self.api.account().as_ref()));
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let mut cancelled = self.session.subscribe();
+        tokio::spawn(async move {
+            let view = if let Some(session) = session {
+                tokio::select! {
+                    _ = cancelled.changed() => None,
+                    result = tokio::time::timeout(Duration::from_secs(20), session_reads::profile_view(&session, &id)) => result.ok().flatten()
+                }
+            } else { None };
+            let _ = events.send(Event::Profile(generation, view.map(Box::new)));
+            waker.wake();
+        });
+    }
+
     /// Ask the streaming session what friends are listening to. Without one
     /// there is nobody to ask, which the panel says.
     /// A read still running when the session ends is dropped, so nothing
@@ -5112,6 +5137,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
+        | ApiRequest::ProfileArtists(_) | ApiRequest::ProfileTracks(_)
         | ApiRequest::SavedTracks { .. }
         | ApiRequest::SavedAlbums { .. }
         | ApiRequest::FollowedArtists { .. }
@@ -5645,6 +5671,8 @@ async fn handle(
     // another app is steering, say), and then refuses its player commands.
     let retry = command_device(&request).map(|_| request.clone());
     let response = match request {
+        ApiRequest::ProfileArtists(generation) => ApiResponse::ProfileArtists(generation, routed!(top_artists("short_term", 20)).map(|p| p.items)),
+        ApiRequest::ProfileTracks(generation) => ApiResponse::ProfileTracks(generation, routed!(top_tracks("short_term", 20, 0)).map(|p| p.items)),
         ApiRequest::Me => ApiResponse::Me(routed!(me())),
         ApiRequest::Devices => ApiResponse::Devices(routed!(devices())),
         ApiRequest::PlaybackState { seq } => ApiResponse::PlaybackState {

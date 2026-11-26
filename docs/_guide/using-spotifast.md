@@ -232,6 +232,18 @@ A song picked from the search results plays on its own, and, with Autoplay on,
 Spotify continues with songs it suggests after it, as in the Spotify apps. The other results are
 not queued after it.
 
+## Profiles
+
+Choose **Profile** in the account menu to see your public playlists and your
+top artists and tracks this month. Only you can see those two rankings.
+Choose **More → Edit profile in Spotify** to change your picture or name.
+
+Select a name in Listening activity, a playlist's owner or an **Added by**
+name to open that person's profile. Spotify profile links open here too.
+With Spotify playback access connected, select **Followers** or **Following**
+to open the public list. A list containing both kinds of entry offers
+**All**, **Artists** and **Profiles** filters.
+
 ## Opening a Spotify link
 
 Paste a link to a song, album, artist, playlist or podcast into the search box

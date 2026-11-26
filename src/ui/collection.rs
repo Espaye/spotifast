@@ -1044,7 +1044,7 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 show_album: table.show_album,
                 // Rows reserve the column only where the header does.
                 added_at: added_at.as_deref().filter(|_| table.show_added),
-                added_by: added_by.as_deref(),
+                added_by: added_by.as_ref(),
                 show_added_by: table.show_added_by,
                 show_plays: table.show_plays,
                 compact: false,
@@ -1565,7 +1565,7 @@ fn view_indices(
             }),
             SortColumn::Album => sort_by_album(&mut visible, sort.ascending, items),
             SortColumn::AddedBy => sort_by_text_key(&mut visible, sort.ascending, |index| {
-                items[index].2.as_deref().unwrap_or_default().to_lowercase()
+                items[index].2.as_ref().map(|(_, name)| name.to_lowercase()).unwrap_or_default()
             }),
             SortColumn::Plays => visible.sort_by_key(|&index| {
                 let count = play_counts.get(items[index].0.uri()).copied();
@@ -1629,14 +1629,15 @@ fn playlist_rows(
                 .as_ref()
                 .and_then(|user| user.id.as_deref())
                 .map(|id| {
-                    if Some(id) == owner_id {
+                    let name = if Some(id) == owner_id {
                         owner_name.to_string()
                     } else {
                         names
                             .get(id)
                             .and_then(|name| name.clone())
                             .unwrap_or_else(|| id.to_string())
-                    }
+                    };
+                    (id.to_string(), name)
                 });
             positions.push(start + index);
             rows.push((playable, item.added_at.clone(), adder));
@@ -1915,7 +1916,7 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let owner_id = playlist.owner.id.as_deref();
             let others = other_adders(owner_id, &page.contributors, &user_id);
             let made_together = playlist.collaborative || !others.is_empty();
-            let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
+            let mut byline = vec![(owner_name(app, playlist).to_string(), playlist.owner.id.clone().map(Page::User))];
             if let Some(saves) = playlist.followers.as_ref().map(|followers| followers.total) {
                 byline.push((saves_text(app.locale, saves), None));
             }
@@ -2282,7 +2283,7 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
 
 fn playlist_loading_hero(app: &mut App, ui: &mut egui::Ui, playlist: &Playlist) {
     let images = hero_images(&playlist.images, None, false, HeroArt::of(app));
-    let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
+    let mut byline = vec![(owner_name(app, playlist).to_string(), playlist.owner.id.clone().map(Page::User))];
     let count = playlist.track_total();
     if count > 0 {
         byline.push((song_count(app.locale, count), None));
@@ -3781,7 +3782,7 @@ mod tests {
             };
             track.name = label.into();
             track.album.as_mut().unwrap().name = label.into();
-            item.2 = Some(label.into());
+            item.2 = Some((label.into(), label.into()));
         }
 
         for column in [SortColumn::Title, SortColumn::Album, SortColumn::AddedBy] {

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 pub mod artist;
+mod profile;
 pub mod collection;
 pub(crate) mod devices;
 mod dialogs;
@@ -373,6 +374,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             }
                             Page::Playlist(id) => collection::playlist(app, ui, &id),
                             Page::Album(id) => collection::album(app, ui, &id),
+                            Page::User(ref id) | Page::Followers(ref id) | Page::Following(ref id) => profile::show(app, ui, id, &page),
                             Page::Artist(id) => artist::show(app, ui, &id),
                             Page::Show(id) => show::show(app, ui, &id),
                             Page::Radio(seed) => radio::radio(app, ui, &seed),

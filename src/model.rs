@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::api::models::*;
 
 /// One table row: the playable, when it was added, who added it.
-pub type TableItem = (PlayableItem, Option<String>, Option<String>);
+pub type TableItem = (PlayableItem, Option<String>, Option<(String, String)>);
 
 /// Cached track-table rows for one page.
 ///
@@ -46,7 +46,7 @@ impl TableRowsCache {
                 .map(|(item, added, by)| {
                     playable_retained_bytes(item)
                         + added.as_ref().map(String::len).unwrap_or(0)
-                        + by.as_ref().map(String::len).unwrap_or(0)
+                        + by.as_ref().map_or(0, |(id, name)| id.len() + name.len())
                 })
                 .sum::<usize>()
     }
@@ -121,6 +121,9 @@ pub enum Page {
     Playlist(String),
     Album(String),
     Artist(String),
+    User(String),
+    Followers(String),
+    Following(String),
     Show(String),
     /// Spotify's radio seeded by a song, playlist, album, or artist, by the
     /// seed's URI.
@@ -144,6 +147,9 @@ impl Page {
             Page::Playlist(id) => format!("playlist:{id}"),
             Page::Album(id) => format!("album:{id}"),
             Page::Artist(id) => format!("artist:{id}"),
+            Page::User(id) => format!("user:{id}"),
+            Page::Followers(id) => format!("followers:{id}"),
+            Page::Following(id) => format!("following:{id}"),
             Page::Show(id) => format!("show:{id}"),
             Page::Radio(seed) => format!("radio:{seed}"),
             Page::Queue => "queue".into(),
@@ -170,6 +176,9 @@ impl Page {
                     "playlist" => Page::Playlist(id.into()),
                     "album" => Page::Album(id.into()),
                     "artist" => Page::Artist(id.into()),
+                    "user" if crate::link::valid_user_id(id) => Page::User(id.into()),
+                    "followers" if crate::link::valid_user_id(id) => Page::Followers(id.into()),
+                    "following" if crate::link::valid_user_id(id) => Page::Following(id.into()),
                     "show" => Page::Show(id.into()),
                     "radio" if crate::util::station_uri(id).is_some() => Page::Radio(id.into()),
                     _ => return None,
@@ -188,6 +197,7 @@ impl Page {
             "playlist" => Page::Playlist(id),
             "album" => Page::Album(id),
             "artist" => Page::Artist(id),
+            "user" if parts.next().is_none() && crate::link::valid_user_id(&id) => Page::User(id),
             "show" => Page::Show(id),
             _ => return None,
         })
@@ -955,6 +965,20 @@ impl DiscographyFilter {
     }
 }
 
+/// Only the most recently opened person's data is kept. All three screens
+/// share it, and late responses carry the generation of the original read.
+#[derive(Default)]
+pub struct ProfilePage {
+    pub id: String,
+    pub generation: u64,
+    pub has_session: bool,
+    pub own: bool,
+    pub view: Loadable<crate::session_reads::ProfileView>,
+    pub top_artists: Loadable<Vec<Artist>>,
+    pub top_tracks: Loadable<Vec<Track>>,
+    pub filter: Option<bool>, // Some(true) selects artists, Some(false) profiles.
+}
+
 #[derive(Default)]
 pub struct ArtistPage {
     pub artist: Loadable<Artist>,
@@ -1331,6 +1355,7 @@ pub enum Action {
     /// next query starts a new run of typing.
     EndSearchRun,
     ForgetSearch(String),
+    FilterPeople(Option<bool>),
     SetSearchFilter(SearchFilter),
     SetTopPeriod(TopPeriod),
     FocusSearch,

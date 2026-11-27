@@ -595,7 +595,6 @@ pub struct App {
     load_generation: u64,
     pub album_pages: HashMap<String, AlbumPage>,
     pub profile: crate::model::ProfilePage,
-    pub profile: crate::model::ProfilePage,
     #[cfg(any(test, feature = "demo"))]
     pub demo_profiles: bool,
     pub artist_pages: HashMap<String, ArtistPage>,
@@ -1364,7 +1363,6 @@ impl App {
             playlist_cache_write_in_flight: false,
             load_generation: 0,
             album_pages: HashMap::new(),
-            profile: Default::default(),
             profile: Default::default(),
             #[cfg(any(test, feature = "demo"))]
             demo_profiles: false,
@@ -3811,7 +3809,6 @@ impl App {
         self.hidden_songs_revision = self.hidden_songs_revision.wrapping_add(1);
         self.hidden_songs_requested = false;
         self.prerelease_request = None;
-        self.profile = Default::default();
         self.profile = Default::default();
         self.artist_pages.clear();
         self.artist_prereleases.clear();

@@ -263,7 +263,7 @@ fn top_shelves(app: &mut App, ui: &mut egui::Ui, page: &ProfilePage) {
                 if response.play || response.clicked {
                     app.actions.push(Action::PlayUris {
                         uris: tracks.iter().map(|t| t.uri.clone()).collect(),
-                        index,
+                        index: index as u32,
                     });
                 }
             }

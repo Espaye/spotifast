@@ -103,9 +103,10 @@ clients. Spotifast uses its session for:
   playability; unpublished rows stay visible without entering playback. The
   session collection service reads pre-save state and writes it only after the
   user presses the button. No Web API grant implements this operation.
-- **Display names and avatars** for the user IDs attached to songs in a
-  playlist and for a playlist's owner, from the profile view Spotify's own
-  clients read.
+- **Profiles** supply names and avatars for playlist owners and contributors,
+  public playlist counts and cards, and visible follower and following lists.
+  The Development Mode Web API no longer serves other people's profiles.
+  Your own monthly top artists and tracks come from the Web API.
 - **Precise EP types** for releases that the Web API groups with singles.
 - **Made for you** through Spotify's personalized Home section. This private
   request uses the playback session and an already verified Web API grant;
@@ -135,6 +136,11 @@ clients. Spotifast uses its session for:
 - **Play counts** on album pages and an artist's popular songs, from the
   Pathfinder queries Spotify's own pages make. The Web API has none. When
   the read fails, the lists leave the counts out.
+- **Unavailable songs on album pages**, from the same album query: a song
+  this account cannot play is greyed out. The Web API says so only for a
+  request tied to one market, which replaces a relinked song's ID. The
+  `linked_from` field that names the album's own song is deprecated, and
+  Spotify's February 2026 changes removed it for apps in Development Mode.
 - **Monthly listeners** on an artist page, from the same artist query. The
   Web API has no such number.
 - **Listening activity**: what the people the account follows are playing,

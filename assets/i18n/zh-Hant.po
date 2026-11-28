@@ -218,8 +218,12 @@ msgstr "{name}，資料夾，已收合"
 msgid "{name}, folder, expanded"
 msgstr "{name}，資料夾，已展開"
 
-#: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+#: src/ui/player_bar.rs:88
+msgid "The visualiser shows only music playing on this computer"
+msgstr "視覺效果只顯示在這部電腦上播放的音樂"
+
+#: src/ui/player_bar.rs:91
+msgid "Click to change the visualiser"
 msgstr "點按以切換視覺效果"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:134 src/ui/lyrics.rs:808
@@ -266,17 +270,29 @@ msgstr "暫停"
 msgid "Next"
 msgstr "下一首"
 
-#: src/ui/player_bar.rs:849
+#: src/ui/player_bar.rs:854
 msgid "Repeat"
 msgstr "重複播放"
 
-#: src/ui/player_bar.rs:853
+#: src/ui/player_bar.rs:860
 msgid "Repeat one"
 msgstr "單曲循環"
 
-#: src/ui/player_bar.rs:858
+#: src/ui/player_bar.rs:866
 msgid "Repeat off"
 msgstr "關閉重複播放"
+
+#: src/ui/player_bar.rs:855
+msgid "Repeat is off. Click to repeat all."
+msgstr "重複播放已關閉。點按以重複播放全部。"
+
+#: src/ui/player_bar.rs:861
+msgid "Repeating all. Click to repeat this song."
+msgstr "正在重複播放全部。點按以單曲循環。"
+
+#: src/ui/player_bar.rs:867
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "正在單曲循環。點按以關閉重複播放。"
 
 #: src/ui/player_bar.rs:919
 msgid "Playback position (%)"
@@ -649,7 +665,12 @@ msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "新增日期"
 
-#: src/ui/widgets.rs:2732
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "發行日期"
+
+#: src/ui/widgets.rs:2507
 msgctxt "column heading"
 msgid "PLAYS"
 msgstr "播放次數"
@@ -1650,12 +1671,12 @@ msgstr "中鍵自動捲動"
 msgid "Custom title bar"
 msgstr "自訂標題列"
 
-#: src/ui/settings.rs:1205
-msgid "Player bar visualizer"
+#: src/ui/settings.rs:1242
+msgid "Player bar visualiser"
 msgstr "播放列視覺效果"
 
-#: src/ui/settings.rs:1206
-msgid "Click player bar to change visualizer"
+#: src/ui/settings.rs:1243
+msgid "Click player bar to change visualiser"
 msgstr "點擊播放列切換視覺化效果"
 
 #: src/ui/settings.rs:1215
@@ -1731,11 +1752,14 @@ msgstr "使用 Spotifast 自己的標題列和視窗按鈕，而不是桌面環�
 
 #: src/ui/settings.rs:1306
 msgid ""
-"Show the song moving behind the player bar's controls while it plays here."
-msgstr "歌曲在本機播放時，在播放列控制項後方顯示它的律動。"
+"Show the song moving behind the player bar's controls. It shows only music "
+"playing on this computer, not on a speaker or another device."
+msgstr ""
+"在播放列控制項後方顯示歌曲的律動。只顯示在這部電腦上播放的音樂，不顯示喇叭或"
+"其他裝置上的音樂。"
 
-#: src/ui/settings.rs:1311
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+#: src/ui/settings.rs:1348
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr "允許點擊播放列的空白區域來切換視覺化效果。"
 
 #: src/ui/settings.rs:1314 src/ui/settings.rs:2104
@@ -1744,7 +1768,7 @@ msgstr "影格速率"
 
 #: src/ui/settings.rs:1317
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "播放列和迷你播放器視覺化效果的繪製頻率。影格速率越低，使用的資源越少。"
@@ -2794,6 +2818,22 @@ msgstr "協作播放清單"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "公開播放清單"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "私人播放清單"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "新增日期"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "發行日期"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "長度"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"
@@ -4047,12 +4087,10 @@ msgstr "{year}年{month}{day}日"
 msgid "{month} {year}"
 msgstr "{year}年{month}"
 
-#. Translators: How long ago a song was added. Keep {count}.
+#. Translators: When a song was added or played, less than a minute ago.
 #: src/util.rs:136
-#, rust-format
-msgid "{count} second ago"
-msgid_plural "{count} seconds ago"
-msgstr[0] "{count} 秒前"
+msgid "Just now"
+msgstr "剛剛"
 
 #. Translators: How long ago a song was added. Keep {count}.
 #: src/util.rs:146
@@ -4579,3 +4617,135 @@ msgstr ""
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "減少歌詞動畫"
+
+#: src/ui/queue.rs:640 src/ui/queue.rs:941
+msgid "Next in queue"
+msgstr "Next in queue"
+
+#: src/ui/queue.rs:729
+msgid "Next from:"
+msgstr "Next from:"
+
+#: src/app.rs:8621
+msgid "This song is already playing"
+msgstr "This song is already playing"
+
+#: src/app.rs:8645
+msgid "Play a song to reorder the queue"
+msgstr "Play a song to reorder the queue"
+
+#: src/app.rs:8649 src/app.rs:8666
+msgid "The queue is still updating. Try again in a moment."
+msgstr "The queue is still updating. Try again in a moment."
+
+#: src/app.rs:8654
+msgid "Spotifast has not seen this device's queue yet. Try again in a moment."
+msgstr "Spotifast has not seen this device's queue yet. Try again in a moment."
+
+#: src/app.rs:8663
+msgid "The songs just added are still on their way. Try again in a moment."
+msgstr "The songs just added are still on their way. Try again in a moment."
+
+#: src/app.rs:8659
+msgid "This device does not let Spotifast reorder its queue"
+msgstr "This device does not let Spotifast reorder its queue"
+
+#: src/app.rs:8103
+msgid "The queue changed. Drag the song again."
+msgstr "The queue changed. Drag the song again."
+
+#: src/app.rs:11465
+#. Translators: {error} is the reason the queue edit failed.
+#, rust-format
+msgid "Couldn't change the queue: {error}"
+msgstr "Couldn't change the queue: {error}"
+
+#: src/app.rs:8657
+msgid "This device does not let Spotifast insert into its queue"
+msgstr "This device does not let Spotifast insert into its queue"
+
+#: src/model.rs:668
+msgid "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+msgstr "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+
+#: src/ui/player_bar.rs:838
+msgid "Repeat is off. Click to repeat all."
+msgstr "Repeat is off. Click to repeat all."
+
+#: src/ui/player_bar.rs:844
+msgid "Repeating all. Click to repeat this song."
+msgstr "Repeating all. Click to repeat this song."
+
+#: src/ui/player_bar.rs:850
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "Repeating this song. Click to turn repeat off."
+
+#: src/ui/topbar.rs:627
+msgid "Show MilkDrop only"
+msgstr "Show MilkDrop only"
+
+#: src/ui/lyrics.rs:1071
+msgid "Sync lyrics"
+msgstr "Sync lyrics"
+
+#: src/ui/lyrics.rs:1047
+msgid "Toggle MilkDrop background (V)"
+msgstr "Toggle MilkDrop background (V)"
+
+#: src/ui/profile.rs:201
+msgid "Connect Spotify to see this profile."
+msgstr "連接 Spotify 以查看此個人檔案。"
+
+#: src/ui/profile.rs:124
+msgid "Edit profile in Spotify"
+msgstr "在 Spotify 中編輯個人檔案"
+
+#: src/ui/profile.rs:180
+msgid "Followers"
+msgstr "追蹤者"
+
+#: src/ui/profile.rs:188
+msgid "Following"
+msgstr "追蹤中"
+
+#: src/ui/profile.rs:356
+msgid "No public list to show."
+msgstr "沒有可顯示的公開清單。"
+
+#: src/ui/profile.rs:275
+msgid "Only visible to you"
+msgstr "只有你看得到"
+
+#: src/ui/profile.rs:97 src/ui/topbar.rs:510
+msgid "Profile"
+msgstr "個人檔案"
+
+#: src/ui/profile.rs:368
+msgid "Profiles"
+msgstr "個人檔案"
+
+#: src/ui/profile.rs:146
+msgid "Public playlists"
+msgstr "公開播放清單"
+
+#: src/ui/profile.rs:283
+msgid "Top artists this month"
+msgstr "本月熱門藝人"
+
+#: src/ui/profile.rs:305
+msgid "Top tracks this month"
+msgstr "本月熱門歌曲"
+
+#. Translators: {count} is how many people and artists the listener follows; English uses the same word for one and many.
+#: src/ui/profile.rs:77
+#, rust-format
+msgid "{count} following"
+msgid_plural "{count} following"
+msgstr[0] "追蹤中 {count}"
+
+#. Translators: {count} is how many public playlists the listener has.
+#: src/ui/profile.rs:48
+#, rust-format
+msgid "{count} public playlist"
+msgid_plural "{count} public playlists"
+msgstr[0] "{count} 個公開播放清單"

@@ -7,7 +7,7 @@ use std::time::Instant;
 use crate::api::models::*;
 
 /// One table row: the playable, when it was added, who added it.
-pub type TableItem = (PlayableItem, Option<String>, Option<String>);
+pub type TableItem = (PlayableItem, Option<String>, Option<(String, String)>);
 
 /// Cached track-table rows for one page.
 ///
@@ -46,7 +46,7 @@ impl TableRowsCache {
                 .map(|(item, added, by)| {
                     playable_retained_bytes(item)
                         + added.as_ref().map(String::len).unwrap_or(0)
-                        + by.as_ref().map(String::len).unwrap_or(0)
+                        + by.as_ref().map_or(0, |(id, name)| id.len() + name.len())
                 })
                 .sum::<usize>()
     }
@@ -121,6 +121,9 @@ pub enum Page {
     Playlist(String),
     Album(String),
     Artist(String),
+    User(String),
+    Followers(String),
+    Following(String),
     Show(String),
     /// Spotify's radio seeded by a song, playlist, album, or artist, by the
     /// seed's URI.
@@ -144,6 +147,9 @@ impl Page {
             Page::Playlist(id) => format!("playlist:{id}"),
             Page::Album(id) => format!("album:{id}"),
             Page::Artist(id) => format!("artist:{id}"),
+            Page::User(id) => format!("user:{id}"),
+            Page::Followers(id) => format!("followers:{id}"),
+            Page::Following(id) => format!("following:{id}"),
             Page::Show(id) => format!("show:{id}"),
             Page::Radio(seed) => format!("radio:{seed}"),
             Page::Queue => "queue".into(),
@@ -170,6 +176,9 @@ impl Page {
                     "playlist" => Page::Playlist(id.into()),
                     "album" => Page::Album(id.into()),
                     "artist" => Page::Artist(id.into()),
+                    "user" if crate::link::valid_user_id(id) => Page::User(id.into()),
+                    "followers" if crate::link::valid_user_id(id) => Page::Followers(id.into()),
+                    "following" if crate::link::valid_user_id(id) => Page::Following(id.into()),
                     "show" => Page::Show(id.into()),
                     "radio" if crate::util::station_uri(id).is_some() => Page::Radio(id.into()),
                     _ => return None,
@@ -188,6 +197,7 @@ impl Page {
             "playlist" => Page::Playlist(id),
             "album" => Page::Album(id),
             "artist" => Page::Artist(id),
+            "user" if parts.next().is_none() && crate::link::valid_user_id(&id) => Page::User(id),
             "show" => Page::Show(id),
             _ => return None,
         })
@@ -665,7 +675,7 @@ impl TopPeriod {
             ),
             Self::LongTerm => gettext(
                 locale,
-                "Calculated from several years of listening history.",
+                "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it.",
             ),
         }
     }
@@ -955,6 +965,20 @@ impl DiscographyFilter {
     }
 }
 
+/// Only the most recently opened person's data is kept. All three screens
+/// share it, and late responses carry the generation of the original read.
+#[derive(Default)]
+pub struct ProfilePage {
+    pub id: String,
+    pub generation: u64,
+    pub has_session: bool,
+    pub own: bool,
+    pub view: Loadable<crate::session_reads::ProfileView>,
+    pub top_artists: Loadable<Vec<Artist>>,
+    pub top_tracks: Loadable<Vec<Track>>,
+    pub filter: Option<bool>, // Some(true) selects artists, Some(false) profiles.
+}
+
 #[derive(Default)]
 pub struct ArtistPage {
     pub artist: Loadable<Artist>,
@@ -1006,6 +1030,8 @@ pub enum SortColumn {
     AddedBy,
     /// Spotify's play count, where the list shows one.
     Plays,
+    /// The song's album's release date.
+    Released,
     /// The list's own order, for playing it reversed from the # heading.
     Index,
 }
@@ -1034,6 +1060,14 @@ pub enum RowContext {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueOrigin {
+    pub device: Option<String>,
+    pub playing: String,
+    pub manual: usize,
+    pub rows: Vec<String>,
+}
+
 /// Track data held during a drag.
 #[derive(Clone, Debug)]
 pub struct DragTrack {
@@ -1043,12 +1077,45 @@ pub struct DragTrack {
     /// Full row data, so dropping can update an open playlist immediately.
     /// A picked table row carries the whole selection in table order.
     pub items: Vec<PlayableItem>,
-    /// Source playlist ID and row index for moves within an editable playlist.
+    /// Source playlist ID and row index for moves within an editable
+    /// playlist, or [`QUEUED_ROW`] or [`UPCOMING_ROW`] and the row's index
+    /// in the whole queue for a row of the open queue, or
+    /// [`NOW_PLAYING_ROW`] for its Now playing row.
     pub from: Option<(String, u32)>,
     /// The editable playlist the rows were dragged from, however many there
     /// are. Several rows have no `from`, and dropping them back into their
     /// own playlist must not add copies of them (#669).
     pub source_playlist: Option<String>,
+    pub queue_origin: Option<QueueOrigin>,
+}
+
+/// The `from` origin of a row dragged out of Next in queue.
+pub const QUEUED_ROW: &str = "queue";
+
+/// The `from` origin of a row dragged out of the queue's rows after Next in
+/// queue, which play from the context in its own order.
+pub const UPCOMING_ROW: &str = "queue-upcoming";
+
+/// The `from` origin of the open queue's Now playing row.
+pub const NOW_PLAYING_ROW: &str = "queue-now-playing";
+
+impl DragTrack {
+    /// Whether the row was dragged out of Next in queue or Now playing,
+    /// which never queues it again. A row of Next up can be queued.
+    pub fn is_queued_or_playing(&self) -> bool {
+        self.from
+            .as_ref()
+            .is_some_and(|(origin, _)| [QUEUED_ROW, NOW_PLAYING_ROW].contains(&origin.as_str()))
+    }
+}
+
+/// Why a song dropped on the open queue stayed where it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueRefusal {
+    /// It was the Now playing row: the song is already playing.
+    NowPlaying,
+    /// The attempted move or insert is unavailable for this queue.
+    Locked { insert: bool },
 }
 
 /// Where the playing songs come from, as the queue's header names it.
@@ -1081,6 +1148,8 @@ pub enum Dialog {
         name: String,
         public: bool,
         add_uris: Vec<String>,
+        cover: crate::playlist_cover::Draft,
+        description: String,
     },
     EditPlaylist {
         cover: crate::playlist_cover::Draft,
@@ -1108,6 +1177,30 @@ pub enum Dialog {
     PremiumNeeded,
     /// Introduce personal Spotify apps to eligible listeners once.
     PersonalAppIntro,
+}
+
+impl Dialog {
+    /// New playlist, private and without a cover or description yet.
+    pub fn new_playlist(name: String, add_uris: Vec<String>) -> Self {
+        Self::CreatePlaylist {
+            name,
+            public: false,
+            add_uris,
+            cover: Default::default(),
+            description: String::new(),
+        }
+    }
+
+    /// The cover being picked for playlist `id`; New playlist's has no id yet.
+    pub fn cover_draft(&mut self, id: &str) -> Option<&mut crate::playlist_cover::Draft> {
+        match self {
+            Self::CreatePlaylist { cover, .. } if id.is_empty() => Some(cover),
+            Self::EditPlaylist {
+                id: current, cover, ..
+            } if current == id => Some(cover),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1204,11 +1297,17 @@ pub enum Action {
         items: Vec<PlayableItem>,
     },
     /// Move a row within the manually queued "Playing next" section, from a
-    /// drag dropped back on the queue. Only applied while the local player
-    /// is the active target; see [`crate::app::App::queue_locally_reorderable`].
+    /// drag dropped back on the queue. Applied on the local player, and with
+    /// Connect's `set_queue` on a device playing elsewhere that takes it;
+    /// see [`crate::app::App::queue_reorderable`].
     MoveInQueue {
         from: usize,
         to: usize,
+    },
+    DropInPlaybackQueue {
+        track: Box<DragTrack>,
+        slot: usize,
+        manual: bool,
     },
     /// Insert dragged songs into "Playing next" at a position, instead of
     /// always appending like `QueueMany`. Falls back to appending when the
@@ -1224,6 +1323,8 @@ pub enum Action {
     RemoveFromQueue {
         rows: Vec<(usize, String)>,
     },
+    /// Say why a song dropped on the open queue stayed where it was.
+    RefuseQueueDrop(QueueRefusal),
     /// Set saved state for several songs explicitly.
     SetSavedMany {
         uris: Vec<String>,
@@ -1287,6 +1388,12 @@ pub enum Action {
     /// Send the account to a receiver found on the local network.
     ActivateReceiver(Box<crate::zeroconf::Receiver>),
     RefreshDevices,
+    /// The pointer rests on a device button: fetch the device list ahead of
+    /// the click, unless it is fresh.
+    WarmDevices,
+    /// The pointer has rested on an album's card: fetch the album ahead of
+    /// the click.
+    PreloadAlbum(String),
     /// List this computer's audio outputs for the device picker.
     ListOutputDevices,
     /// Start Spotifast when the person logs in, this way, or not at all.
@@ -1331,6 +1438,7 @@ pub enum Action {
     /// next query starts a new run of typing.
     EndSearchRun,
     ForgetSearch(String),
+    FilterPeople(Option<bool>),
     SetSearchFilter(SearchFilter),
     SetTopPeriod(TopPeriod),
     FocusSearch,
@@ -1370,7 +1478,12 @@ pub enum Action {
     /// Show or hide what friends are listening to, in the right panel.
     ToggleFriendsPanel,
     SetLyricsFullscreen(bool),
-    LyricsLineShown(Option<usize>),
+    /// The lyrics view that drew this line, full screen or the panel, has it
+    /// in place.
+    LyricsLineShown {
+        line: Option<usize>,
+        fullscreen: bool,
+    },
     FollowLyrics,
     PauseLyricsFollow,
     RetryLyrics,
@@ -1396,6 +1509,8 @@ pub enum Action {
         sort: crate::settings::LibrarySort,
     },
     SetLibraryGrid(bool),
+    /// The optional columns of playlists' song lists.
+    SetTrackColumns(crate::settings::TrackColumns),
     ToggleLibraryFolder(String),
     ArrangeLibrary {
         pinned: Vec<String>,

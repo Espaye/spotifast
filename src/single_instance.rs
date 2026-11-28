@@ -511,7 +511,8 @@ mod tests {
         assert!(command("transfer ../secrets").is_none());
         assert!(command("transfer").is_none());
         assert!(command("open-link https://example.com/track/x").is_none());
-        assert!(command("open-link spotify:user:someone").is_none());
+        // A profile opens from its link, but not from an id that is no user's.
+        assert!(command("open-link spotify:user:..").is_none());
         assert!(command("open-link").is_none());
         // A word that is not one of the three is refused rather than read
         // as `off`, which is what `RepeatMode::from_api` would have done.

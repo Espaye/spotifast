@@ -69,14 +69,29 @@ Spotifast uses separate credentials for Web API access and local playback:
    this fallback from loading. This
    private response can change without notice. Radio pages come only from
    this session: the Web API has no stations. Opening one resolves the
-   station and reads its songs' details in one batched request.
+   station and reads its songs' details in one batched request. With
+   Autoplay on, a single song played on another device, which would stop
+   after it, waits up to two seconds for its station the same way, and plays
+   first with the station's songs after it; a station that fails or is late
+   leaves the song to play alone. Soloist is left out: its own play
+   command can start a lone song as a context of its own, which Spotify's
+   Autoplay follows.
    Play counts on album pages and an artist's popular songs come from the
    same Pathfinder queries Spotify's own album and artist pages make, with the
    session's token and an already verified Web API grant. Albums are read once
    per run; artist overviews are revalidated after ten minutes while viewed. A
    failed first read leaves the column out; an artist refresh keeps previously
    received counts visible. The artist query also carries the monthly listeners
-   shown on the artist page.
+   shown on the artist page. The album query also says which of its songs this
+   account cannot play, and the album page greys them out: the Web API's album
+   songs, asked for without a market, never say.
+
+   Opening a profile reads Spotify's profile view and up to 50 public playlists
+   over the same account's playback session. When the profile permits it, the
+   session also asks for its public followers and following. The signed-in
+   listener's monthly top artists and tracks use the Web API's short-term
+   ranking. Without playback access, the listener's profile uses the Web API
+   account details and public playlists owned by that account.
 
    The **Listening activity** panel also needs this session. While the panel
    is open, and only then, the session reads Spotify's private
@@ -330,6 +345,27 @@ without another download. When only a small known thumbnail is available, a
 softened preview may appear while the larger image loads. If the completed
 response has no cover, the page shows its placeholder instead of an old image.
 
+Song lists with covers (playlists, Liked Songs and the queue) also download the
+covers of the songs within two screens above and below the visible rows, once
+the visible rows' own covers have arrived or failed, so a song scrolled into
+view shows its cover at once. The Albums, Artists and Podcasts grids in Your
+Library do the same for the cards within a screen above and below. These use
+the same artwork URLs and cache as the visible rows and add no Web API request.
+
+Resting the pointer on an album's card for a quarter of a second, in Your
+Library, search results or an artist's discography, requests that album
+ahead of the click, so its page opens complete. Only one such request is on
+its way at a time, it waits behind requests you made, and passing over a
+card requests nothing. An album fetched this way and never opened is the
+first page Spotifast lets go of. Resting on a device button requests the
+device list and looks for receivers on the local network, unless the list
+is less than 12 seconds old, and the picker opened within 5 seconds shows
+that answer without asking again.
+
+On a connection the system reports as metered (Windows), none of this is
+fetched ahead: covers load as they come into view, albums when opened, and
+the device list when the picker opens.
+
 Since 0.8.0, album and playlist scrollbars can request a distant track
 page through the existing session or Web API read path, without fetching all
 preceding tracks. These reads run one at a time per list and retain the existing
@@ -536,6 +572,14 @@ without its device id. Commands for it, starting a song or playlist included,
 then name no device and go to the device the session's Connect cluster names
 as playing, which the session knows from the moment it connects.
 
+Volume writes over this route spend no Web API requests, so dragging the
+volume slider changes a restricted device's volume as the slider moves, while
+the Web API reports that device as restricted or without an id. One write is
+on its way at a time: the newest level waits for Spotify's answer to the write
+before it and goes next, so an older level never lands after a newer one, and
+the level at release goes last. A write left unanswered for two seconds stops
+holding up the next one. Other devices get their volume on release.
+
 Spotify does not always report a restricted device as such, for example a
 Sonos that another app is already steering when Spotifast starts. When the Web
 API refuses a command as restricted, Spotifast remembers the device it named,
@@ -543,11 +587,81 @@ or for a command naming none the device the Connect cluster names as playing,
 as restricted and sends the same command over the Connect route once, so later
 commands go there directly.
 
+Moving what this computer plays to a restricted device is a `play` command
+that names it, not a transfer. A transfer leaves the device to find its place
+from the state this computer published, and a Sonos does not always find it:
+given an album at its tenth song it listed the album from the top, and given
+a radio it started a new one, seed first. The command names the album,
+playlist, artist, show or Liked Songs with the playing song, or for a plain
+list, a lone song or a radio the songs on show (the played ones, the playing
+one, the ones coming up), with the position, shuffle and repeat as they are
+here, and `initially_paused` plus a `pause` when this computer is paused. The
+songs queued by hand follow as queue additions, in their order. A shuffled
+list is shuffled again where it goes. While a song queued by hand plays, when
+another device plays, or when the device refuses the command, the move is a
+transfer as before.
+
 Shuffle Play enables shuffle before starting the context, as it does for
 Web API devices. If enabling shuffle fails, playback does not start. On a Web
 API device, one refusal is the exception: "Restriction violated" means what
 plays now forbids shuffle, as autoplay does, so the start goes first and
 shuffle follows. If shuffle is refused again, the start keeps playing in order.
+
+Playing a row of Next up is one `skip_next` command that names the row, as
+Spotify's own apps send it: the song's URI, and the row's uid when the latest
+Connect cluster push listed that device's next tracks, which tells copies of a
+song apart. The device goes to that row itself. The song alone names its first
+copy, so a later copy without a uid gets one plain `skip_next` per row down to
+it instead. A second click's command, and a Next or Previous pressed
+meanwhile, waits for the first one's answer. A click right after a Next counts
+its rows from where that Next lands, before the next cluster push shows it,
+and a command that fails leaves the count where the device got to: where it
+was, or for a Next per row stopped partway, past the rows it passed. A row
+without a uid is told apart by the copies of its song after it. A device the
+Web API controls has no such command and gets one Next per row down to the
+song, the song's own row included (one for the top row), each sent after the
+one before it is answered.
+
+Previous on another device shows where it lands before the device answers
+when the destination is known. A quick Previous after Next can use the
+song that Next left, even before a new Connect push. Three seconds into a
+song, Previous restarts it: the app sends a seek to its start rather than
+a Previous, because a device given Previous applies its own rule and a
+Sonos always steps back. This computer's player does the same, and shows
+the song before from the previous tracks its own engine publishes, so
+Previous here is as immediate as Next. When the earlier song is unknown,
+the first Connect push identifying the new song can update the display before the
+next Web API poll. Previous history crosses the delimiter at a context
+boundary. With lyrics open, Spotifast prepares the known previous song's
+cover and lyrics along with the next song's. It reuses cached details and
+requests the previous song's details when they are missing.
+
+Reordering, removing and clearing the songs queued on another device go over
+the Connect route to any device, restricted or not, as one `set_queue` command:
+the device's queued rows from the latest cluster push, uids kept, in the new
+order, then its other next tracks and its previous tracks unchanged, with the
+push's `queue_revision`. The app offers these edits only while that push's
+restrictions allow `set_queue` and the reorder or removal, and the push's
+`queue` provider rows decide which songs show under Next in queue. Each
+command logs one line with counts.
+
+Positional queue drags and removal of an individual upcoming song use the
+rows published by the built-in player or the active Connect device. The Web
+API supplies track details. A failed metadata refresh keeps the loaded rows;
+a matching player snapshot can also supply the list without that response.
+If its queue response covers fewer songs than
+the player's list, Spotifast looks up the missing details in batches over
+the same-account playback session. It reuses known details, limits the
+lookup to one batch at a time, and waits before retrying a failed lookup.
+Each edit appears immediately. Spotifast sends a
+`set_queue` command and waits for the player to publish the new queue before
+sending the next edit with its revision. A new revision with the rows on show
+as sent confirms the edit, even when the device changed the later rows of its
+context meanwhile, as a Sonos does early in a listening session. Without a
+confirmation in 6 seconds, Spotifast logs what the device published instead,
+reads it again, and sends the edit once more from that fresh snapshot; only a
+second miss reports an error. Receivers that restrict these edits,
+including Soloist through its documented API, omit those controls.
 
 Individual and album queue additions use the same Connect route, one song at
 a time. A later addition waits for the whole album, repeated songs keep their
@@ -671,12 +785,25 @@ portal's Inhibit request for suspend, or a systemd-logind `idle` inhibitor
 when there is no portal (`systemd-inhibit --list`). None of them keeps the
 display on, and a sleep you ask for still happens.
 
-Since 0.9.0, selecting this computer in the device picker asks
-librespot to transfer playback from the active Connect device. Spotify supplies
+Since 0.9.0, selecting this computer in the device picker asks Spotify to
+transfer playback from the active Connect device. Spotify supplies
 the current song, position, playing or paused state, context, and queue together.
 This uses the existing playback session's Connect transfer request and needs
 no additional authorization. An old or unavailable Web API playback snapshot
 does not cause the previous local song to restart or replace the remote queue.
+
+The request goes out from a task of its own. Spotify answers it only after
+this computer has taken the transfer it sends meanwhile, and librespot's own
+transfer command waits for that answer in the task that takes the transfer:
+Spotify gave up after about three seconds and closed the connection, so the
+song started late or stayed on the other device.
+
+A plain list, a lone song or a radio on the other device has no address a
+transfer can find it by, and arrived as its one playing song with an empty
+queue. For those, this computer loads the songs the device's latest Connect
+push shows (played, playing, coming up) at the device's position, playing or
+paused as it is, and queues the songs queued by hand again. Loading takes
+playback over the same way.
 
 The engine prepares the next two songs of the queue while one plays, so Next
 starts the following song without waiting for it to load. For each, it reads

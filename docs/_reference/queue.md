@@ -4,16 +4,21 @@ description: What the queue shows, what Add to queue does, and what the app prom
 nav_order: 2
 ---
 
-The queue is the list of what plays next. It has two parts. On top,
-under **Playing next**, are the songs you queued yourself. Below them,
-under **Next up**, are the songs that come next in whatever playlist or
-album is playing. Your songs always play first.
+The queue is the list of what plays next. Under **Now playing** is the
+song playing. Below it, under **Next in queue**, are the songs queued by
+hand, here or from another app; the heading shows only while there are
+some. Last come the songs that follow in whatever playlist or album is
+playing. Queued songs always play first.
 
-Above both, **Playing from** names where the playing song came from: the
-playlist, album, artist, or podcast, which opens when clicked, Liked
-Songs, or a radio named after the song, playlist, album, or artist it is
-based on, which opens the radio's page. The line shows only while a song is
-playing from somewhere Spotify reports.
+That last section is headed **Next from:** and the name of where the
+playing song came from: the playlist, album, artist, or podcast, which
+opens when clicked, Liked Songs, or a radio named after the song, playlist,
+album, or artist it is based on, which opens the radio's page. When Spotify
+reports no such place, the heading is **Next up**.
+
+On another device, Spotify's Connect state says which of its upcoming songs
+were queued by hand, and **Next in queue** follows it, so every queued song
+stays there however Spotify's queue list orders them.
 
 These are the rules the app follows. The queue tests in `src/app.rs`
 check every one of them.
@@ -72,8 +77,20 @@ computer transfers that device's current song, position, and queue, including
 manually queued copies. A paused session stays paused. The handoff itself does
 not consume a queue row or restore an older queue saved on this computer.
 
+A move of playback keeps the queue in both directions. Moved to a Sonos, an
+album or playlist continues after the playing song, and a radio or plain list
+continues with the songs that were coming up here. Moved back, a radio or
+plain list arrives with the songs the device showed. Only a shuffled order is
+drawn again.
+
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
+
+   A long queue can show more songs than Spotify includes in its first
+   response. Their titles, covers and durations fill in as the details arrive.
+
+   The built-in and Connect player lists are used as reported, including
+   repeated songs. Only the Web API fallback needs padding removed.
 
    Spotify pads a short queue by going round it again, back to the playing
    song, even with Repeat off. With Repeat off, Spotifast leaves out the
@@ -88,7 +105,7 @@ not consume a queue row or restore an older queue saved on this computer.
    once.
 
    **Play next** puts a song, or a selection of songs in displayed order,
-   at the front of **Playing next**, before the songs already queued. It
+   at the front of **Next in queue**, before the songs already queued. It
    leaves the current song playing and keeps repeated songs as separate
    entries. Right-click a song or selection to find it beside **Add to queue**.
    It is enabled only while this computer is the active player, including
@@ -125,24 +142,29 @@ not consume a queue row or restore an older queue saved on this computer.
 
 5. **Playing a row from the queue skips to it.** The rows above it are
    skipped and removed, as if you had pressed Next down to it. The rows
-   below it stay, and the playlist keeps going afterwards. On this
-   computer the rows above leave the queue without playing, so only the
-   chosen song loads and no song in between is heard or named. Previous
-   then returns to the song that was playing, not to a skipped row. Another
-   device, Soloist included, cannot have a song taken out of its queue, so
-   it steps down to the row with one skip per row.
+   below it stay, and the playlist keeps going afterwards. This computer's
+   player removes the preceding rows from its upcoming list and starts the
+   chosen song with one skip. Until the player
+   reaches the song, here or on another device, the chosen row stays the
+   playing one and the songs passed on the way show nowhere: not as the
+   song playing, not in the player bar, and not as a queue in which the
+   chosen song is still waiting. A second row clicked meanwhile is counted
+   on the rows as shown. A skip that has not landed after twelve seconds
+   gives way to what Spotify reports.
 
 6. **Starting a playlist or album keeps your songs.** The rows underneath
-   change to the new collection; your songs stay under **Playing next**
+   change to the new collection; your songs stay under **Next in queue**
    and play before the collection continues. If you queue an album and then
    start it from the Library, its first song plays now and the separately
    queued album still follows. **Clear queue** removes those manual copies
    while keeping the playing album's remaining songs.
 
-7. **Clear only removes your songs.** The trash button sits beside the
-   *Playing next* heading and empties that section; the playlist's rows
-   below stay. It only shows while this computer is the player, because
-   that is the only queue the app can actually clear.
+7. **Clear only removes your songs.** The **Clear queue** button sits
+   beside the *Next in queue* heading and empties that section; the
+   playlist's rows below stay. It shows while this computer is the player,
+   and on another device whose Connect state lets the app rewrite its
+   queued songs. It stays while a drag is still being confirmed: the songs
+   go at once, and the clear waits its turn behind the drag.
 
 8. **Changes appear immediately.** Spotifast updates the queue before Spotify
    confirms the change. For local playback, it updates its own player directly.
@@ -167,23 +189,36 @@ Since 0.8.0, selecting several playlist rows and choosing
 For example, selecting B, C, B adds all three rows. A repeated click still
 counts once, and the notification reports only the rows actually added.
 
-11. **Dragging within *Playing next* reorders it, only on this computer.**
-    Neither the Web API nor librespot can reorder or insert into a live
-    queue; the only way to change one is to clear it and re-add its songs
-    in the new order, which reaches nothing but the engine actually playing
-    them. So dropping a song, dragged from elsewhere, at a position in
-    *Playing next* inserts it there, and dragging a row already in
-    *Playing next* elsewhere in the same section moves it, only while this
-    computer is the active player. Otherwise every drop still just adds to
-    the end, exactly like **Add to queue**. *Next up* is never a drop
-    target: it plays from the current context, not from a list Spotifast
-    can rewrite. While *Playing next* is empty, drop the song on the player
-    bar's Queue button instead.
+11. **Drag a song to change its place in the play order.** The green line
+    shows where it will play. Drag between rows in *Next up* or *Next from*,
+    or between that section and *Next in queue*. Moving a row moves that
+    occurrence once, including when another occurrence has the same title.
+    Dropping a Next up row on the Queue button moves it to the end of the
+    manual queue. To start an empty manual queue, use the button or drop
+    above the Next up heading. The order comes from the active player's
+    queue and each drop appears immediately. You can keep dragging while a
+    device confirms earlier drops. Spotifast sends them in order using the
+    latest confirmed queue revision. Clear queue uses that same sequence.
+    Confirmation requires a new revision with the edited occurrences in
+    place; an addition appended meanwhile can stay, and so can songs the
+    device loaded or dropped after the rows on show. A device that has not
+    confirmed an edit within 6 seconds is read again and sent the edit once
+    more; the order on show holds meanwhile, and only a second miss reports
+    an error. If playback advances or another app
+    changes the affected rows, pick up the song again from the updated list.
+    On the built-in player, the queue refreshes when a song starts, so you
+    can reorder while it plays or while it is paused.
 
-12. **A song you queued can be removed on its own, only on this
-    computer.** Right-click a row under *Playing next*, or open its **…**
-    menu, and choose **Remove from queue**. Only that row leaves: other
-    copies of the song stay, and so does *Next up*. Like a move, this
-    rewrites the queue by clearing it and re-adding the rest, so it is
-    offered only while this computer is the active player. *Next up* rows
-    have no such entry; they play from the current context.
+    Drag from a playlist into the queue to add songs to the listening
+    session. Drop a song from either queue section onto an editable
+    playlist to save it there. Changes to the play order affect the
+    listening session only. Positional drops require queue editing support
+    from the active player. On append-only devices, a playlist drag can
+    still add songs to the end of Next in queue.
+
+12. **Remove an upcoming song from the play order.** Right-click anywhere
+    on a row under *Next in queue*, *Next from* or *Next up*, or open its
+    **…** menu, and choose **Remove from queue**. Only the selected occurrence
+    leaves the current play order. Saved playlists and albums stay intact.
+    The option is available on this computer's built-in player and on
+    compatible Connect devices that allow removal.

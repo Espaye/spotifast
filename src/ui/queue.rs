@@ -2,12 +2,15 @@
 
 use std::sync::Arc;
 
-use egui::{Align, Frame, Layout, Margin, Rect, UiBuilder};
+use egui::{Align, Color32, Frame, Layout, Margin, Rect, UiBuilder};
 
 use crate::api::models::PlayableItem;
 use crate::app::App;
 use crate::i18n::{Locale, gettext};
-use crate::model::{Action, DragTrack, Loadable, QueueTab, RowContext};
+use crate::model::{
+    Action, DragTrack, Loadable, NOW_PLAYING_ROW, QUEUED_ROW, QueueRefusal, QueueTab, RowContext,
+    UPCOMING_ROW,
+};
 use crate::theme::{self, Icon};
 
 use super::widgets::{self, TrackRow};
@@ -161,16 +164,55 @@ pub(crate) fn fullscreen_column_drag_width(saved: f32, delta_x: f32) -> f32 {
 }
 
 /// The queue as the right column of lyrics fullscreen: the same rows as
-/// the side panel, without the resizable panel chrome. The caller provides
-/// the rect; everything here draws inside it.
-pub fn fullscreen_column(app: &mut App, ui: &mut egui::Ui) {
+/// the side panel, on a pane of tinted glass over the backdrop instead of
+/// the panel's chrome. The caller provides the rect; everything here draws
+/// inside it. Its scroll bar shows with the player bar (`controls`), as the
+/// words' bar does.
+pub fn fullscreen_column(app: &mut App, ui: &mut egui::Ui, controls: f32) {
+    // Full screen lyrics are dark in every theme, and so is the queue
+    // beside them, whatever the window's own theme. The palette is only the
+    // colours views draw with, and the rows read it from `app`, so the
+    // column lends them dark ones while it draws and gives the window's
+    // back before anything else draws or any action applies.
+    let own = app.palette;
+    app.palette = over_lyrics(&own);
+    column(app, ui, controls);
+    app.palette = own;
+}
+
+/// The colours of the queue over full screen lyrics: the dark theme's,
+/// with see-through surfaces so the backdrop shows through the chips and
+/// rows, and the app's own accent, as the words light up in.
+fn over_lyrics(own: &theme::Palette) -> theme::Palette {
+    theme::Palette {
+        surface: Color32::from_white_alpha(18),
+        surface_hover: Color32::from_white_alpha(32),
+        surface_active: Color32::from_white_alpha(40),
+        outline: Color32::from_white_alpha(20),
+        accent: own.accent,
+        accent_hover: own.accent_hover,
+        on_accent: own.on_accent,
+        ..theme::Palette::dark()
+    }
+}
+
+fn column(app: &mut App, ui: &mut egui::Ui, controls: f32) {
     let palette = app.palette;
+    let card = ui.max_rect();
+    ui.painter()
+        .rect_filled(card, 14.0, Color32::from_black_alpha(72));
+    ui.painter().rect_stroke(
+        card,
+        14.0,
+        egui::Stroke::new(1.0, Color32::from_white_alpha(16)),
+        egui::StrokeKind::Inside,
+    );
     // Drag strip on the column's left edge: same persisted width the side
     // panel uses, so both follow each resize. Explicit id, stable across
     // frames for the whole drag gesture.
     let strip = egui::Rect::from_min_size(
-        egui::pos2(ui.max_rect().left() - 4.0, ui.max_rect().top()),
-        egui::vec2(8.0, ui.max_rect().height()),
+        egui::pos2(card.left() - 4.0, card.top()),
+        egui::vec2(8.0, card.height()),
     );
     let grip = ui.interact(
         strip,
@@ -180,11 +222,12 @@ pub fn fullscreen_column(app: &mut App, ui: &mut egui::Ui) {
     if grip.hovered() || grip.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
     }
-    // Gutter between the divider and the content, mirroring the side
-    // panel's frame margin, so headings never touch the edge.
+    // The pane's padding, as the side panel's frame margin, so headings
+    // never touch its edge. The scroll bar keeps clear of the rounded
+    // corners on the right.
     let mut inner = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(
-        egui::pos2(ui.max_rect().left() + 12.0, ui.max_rect().top()),
-        ui.max_rect().max,
+        egui::pos2(card.left() + 12.0, card.top() + 12.0),
+        egui::pos2(card.right() - 6.0, card.bottom() - 10.0),
     )));
     let ui = &mut inner;
     // The handle stays invisible until hovered, then fades a slim edge in:
@@ -253,7 +296,6 @@ pub fn fullscreen_column(app: &mut App, ui: &mut egui::Ui) {
     if save {
         app.actions.push(Action::SaveQueueAsPlaylist);
     }
-    ui.add_space(8.0);
     // Lazy load recents when tab becomes visible.
     if app.queue_tab == QueueTab::Recents
         && !app.recents.loading
@@ -263,25 +305,44 @@ pub fn fullscreen_column(app: &mut App, ui: &mut egui::Ui) {
     {
         app.actions.push(Action::LoadMoreRecents);
     }
-    crate::autoscroll::show(
-        ui,
-        egui::ScrollArea::vertical()
-            .id_salt("queue-fullscreen-scroll")
-            .auto_shrink([false, false])
-            // Keep rows and headings clear of the scroll bar.
-            .content_margin(egui::Margin {
-                left: 0,
-                right: 12,
-                top: 0,
-                bottom: 0,
-            }),
-        egui::Vec2b::new(false, true),
-        |ui| match app.queue_tab {
-            QueueTab::Queue => contents(app, ui, true),
-            QueueTab::Recents => recents_contents(app, ui),
-        },
-    );
+    let scroll = &mut ui.spacing_mut().scroll;
+    // egui shades a scrolled list's edges in the panel's plain colour, a
+    // square band over the glass; the rows fade on their own instead.
+    scroll.fade.strength = 0.0;
+    scroll.dormant_handle_opacity = scroll.active_handle_opacity * controls;
+    scroll.active_handle_opacity *= controls;
+    scroll.interact_handle_opacity *= controls;
+    // The rows fade into the list's edges, a row the edge cuts showing
+    // faint, so the list belongs to the pane rather than sitting in a box of
+    // its own. At rest its margin keeps the first row whole.
+    widgets::fade_list_edges(ui, f32::from(LIST_EDGE), |ui| {
+        crate::autoscroll::show(
+            ui,
+            egui::ScrollArea::vertical()
+                .id_salt("queue-fullscreen-scroll")
+                .auto_shrink([false, false])
+                // Keep rows and headings clear of the scroll bar.
+                .content_margin(egui::Margin {
+                    left: 0,
+                    right: 12,
+                    top: LIST_EDGE,
+                    bottom: LIST_EDGE,
+                }),
+            egui::Vec2b::new(false, true),
+            |ui| match app.queue_tab {
+                QueueTab::Queue => contents(app, ui, true),
+                QueueTab::Recents => recents_contents(app, ui),
+            },
+        );
+    });
 }
+
+/// How far before its list's top and bottom the full screen column's rows
+/// start to fade, and the margin that keeps the first one whole at rest.
+const LIST_EDGE: i8 = 12;
+
+/// The height a section heading in the queue fades by near a list's edge.
+const HEADING_HEIGHT: f32 = 24.0;
 
 /// Saves the current and upcoming queue as a playlist.
 fn save_button(
@@ -302,67 +363,184 @@ fn save_button(
         .clicked()
 }
 
-/// Clears manual rows from the active local queue.
+/// Clears the songs under Next in queue, leaving the context's rows.
 fn clear_button(app: &mut App, ui: &mut egui::Ui) {
     if !app.can_clear_queue() {
         return;
     }
     let palette = app.palette;
-    if theme::icon_button(
-        ui,
-        Icon::Trash,
-        18.0,
-        palette.secondary,
-        palette.text,
-        &gettext(app.locale, "Clear queue"),
-    )
-    .clicked()
-    {
+    let label = gettext(app.locale, "Clear queue");
+    if theme::soft_button(ui, &palette, None, &label, false).clicked() {
         app.actions.push(Action::ClearQueue);
     }
 }
 
-/// A song was dropped on the queue this frame: the primary button was
-/// released while a drag was over the given rect.
-fn queue_drop(ui: &egui::Ui, rect: egui::Rect) -> Option<Arc<DragTrack>> {
-    if ui.rect_contains_pointer(rect)
-        && ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary))
-    {
-        egui::DragAndDrop::take_payload::<DragTrack>(ui.ctx())
-    } else {
-        None
+/// What dropping the song being dragged on the open queue would do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Landing {
+    /// The dragged row of Next in queue moves to the slot under the pointer.
+    Move,
+    /// Songs from elsewhere go in at the slot under the pointer. Only this
+    /// computer's player takes an insert at a chosen row.
+    Insert,
+    /// Songs from elsewhere join the end of Next in queue, as Add to queue
+    /// does: a device playing elsewhere takes no insert.
+    Append,
+    /// A positional edit of the device's upcoming tracks.
+    Edit,
+    /// Nothing moves, for the reason given.
+    Refused(QueueRefusal),
+}
+
+/// How to handle a drop in the manual section. A drop in Next up always
+/// edits the playback order on the device.
+fn landing_of(app: &App, track: &DragTrack) -> Landing {
+    let insert = !matches!(
+        track.from.as_ref().map(|(origin, _)| origin.as_str()),
+        Some(NOW_PLAYING_ROW | QUEUED_ROW | UPCOMING_ROW)
+    );
+    match track.from.as_ref().map(|(origin, _)| origin.as_str()) {
+        Some(NOW_PLAYING_ROW) => Landing::Refused(QueueRefusal::NowPlaying),
+        Some(QUEUED_ROW | UPCOMING_ROW) if app.can_edit_play_order() => Landing::Edit,
+        _ if app.queue_edit_in_flight() && !app.can_insert_in_play_order() => {
+            Landing::Refused(QueueRefusal::Locked { insert })
+        }
+        Some(QUEUED_ROW) if app.queue_reorderable() => Landing::Move,
+        Some(QUEUED_ROW) => Landing::Refused(QueueRefusal::Locked { insert }),
+        Some(UPCOMING_ROW) => Landing::Refused(QueueRefusal::Locked { insert }),
+        _ if app.can_insert_in_play_order() => Landing::Edit,
+        _ if app.queue_locally_reorderable() => Landing::Insert,
+        _ => Landing::Append,
     }
 }
 
-/// Space below the now-playing row and below Playing next, before the next
-/// section's heading.
-const SECTION_GAP: f32 = 14.0;
+/// Where the dragged row of Next in queue sits now. Playback can advance
+/// mid-drag and shift the rows, so the recorded index counts only while it
+/// still holds the dragged song; otherwise the song is looked up, and one
+/// that left the queue has nothing left to move.
+fn dragged_queued_row(app: &App, track: &DragTrack) -> Option<usize> {
+    let from = track.from.as_ref()?.1 as usize;
+    let uri = track.items.first()?.uri();
+    if app.queue_locally_reorderable() {
+        if app.manual_queue.get(from).map(String::as_str) == Some(uri) {
+            Some(from)
+        } else {
+            app.manual_queue.iter().position(|queued| queued == uri)
+        }
+    } else {
+        // Elsewhere a move names the shown rows.
+        let queue = app.queue.get()?;
+        let shown = &queue.queue[..app.queued_rows_len().min(queue.queue.len())];
+        if shown.get(from).map(PlayableItem::uri) == Some(uri) {
+            Some(from)
+        } else {
+            shown.iter().position(|item| item.uri() == uri)
+        }
+    }
+}
 
-fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
-    let palette = app.palette;
-    // Neither the Web API nor librespot can reorder or insert into a live
-    // remote queue, so without local playback active every drop just
-    // appends, same as the "Add to queue" menu item.
-    let reorderable = app.queue_locally_reorderable();
-    if !reorderable && let Some(track) = queue_drop(ui, ui.clip_rect()) {
-        app.actions.push(Action::QueueMany {
+/// Draws the line a dragged song would land on, as the playlist table does.
+fn drop_line(ui: &egui::Ui, color: Color32, y: f32) {
+    ui.painter().hline(
+        ui.max_rect().x_range().shrink(8.0),
+        y,
+        egui::Stroke::new(2.0, color),
+    );
+}
+
+#[derive(Clone, Copy)]
+struct QueueSlot {
+    index: usize,
+    manual: bool,
+}
+
+/// Dispatches only the action advertised at the pointer.
+fn drop_on_queue(app: &mut App, ui: &egui::Ui, landing: Landing, slot: Option<QueueSlot>) {
+    let context = slot.is_some_and(|slot| !slot.manual);
+    let landing = if context && !matches!(landing, Landing::Edit | Landing::Refused(_)) {
+        Landing::Refused(QueueRefusal::Locked {
+            insert: matches!(landing, Landing::Insert | Landing::Append),
+        })
+    } else {
+        landing
+    };
+    // An append needs no row, so it also lands while the queue loads or
+    // after its read failed.
+    if slot.is_none() && !matches!(landing, Landing::Refused(_) | Landing::Append) {
+        return;
+    }
+    let slot = slot.map_or(0, |slot| slot.index);
+    let Some(track) = egui::DragAndDrop::take_payload::<DragTrack>(ui.ctx()) else {
+        return;
+    };
+    match landing {
+        Landing::Move => {
+            // A row dropped back on its own edges moves nothing.
+            if let Some(from) = dragged_queued_row(app, &track)
+                && slot != from
+                && slot != from + 1
+            {
+                app.actions.push(Action::MoveInQueue { from, to: slot });
+            }
+        }
+        Landing::Edit => app.actions.push(Action::DropInPlaybackQueue {
+            track: Box::new((*track).clone()),
+            slot,
+            manual: !context,
+        }),
+        Landing::Insert => app.actions.push(Action::InsertInQueue {
+            items: track.items.clone(),
+            position: slot,
+        }),
+        Landing::Append => app.actions.push(Action::QueueMany {
             songs: track
                 .items
                 .iter()
                 .map(|item| (item.uri().to_string(), item.name().to_string()))
                 .collect(),
-        });
+        }),
+        Landing::Refused(refusal) => app.actions.push(Action::RefuseQueueDrop(refusal)),
     }
+}
+
+/// Space below the now-playing row and below Next in queue, before the next
+/// section's heading.
+const SECTION_GAP: f32 = 14.0;
+
+fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
+    let dragging =
+        egui::DragAndDrop::payload::<DragTrack>(ui.ctx()).map(|track| landing_of(app, &track));
+    let landing = dragging.filter(|_| ui.rect_contains_pointer(ui.clip_rect()));
+    let slot = rows(app, ui, compact, dragging, landing);
+    if let Some(landing) = landing
+        && ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary))
+    {
+        drop_on_queue(app, ui, landing, slot);
+    }
+}
+
+/// Draws the queue's sections. `dragging` is what the song being dragged
+/// would do on the queue, and `landing` the same while it is over the
+/// panel; the answer is the slot in Next in queue the drop line marks.
+fn rows(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    compact: bool,
+    dragging: Option<Landing>,
+    landing: Option<Landing>,
+) -> Option<QueueSlot> {
+    let palette = app.palette;
+    let mut slot = None;
     match &app.queue {
         Loadable::Loaded(_) => {}
         Loadable::Loading | Loadable::NotLoaded => {
             widgets::loading_row(ui, &palette, app.locale);
-            return;
+            return None;
         }
         Loadable::Failed(error) => {
             let error = error.clone();
             widgets::error_row(ui, app, &error, Some(crate::model::Page::Queue));
-            return;
+            return None;
         }
     };
     let now = app.now_playing();
@@ -380,72 +558,64 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             .get()
             .and_then(|queue| queue.currently_playing.clone()),
     };
-    // Where the songs come from, above the song itself. A radio has no
-    // page, so its name is plain text.
-    if let Some(from) = app.playing_from().filter(|_| current.is_some()) {
-        ui.horizontal(|ui| {
+    let row_height = if compact {
+        theme::COMPACT_ROW_HEIGHT
+    } else {
+        theme::ROW_HEIGHT
+    };
+    if let Some(current) = current.as_ref() {
+        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
             theme::text(
                 ui,
-                gettext(app.locale, "Playing from"),
-                theme::regular(13.0),
-                palette.secondary,
+                gettext(app.locale, "Now playing"),
+                theme::semibold(14.0),
+                palette.text,
             );
-            match from.page {
-                Some(page) => {
-                    if theme::link(ui, from.name, theme::semibold(13.0), palette.text).clicked() {
-                        app.actions.push(Action::Open(page));
-                    }
-                }
-                None => {
-                    theme::text(ui, from.name, theme::semibold(13.0), palette.text);
-                }
-            }
         });
-        ui.add_space(10.0);
-    }
-    if let Some(current) = current.as_ref() {
-        theme::text(
-            ui,
-            gettext(app.locale, "Now playing"),
-            theme::semibold(14.0),
-            palette.text,
-        );
         ui.add_space(4.0);
         let context = RowContext::Uris(Arc::from([current.uri().to_string()]));
-        widgets::track_row(
-            ui,
-            app,
-            TrackRow {
-                index: 0,
-                number: Some(1),
-                item: current,
-                context: &context,
-                show_cover: true,
-                show_album: !compact,
-                added_at: None,
-                added_by: None,
-                show_added_by: false,
-                show_plays: false,
-                compact,
-                thin: false,
-                shift: 0.0,
-                picked: false,
-                picked_songs: &[],
-                picked_positions: &[],
-                position: None,
-            },
-        );
+        let row = TrackRow {
+            index: 0,
+            number: Some(1),
+            item: current,
+            context: &context,
+            show_cover: true,
+            show_album: !compact,
+            added_at: None,
+            added_by: None,
+            show_added_by: false,
+            show_plays: false,
+            show_released: false,
+            show_duration: true,
+            compact,
+            thin: false,
+            shift: 0.0,
+            picked: false,
+            picked_songs: &[],
+            picked_positions: &[],
+            position: None,
+            show_saved_heart: false,
+        };
+        let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
+        widgets::edge_faded(ui, row_height, |ui| widgets::queue_track_row(ui, app, row));
+        // A drag that started on this row names it, so dropping the playing
+        // song back on the queue does not queue it again.
+        if !dragging && let Some(payload) = egui::DragAndDrop::payload::<DragTrack>(ui.ctx()) {
+            let mut payload = (*payload).clone();
+            payload.from = Some((NOW_PLAYING_ROW.to_string(), 0));
+            egui::DragAndDrop::set_payload(ui.ctx(), payload);
+        }
         ui.add_space(SECTION_GAP);
     }
-    if queue_is_empty(app) {
-        // Nothing queued at all yet: the only slot a drop could land on is
-        // the first one.
-        if reorderable && let Some(track) = queue_drop(ui, ui.clip_rect()) {
-            app.actions.push(Action::InsertInQueue {
-                items: track.items.clone(),
-                position: 0,
-            });
-        }
+    // Where Next in queue starts while it has no rows: halfway down the gap
+    // under Now playing, or at the top without one.
+    let start_line = ui.cursor().top()
+        - if current.is_some() {
+            SECTION_GAP / 2.0
+        } else {
+            0.0
+        };
+    if queue_is_empty(app) && dragging.is_none() {
         widgets::empty_state(
             ui,
             &palette,
@@ -453,73 +623,67 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             &gettext(app.locale, "Nothing queued"),
             &gettext(app.locale, "Queued songs appear here."),
         );
-        return;
+        return None;
     }
-    let row_height = if compact {
-        theme::COMPACT_ROW_HEIGHT
-    } else {
-        theme::ROW_HEIGHT
-    };
     let queue_len = app.queue.get().map(|queue| queue.queue.len()).unwrap_or(0);
     // The user's own songs get their own section on top; the playing
     // context's rows follow under the usual heading. One numbering runs
     // through both, because that is the order things play.
     let queued_len = app.queued_rows_len().min(queue_len);
+    if dragging.is_some() {
+        widgets::scroll_during_drag(ui);
+    }
     if queued_len > 0 {
-        // The trash sits with the songs it removes: only this section is
-        // the user's to clear, the context below plays itself.
-        ui.horizontal(|ui| {
-            theme::text(
-                ui,
-                gettext(
-                    app.locale,
-                    // Translators: Songs added manually, before the current playlist or album continues.
-                    "Playing next",
-                ),
-                theme::semibold(14.0),
-                palette.text,
-            );
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                clear_button(app, ui);
+        // Clear sits with the songs it removes: only this section is the
+        // user's to clear, the context below plays itself.
+        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| {
+            ui.horizontal(|ui| {
+                theme::text(
+                    ui,
+                    gettext(
+                        app.locale,
+                        // Translators: Songs added manually, before the current playlist or album continues.
+                        "Next in queue",
+                    ),
+                    theme::semibold(14.0),
+                    palette.text,
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    clear_button(app, ui);
+                });
             });
         });
         ui.add_space(4.0);
-        if reorderable && egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx()) {
-            widgets::scroll_during_drag(ui);
-        }
         let gap = ui.spacing().item_spacing.y;
         // Calculate the nearest drop slot from fixed row height because
         // virtualized rows are not all available during drawing.
         let list_top = ui.cursor().top();
-        // Bound the hit test to Playing next's own rows and the space below
-        // them, where the append-at-the-end slot sits. The scroll area's
-        // clip rect also covers Next up below, which is never a drop target.
+        // Include the manual heading and half the gap below the last manual row.
         let section_rect = egui::Rect::from_min_max(
-            egui::pos2(ui.clip_rect().left(), list_top),
+            egui::pos2(ui.clip_rect().left(), start_line),
             egui::pos2(
                 ui.clip_rect().right(),
-                list_top + queued_len as f32 * (row_height + gap) + SECTION_GAP,
+                list_top + queued_len as f32 * (row_height + gap) + SECTION_GAP * 0.5,
             ),
         );
-        let move_slot = reorderable
-            .then(|| {
-                egui::DragAndDrop::payload::<DragTrack>(ui.ctx())?;
-                if !ui.rect_contains_pointer(section_rect) {
-                    return None;
-                }
-                let pos = ui
-                    .ctx()
-                    .pointer_latest_pos()
-                    .filter(|pos| section_rect.contains(*pos))?;
-                let row = (pos.y - list_top) / (row_height + gap);
-                (row >= 0.0).then(|| (row.round() as usize).min(queued_len))
-            })
-            .flatten();
+        slot = match landing {
+            Some(Landing::Move | Landing::Insert | Landing::Edit) => ui
+                .ctx()
+                .pointer_latest_pos()
+                .filter(|pos| ui.rect_contains_pointer(section_rect) && section_rect.contains(*pos))
+                .map(|pos| {
+                    (((pos.y - list_top) / (row_height + gap)).round() as usize).min(queued_len)
+                }),
+            // A receiver with append-only support takes the end of the manual section.
+            Some(Landing::Append) if ui.rect_contains_pointer(section_rect) => Some(queued_len),
+            _ => None,
+        };
+        warm_queue_covers(ui, app, 0, queued_len, row_height + gap, compact);
         widgets::virtual_rows(ui, queued_len, row_height + gap, |ui, index| {
             let width = ui.available_width();
             let shift = ui.ctx().animate_value_with_time(
                 ui.id().with(("queue-move-shift", index)),
-                match move_slot {
+                match slot {
                     Some(slot) if index < slot => -4.0,
                     Some(_) => 4.0,
                     None => 0.0,
@@ -529,68 +693,101 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
             queue_row(app, ui, index, compact, shift);
             ui.allocate_space(egui::vec2(width, gap));
         });
-        if let Some(slot) = move_slot {
-            let y = list_top + slot as f32 * (row_height + gap);
-            ui.painter().hline(
-                ui.max_rect().x_range().shrink(8.0),
-                y,
-                egui::Stroke::new(2.0, palette.accent),
+        if let Some(slot) = slot {
+            // The line between the parted rows, where the song will land.
+            drop_line(
+                ui,
+                palette.accent,
+                list_top + slot as f32 * (row_height + gap),
             );
-            if ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary))
-                && let Some(track) = egui::DragAndDrop::take_payload::<DragTrack>(ui.ctx())
-            {
-                match track.from.as_ref() {
-                    Some((origin, from)) if origin == "queue" => {
-                        let from = *from as usize;
-                        let uri = track.items[0].uri();
-                        // Playback can advance mid-drag and shift queue
-                        // indices; trust the recorded one only if it still
-                        // names the dragged song, otherwise find where that
-                        // song actually sits now. Not there at all means it
-                        // left the queue, so there is nothing left to move.
-                        let from = if app.manual_queue.get(from).map(String::as_str) == Some(uri) {
-                            Some(from)
-                        } else {
-                            app.manual_queue.iter().position(|queued| queued == uri)
-                        };
-                        // A row dropped back on its own edges moves nothing.
-                        if let Some(from) = from
-                            && slot != from
-                            && slot != from + 1
-                        {
-                            app.actions.push(Action::MoveInQueue { from, to: slot });
-                        }
-                    }
-                    _ => {
-                        app.actions.push(Action::InsertInQueue {
-                            items: track.items.clone(),
-                            position: slot,
-                        });
-                    }
-                }
-            }
         }
         ui.add_space(SECTION_GAP);
     }
-    // With Playing next empty, the panel holds no drop target at all: every
-    // row on it belongs to Next up, which plays from the context and is never
-    // rewritten. The player bar's Queue button still takes the drop.
-    if queue_len > queued_len {
-        theme::text(
-            ui,
-            gettext(
-                app.locale,
-                // Translators: Upcoming songs from the current playlist or album, after manually queued songs.
-                "Next up",
-            ),
-            theme::semibold(14.0),
-            palette.text,
-        );
+    // The gap above Next up accepts the first manually queued song.
+    if queued_len == 0
+        && landing.is_some_and(|land| !matches!(land, Landing::Refused(_)))
+        && (queue_len == 0
+            || ui
+                .ctx()
+                .pointer_latest_pos()
+                .is_some_and(|pos| pos.y < ui.cursor().top()))
+    {
+        slot = Some(0);
+        drop_line(ui, palette.accent, start_line);
+    }
+    let mut target = slot.map(|index| QueueSlot {
+        index,
+        manual: true,
+    });
+    if queue_len > queued_len || (dragging.is_some() && queued_len > 0) {
+        let heading_top = ui.cursor().top();
+        // Named after where its songs come from, which opens on a click. A
+        // radio has no page, so its name is plain text.
+        let from = app.playing_from();
+        widgets::edge_faded(ui, HEADING_HEIGHT, |ui| match from {
+            Some(from) => {
+                ui.horizontal(|ui| {
+                    theme::text(
+                        ui,
+                        gettext(
+                            app.locale,
+                            // Translators: Followed by the name of the playlist, album or radio the next songs come from.
+                            "Next from:",
+                        ),
+                        theme::semibold(14.0),
+                        palette.text,
+                    );
+                    let name = from.name;
+                    match from.page {
+                        Some(page) => {
+                            if theme::link(ui, name, theme::semibold(14.0), palette.text).clicked()
+                            {
+                                app.actions.push(Action::Open(page));
+                            }
+                        }
+                        None => {
+                            theme::text(ui, name, theme::semibold(14.0), palette.text);
+                        }
+                    }
+                });
+            }
+            None => {
+                theme::text(
+                    ui,
+                    gettext(
+                        app.locale,
+                        // Translators: Upcoming songs after manually queued songs, when they come from no named playlist or album.
+                        "Next up",
+                    ),
+                    theme::semibold(14.0),
+                    palette.text,
+                );
+            }
+        });
         ui.add_space(4.0);
+        let unqueued = queue_len - queued_len;
+        let top = ui.cursor().top();
+        let next_slot = landing
+            .and_then(|_| ui.ctx().pointer_latest_pos())
+            .filter(|pos| pos.y >= heading_top && target.is_none())
+            .map(|pos| (((pos.y - top) / row_height).round() as usize).min(unqueued));
+        if let Some(index) = next_slot {
+            target = Some(QueueSlot {
+                index: queued_len + index,
+                manual: false,
+            });
+        }
+        warm_queue_covers(ui, app, queued_len, unqueued, row_height, compact);
         widgets::virtual_rows(ui, queue_len - queued_len, row_height, |ui, index| {
             queue_row(app, ui, queued_len + index, compact, 0.0);
         });
+        if let Some(index) = next_slot
+            && landing == Some(Landing::Edit)
+        {
+            drop_line(ui, palette.accent, top + index as f32 * row_height);
+        }
     }
+    target
 }
 
 fn queue_is_empty(app: &App) -> bool {
@@ -673,7 +870,7 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
         // Need owned PlayableItem for track_row; clone track.
         let item = PlayableItem::Track(entry.track.clone());
         let context = RowContext::Uris(Arc::from([entry.track.uri.clone()]));
-        widgets::track_row(
+        widgets::queue_track_row(
             ui,
             app,
             TrackRow {
@@ -687,6 +884,8 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
                 added_by: None,
                 show_added_by: false,
                 show_plays: false,
+                show_released: false,
+                show_duration: true,
                 compact: true,
                 thin: false,
                 shift: 0.0,
@@ -694,6 +893,7 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
                 picked_songs: &[],
                 picked_positions: &[],
                 position: None,
+                show_saved_heart: false,
             },
         );
     });
@@ -726,9 +926,25 @@ fn recents_contents(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
+/// Fetches the covers of the queue's songs a little past those on screen,
+/// for the `count` rows from `first` on that one `virtual_rows` call lays out.
+fn warm_queue_covers(
+    ui: &egui::Ui,
+    app: &App,
+    first: usize,
+    count: usize,
+    row_height: f32,
+    compact: bool,
+) {
+    let songs = app.queue.get().map(|queue| queue.queue.as_slice());
+    widgets::warm_row_covers(ui, app, count, row_height, compact, |index| {
+        songs?.get(first + index)
+    });
+}
+
 /// One row of the queue, numbered and indexed by its place in the whole
 /// queue, whichever section it sits in. `shift` parts rows around the slot
-/// a dragged row would land in, in the "Playing next" section only.
+/// a dragged row would land in, in the "Next in queue" section only.
 fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shift: f32) {
     let Some(item) = app
         .queue
@@ -738,7 +954,7 @@ fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shif
     else {
         return;
     };
-    widgets::track_row(
+    widgets::queue_track_row(
         ui,
         app,
         TrackRow {
@@ -752,6 +968,8 @@ fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shif
             added_by: None,
             show_added_by: false,
             show_plays: false,
+            show_released: false,
+            show_duration: true,
             compact,
             thin: false,
             shift,
@@ -759,6 +977,25 @@ fn queue_row(app: &mut App, ui: &mut egui::Ui, index: usize, compact: bool, shif
             picked_songs: &[],
             picked_positions: &[],
             position: None,
+            show_saved_heart: false,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::over_lyrics;
+    use crate::theme::Palette;
+
+    /// Beside full screen lyrics, which are dark in every theme, the queue
+    /// reads light on dark in the light theme too, in the app's accent.
+    #[test]
+    fn the_queue_over_lyrics_is_dark_in_the_light_theme() {
+        let light = Palette::light();
+        let over = over_lyrics(&light);
+        assert!(over.dark);
+        assert_eq!(over.text, Palette::dark().text);
+        assert_eq!(over.accent, light.accent);
+        assert!(over.surface.a() < 255, "the backdrop shows through");
+    }
 }

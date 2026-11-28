@@ -40,6 +40,9 @@ const SEARCH_MIN: f32 = 80.0;
 /// are measured on top of it because they come and go.
 const RIGHT_CONTROLS_WIDTH: f32 =
     super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 3.0 * ICON_BUTTON_SIZE + 3.0 * ITEM_SPACING;
+/// The Listening activity button beside Settings, and its gap. It is the
+/// first control to go in a narrow bar, so it is not part of the fixed width.
+const FRIENDS_BUTTON_WIDTH: f32 = ICON_BUTTON_SIZE + ITEM_SPACING;
 
 /// What precedes the field until the bar has drawn once: the page padding,
 /// the back and forward buttons and the gaps after them.
@@ -94,6 +97,12 @@ fn topbar_fit(room: f32, controls: f32, labelled: f32, icons: f32) -> TopbarFit 
         search: (room - controls - badges).clamp(SEARCH_MIN, ideal),
         labels,
     }
+}
+
+/// Whether the Listening activity button still leaves the field its reading
+/// size, with the badges collapsed to their icons if need be.
+fn friends_button_fits(room: f32, controls: f32, labelled: f32, icons: f32) -> bool {
+    topbar_fit(room, controls + FRIENDS_BUTTON_WIDTH, labelled, icons).search >= SEARCH_FLOOR
 }
 
 /// What a badge asks of the bar, including the spacing before it.
@@ -350,6 +359,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             // keep room for it (`least_width`).
             let lead = width - ui.available_width() + window_controls.topbar_width;
             ui.ctx().data_mut(|data| data.insert_temp(lead_id(), lead));
+            // Listening activity gives way before the field shrinks past
+            // reading size.
+            let friends = friends_button_fits(search_room, controls, badges(true), badges(false));
+            let controls = controls + if friends { FRIENDS_BUTTON_WIDTH } else { 0.0 };
             let fit = topbar_fit(search_room, controls, badges(true), badges(false));
             let search_width = fit.search;
             let id = egui::Id::new("global-search");
@@ -489,6 +502,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             });
                         });
                         super::widgets::menu_separator(ui, &palette);
+                        if let Some(id) = app.user_id().map(str::to_owned)
+                            && super::widgets::menu_item(
+                                ui,
+                                &palette,
+                                Some(Icon::User),
+                                &gettext(locale, "Profile"),
+                            )
+                        {
+                            app.actions.push(Action::Open(Page::User(id)));
+                        }
                         if super::widgets::menu_item(
                             ui,
                             &palette,
@@ -557,10 +580,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 )
                 .clicked()
                 {
-                    app.actions.push(Action::Open(Page::Settings));
+                    // A second click closes them again, back to where the
+                    // first one came from.
+                    app.actions.push(if app.page() != &Page::Settings {
+                        Action::Open(Page::Settings)
+                    } else if app.can_go_back() {
+                        Action::Back
+                    } else {
+                        Action::Open(Page::Home)
+                    });
                 }
-                if app.visualizers_available()
+                if friends
                     && theme::icon_button(
+                        ui,
+                        Icon::Users,
+                        ICON_BUTTON_ICON,
+                        if app.show_friends_panel {
+                            palette.accent
+                        } else {
+                            palette.secondary
+                        },
+                        palette.text,
+                        &gettext(locale, "Listening activity"),
+                    )
+                    .clicked()
+                {
+                    app.actions.push(Action::ToggleFriendsPanel);
+                }
+                if app.visualizers_available() {
+                    let milkdrop = theme::icon_button(
                         ui,
                         Icon::AudioLines,
                         ICON_BUTTON_ICON,
@@ -574,10 +622,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             &gettext(locale, "MilkDrop visualiser (Ctrl+Shift+K)"),
                             &gettext(locale, "MilkDrop visualiser (Cmd+Shift+K)"),
                         ),
-                    )
-                    .clicked()
-                {
-                    app.actions.push(Action::ToggleWinampMilkdrop);
+                    );
+                    if milkdrop.clicked() {
+                        app.actions.push(Action::ToggleWinampMilkdrop);
+                    }
+                    #[cfg(feature = "milkdrop")]
+                    egui::Popup::context_menu(&milkdrop)
+                        .frame(super::widgets::menu_frame(&palette))
+                        .show(|ui| {
+                            if super::widgets::menu_item(
+                                ui,
+                                &palette,
+                                None,
+                                &gettext(locale, "Show MilkDrop only"),
+                            ) {
+                                app.actions.push(Action::EnterImmersive);
+                            }
+                        });
                 }
                 if theme::icon_button(
                     ui,
@@ -626,6 +687,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     };
                     if response.clicked() {
                         app.actions.push(Action::ToggleDevicesPopup);
+                    } else if super::widgets::rested_on(ui, &response) {
+                        app.actions.push(Action::WarmDevices);
                     }
                 }
                 // A newer release. Most people never visit a releases page,
@@ -740,6 +803,29 @@ mod topbar_fit_tests {
         assert!(!fit.labels);
         assert_eq!(fit.search, SEARCH_MIN);
         assert!(controls + CHIP * 2.0 + fit.search <= room);
+    }
+
+    /// The Listening activity button only takes room the field can spare.
+    #[test]
+    fn the_listening_activity_button_never_squeezes_the_field() {
+        let mut room = NARROWEST_BAR;
+        let mut shown_at = None;
+        while room <= 2400.0 {
+            if friends_button_fits(room, RIGHT_CONTROLS_WIDTH, DEVICE + UPDATE, CHIP * 2.0) {
+                shown_at.get_or_insert(room);
+                let controls = RIGHT_CONTROLS_WIDTH + FRIENDS_BUTTON_WIDTH;
+                let fit = topbar_fit(room, controls, DEVICE + UPDATE, CHIP * 2.0);
+                assert!(
+                    fit.search >= SEARCH_FLOOR,
+                    "field is {} px at {room}",
+                    fit.search
+                );
+            } else {
+                assert!(shown_at.is_none(), "it stays once shown, gone at {room}");
+            }
+            room += 1.0;
+        }
+        assert!(shown_at.is_some_and(|room| room < 600.0));
     }
 
     #[test]

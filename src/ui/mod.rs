@@ -15,6 +15,7 @@ mod lyrics;
 pub mod new_releases;
 pub mod player_bar;
 mod prerelease;
+mod profile;
 pub mod queue;
 pub mod radio;
 pub mod search;
@@ -39,6 +40,9 @@ use crate::theme::{self, Icon};
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let ctx = &ctx;
+    // Read before the shortcuts below take their keys: a held seek key
+    // keeps full screen lyrics' controls up like any other key.
+    let typed = lyrics::typed(ctx);
     keys::handle(app, ctx);
     for path in winamp::dropped_skins(ctx) {
         app.actions.push(Action::InstallSkin(path));
@@ -91,10 +95,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         );
     }
-    player_bar::show(app, ui);
+    let mut hide_cursor = false;
     if app.lyrics_fullscreen.is_some() {
-        lyrics::fullscreen(app, ui);
+        // The player bar slides away while nothing happens and comes back
+        // with any input, over the lyrics rather than beside them.
+        let controls = lyrics::fullscreen_controls(app, ctx, typed);
+        hide_cursor = lyrics::fullscreen_controls_idle(ctx) && app.dialog.is_none();
+        lyrics::fullscreen(app, ui, controls);
+        player_bar::overlay(app, ui, 1.0 - controls);
     } else {
+        lyrics::forget_fullscreen_controls(ctx);
+        player_bar::show(app, ui);
         if app.settings.sidebar_visible {
             sidebar::show(app, ui);
         }
@@ -117,6 +128,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
     caption_buttons(ui, &app.palette, app.locale);
     fastframe_titlebar::resize(ui);
+    if hide_cursor {
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+    }
 }
 
 /// The main window's narrowest width with these panels open: their least
@@ -373,6 +387,9 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             }
                             Page::Playlist(id) => collection::playlist(app, ui, &id),
                             Page::Album(id) => collection::album(app, ui, &id),
+                            Page::User(ref id)
+                            | Page::Followers(ref id)
+                            | Page::Following(ref id) => profile::show(app, ui, id, &page),
                             Page::Artist(id) => artist::show(app, ui, &id),
                             Page::Show(id) => show::show(app, ui, &id),
                             Page::Radio(seed) => radio::radio(app, ui, &seed),

@@ -39,6 +39,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
         return;
     }
+    // Keep each shelf's scrollbar below its cards, including their hover backgrounds.
+    let scroll = &mut ui.spacing_mut().scroll;
+    scroll.floating_allocated_width =
+        scroll.bar_inner_margin + scroll.bar_width + scroll.bar_outer_margin;
     ui.add_space(6.0);
     let greeting = crate::util::greeting(app.locale);
     theme::text(ui, greeting.as_ref(), theme::bold(30.0), palette.text);
@@ -58,6 +62,89 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.settings.home.recommendations.visible {
         recommendations(app, ui);
     }
+}
+
+/// A Home shelf scrolls when its cards are dragged, and pages with the
+/// chevrons beside its title. True when a linked title was clicked.
+fn home_shelf(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    locale: crate::i18n::Locale,
+    linked: bool,
+    id: &str,
+    title: &str,
+    cards: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    ui.add_space(8.0);
+    let heading = ui.available_rect_before_wrap();
+    let title = if linked {
+        theme::link(ui, title, theme::bold(17.0), palette.text)
+    } else {
+        theme::section_title(ui, palette, title)
+    };
+    ui.add_space(4.0);
+    let page_key = egui::Id::new(("shelf-page", id));
+    let paged = ui.ctx().data_mut(|data| data.remove_temp::<f32>(page_key));
+    let shelf = crate::autoscroll::show(
+        ui,
+        egui::ScrollArea::horizontal()
+            .id_salt(id)
+            .scroll_source(egui::scroll_area::ScrollSource::ALL),
+        egui::Vec2b::new(true, false),
+        |ui| {
+            // A chevron's page glides like a wheel turn, within this shelf.
+            if let Some(delta) = paged {
+                ui.scroll_with_delta(egui::vec2(-delta, 0.0));
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = widgets::CARD_GAP / 2.0;
+                cards(ui);
+            });
+        },
+    );
+    let page = shelf.inner_rect.width();
+    let end = shelf.content_size.x - page;
+    if end > 1.0 {
+        let arrows = egui::Rect::from_min_max(
+            egui::pos2(title.rect.right(), heading.top()),
+            egui::pos2(heading.right(), title.rect.bottom()),
+        );
+        let mut bar = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt(("shelf-arrows", id))
+                .max_rect(arrows)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        let offset = shelf.state.offset.x;
+        let buttons = [
+            (
+                Icon::ChevronRight,
+                page,
+                offset < end - 1.0,
+                gettext(locale, "Scroll right"),
+            ),
+            (
+                Icon::ChevronLeft,
+                -page,
+                offset > 1.0,
+                gettext(locale, "Scroll left"),
+            ),
+        ];
+        for (icon, delta, enabled, label) in buttons {
+            let clicked = bar
+                .add_enabled_ui(enabled, |ui| {
+                    theme::icon_button(ui, icon, 16.0, palette.secondary, palette.text, &label)
+                        .clicked()
+                })
+                .inner;
+            if clicked {
+                ui.ctx().data_mut(|data| data.insert_temp(page_key, delta));
+                ui.ctx().request_repaint();
+            }
+        }
+    }
+    ui.add_space(12.0);
+    linked && title.clicked()
 }
 
 struct Tile {
@@ -335,9 +422,11 @@ fn made_for_you(app: &mut App, ui: &mut egui::Ui) {
     if playlists.is_empty() && !loading && failure.is_none() {
         return;
     }
-    widgets::shelf(
+    home_shelf(
         ui,
         &palette,
+        app.locale,
+        false,
         "made-for-you",
         &gettext(app.locale, "Made for you"),
         |ui| {
@@ -364,9 +453,11 @@ fn top_mixes(app: &mut App, ui: &mut egui::Ui) {
     else {
         return;
     };
-    widgets::shelf(
+    home_shelf(
         ui,
         &palette,
+        app.locale,
+        false,
         "top-mixes",
         &gettext(app.locale, "Your top mixes"),
         |ui| playlist_cards(app, ui, "home-top_mixes-menu", &playlists),
@@ -385,9 +476,11 @@ fn new_releases(app: &mut App, ui: &mut egui::Ui) {
     if albums.is_empty() && !loading && failure.is_none() {
         return;
     }
-    let open = widgets::linked_shelf(
+    let open = home_shelf(
         ui,
         &palette,
+        app.locale,
+        true,
         "new-releases",
         &gettext(app.locale, "New releases"),
         |ui| {
@@ -510,9 +603,11 @@ fn recently_played(app: &mut App, ui: &mut egui::Ui) {
     let history = match app.home.recently_played.clone() {
         Loadable::Loaded(history) => history,
         Loadable::Loading | Loadable::NotLoaded => {
-            widgets::shelf(
+            home_shelf(
                 ui,
                 &palette,
+                app.locale,
+                false,
                 "recent",
                 &gettext(app.locale, "Recently played"),
                 |ui| widgets::skeleton_cards(ui, &palette, app.locale, 7, false),
@@ -520,9 +615,11 @@ fn recently_played(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         Loadable::Failed(message) => {
-            widgets::shelf(
+            home_shelf(
                 ui,
                 &palette,
+                app.locale,
+                false,
                 "recent",
                 &gettext(app.locale, "Recently played"),
                 |ui| {
@@ -547,9 +644,11 @@ fn recently_played(app: &mut App, ui: &mut egui::Ui) {
     if tracks.is_empty() {
         return;
     }
-    widgets::shelf(
+    home_shelf(
         ui,
         &palette,
+        app.locale,
+        false,
         "recent",
         &gettext(app.locale, "Recently played"),
         |ui| {
@@ -684,9 +783,11 @@ fn podcasts(app: &mut App, ui: &mut egui::Ui) {
     if episodes.is_empty() {
         return;
     }
-    widgets::shelf(
+    home_shelf(
         ui,
         &palette,
+        app.locale,
+        false,
         "podcasts",
         &gettext(app.locale, "Your podcasts"),
         |ui| {
@@ -747,9 +848,11 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui) {
     let artists = match app.home.top_artists.clone() {
         Loadable::Loaded(artists) => artists,
         Loadable::Loading | Loadable::NotLoaded => {
-            widgets::shelf(
+            home_shelf(
                 ui,
                 &palette,
+                app.locale,
+                false,
                 "top-artists",
                 &gettext(app.locale, "Your top artists"),
                 |ui| widgets::skeleton_cards(ui, &palette, app.locale, 7, true),
@@ -757,9 +860,11 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui) {
             return;
         }
         Loadable::Failed(message) => {
-            widgets::shelf(
+            home_shelf(
                 ui,
                 &palette,
+                app.locale,
+                false,
                 "top-artists",
                 &gettext(app.locale, "Your top artists"),
                 |ui| {
@@ -772,9 +877,11 @@ fn top_artists(app: &mut App, ui: &mut egui::Ui) {
     if artists.is_empty() {
         return;
     }
-    widgets::shelf(
+    home_shelf(
         ui,
         &palette,
+        app.locale,
+        false,
         "top-artists",
         &gettext(app.locale, "Your top artists"),
         |ui| {
@@ -881,6 +988,8 @@ fn track_list(
                 added_by: None,
                 show_added_by: false,
                 show_plays: false,
+                show_released: false,
+                show_duration: true,
                 compact: false,
                 thin: app.settings.tracklist_compact,
                 shift: 0.0,
@@ -888,6 +997,7 @@ fn track_list(
                 picked_songs: &[],
                 picked_positions: &[],
                 position: None,
+                show_saved_heart: false,
             },
         );
     }
@@ -960,6 +1070,8 @@ fn top_tracks(app: &mut App, ui: &mut egui::Ui) {
                 added_by: None,
                 show_added_by: false,
                 show_plays: false,
+                show_released: false,
+                show_duration: true,
                 compact: false,
                 thin: app.settings.tracklist_compact,
                 shift: 0.0,
@@ -967,6 +1079,7 @@ fn top_tracks(app: &mut App, ui: &mut egui::Ui) {
                 picked_songs: &[],
                 picked_positions: &[],
                 position: None,
+                show_saved_heart: false,
             },
         );
     }

@@ -6,7 +6,7 @@
 //! the interface with `request_repaint`, so the app stays event-driven and
 //! idle when nothing is happening.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -154,6 +154,8 @@ pub enum RecentsFor {
 
 #[derive(Clone, Debug)]
 pub enum ApiRequest {
+    ProfileArtists(u64),
+    ProfileTracks(u64),
     Me,
     Devices,
     PlaybackState {
@@ -161,6 +163,9 @@ pub enum ApiRequest {
     },
     Queue {
         seq: u64,
+    },
+    QueueDetails {
+        uris: Vec<String>,
     },
     RecentlyPlayed {
         /// Request owner. Home and Recents use separate generation counters,
@@ -226,6 +231,11 @@ pub enum ApiRequest {
         id: String,
         offset: u32,
         generation: u64,
+    },
+    /// Every song in one of the account's own playlists, read over the
+    /// playback session for the hearts' playlist index.
+    PlaylistUris {
+        id: String,
     },
     CreatePlaylist {
         name: String,
@@ -331,6 +341,11 @@ pub enum ApiRequest {
     Album {
         id: String,
     },
+    /// The same read as `Album`, made ahead of the click while the pointer
+    /// rests on the album's card, so it yields to what the user asked for.
+    AlbumPreload {
+        id: String,
+    },
     AlbumTracks {
         id: String,
         offset: u32,
@@ -372,6 +387,15 @@ pub enum ApiRequest {
         flag: bool,
         repeat: String,
     },
+    /// Skips the device playing elsewhere to a row of its Next up: the
+    /// `occurrence`th copy of `uri`, `skips` rows down. Answered as
+    /// `Remote` with the `Next` action.
+    SkipTo {
+        device_id: Option<String>,
+        uri: String,
+        occurrence: usize,
+        skips: usize,
+    },
     Transfer {
         device_id: String,
         play: bool,
@@ -392,6 +416,13 @@ pub enum ApiRequest {
         uris: Vec<String>,
         device_id: Option<String>,
     },
+    EditQueue {
+        device: String,
+        request: u64,
+        edit: crate::player::QueueEdit,
+        expected: Vec<String>,
+        manual: usize,
+    },
 }
 
 impl ApiRequest {
@@ -410,13 +441,17 @@ impl ApiRequest {
                 | Self::HiddenSongs { .. }
                 | Self::MyPlaylists { .. }
                 | Self::PlaylistSample { .. }
+                | Self::PlaylistUris { .. }
                 | Self::Contains { .. }
+                | Self::AlbumPreload { .. }
         )
     }
 }
 
 #[derive(Debug)]
 pub enum ApiResponse {
+    ProfileArtists(u64, ApiResult<Vec<Artist>>),
+    ProfileTracks(u64, ApiResult<Vec<Track>>),
     Me(ApiResult<User>),
     Devices(ApiResult<Vec<Device>>),
     PlaybackState {
@@ -426,6 +461,9 @@ pub enum ApiResponse {
     Queue {
         seq: u64,
         result: ApiResult<Queue>,
+    },
+    QueueDetails {
+        items: Option<HashMap<String, PlayableItem>>,
     },
     RecentlyPlayed {
         who: RecentsFor,
@@ -511,6 +549,11 @@ pub enum ApiResponse {
         items: Vec<PlayableItem>,
         position: Option<u32>,
         result: ApiResult<Vec<String>>,
+    },
+    PlaylistUris {
+        id: String,
+        /// Every row's song, and when the newest row was added.
+        result: ApiResult<(Vec<String>, Option<i64>)>,
     },
     PlaylistItemsChanged {
         id: String,
@@ -648,6 +691,10 @@ pub enum ApiResponse {
         added: usize,
         result: ApiResult<()>,
     },
+    QueueEdited {
+        request: u64,
+        result: ApiResult<crate::player::RemoteQueueView>,
+    },
 }
 
 pub enum PlaylistCacheRows {
@@ -771,6 +818,8 @@ pub enum Command {
         config: ProxyConfig,
     },
     Player(PlayerCommand),
+    /// The play a transfer to this computer waited for was answered.
+    HeldTransferDue,
     Api(ApiRequest),
     ApiFinished {
         generation: u64,
@@ -891,6 +940,7 @@ pub enum Command {
     /// Read what friends are listening to through the streaming session,
     /// for the app's request generation.
     FriendActivity(u64),
+    Profile(String, u64),
     LoadLikedSongsCache {
         generation: u64,
     },
@@ -982,6 +1032,7 @@ pub struct LyricsRequest {
 }
 
 pub enum Event {
+    Profile(u64, Option<Box<session_reads::ProfileView>>),
     Soloist(crate::soloist::Update),
     AudioCacheCleared(Result<crate::storage::AudioCleared, crate::storage::ClearAudioError>),
     /// The folder picked in the local files dialog; `None` when cancelled.
@@ -1048,13 +1099,22 @@ pub enum Event {
     },
     Local(Box<LocalState>),
     /// Playback on another device changed; poll it now rather than later.
-    RemoteChanged,
+    /// It names the song playing there and the songs Previous steps back
+    /// through, oldest first.
+    RemoteChanged {
+        track: String,
+        previous: Vec<String>,
+    },
     /// The volume Spotify pushed for the device playing elsewhere, by its
     /// Connect id, on librespot's 0 to 65535 scale.
     RemoteVolume {
         device_id: String,
         volume: u16,
     },
+    /// What the device playing elsewhere has queued by hand, as Spotify
+    /// last pushed it.
+    RemoteQueue(crate::player::RemoteQueueView),
+    LocalQueue(crate::player::RemoteQueueView),
     Api(Box<ApiResponse>),
     Accent {
         url: String,
@@ -1207,7 +1267,11 @@ pub struct Backend {
     #[cfg(test)]
     remote_shuffle_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
+    remote_step_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
     transfer_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
+    queue_skip_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
     queue_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
@@ -1310,7 +1374,11 @@ impl Backend {
             #[cfg(test)]
             remote_shuffle_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
+            remote_step_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
             transfer_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            queue_skip_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
             queue_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
@@ -1451,6 +1519,26 @@ impl Backend {
         #[cfg(test)]
         if matches!(request, ApiRequest::Transfer { .. }) {
             self.transfer_requests.lock().unwrap().push(request.clone());
+        }
+        #[cfg(test)]
+        if matches!(
+            request,
+            ApiRequest::Remote {
+                action: RemoteAction::Previous | RemoteAction::Seek,
+                ..
+            }
+        ) {
+            self.remote_step_requests
+                .lock()
+                .unwrap()
+                .push(request.clone());
+        }
+        #[cfg(test)]
+        if matches!(request, ApiRequest::SkipTo { .. }) {
+            self.queue_skip_requests
+                .lock()
+                .unwrap()
+                .push(request.clone());
         }
         #[cfg(test)]
         if matches!(
@@ -1618,6 +1706,17 @@ impl Backend {
     #[cfg(test)]
     pub fn take_remote_shuffle_requests(&self) -> Vec<ApiRequest> {
         std::mem::take(&mut *self.remote_shuffle_requests.lock().unwrap())
+    }
+
+    /// Previous and seek commands sent to another device.
+    #[cfg(test)]
+    pub(crate) fn take_remote_step_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(&mut *self.remote_step_requests.lock().unwrap())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_queue_skip_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(&mut *self.queue_skip_requests.lock().unwrap())
     }
 
     #[cfg(test)]
@@ -1908,6 +2007,11 @@ struct Worker {
     /// Cached audio is being cleared on the disk worker.
     audio_cache_clearing: bool,
     search_tasks: Vec<tokio::task::AbortHandle>,
+    /// The last play sent to a device, until Spotify answers it.
+    play_unanswered: Option<watch::Receiver<()>>,
+    /// A transfer to this computer waits for that play. A transfer to
+    /// another device asked for meanwhile takes its place.
+    transfer_held: bool,
     /// A user changed engine-affecting settings while the current connection
     /// attempt was in flight. Its result is stale and must not be installed.
     engine_restart_pending: bool,
@@ -2021,6 +2125,8 @@ impl Worker {
             engine_busy: false,
             audio_cache_clearing: false,
             search_tasks: Vec::new(),
+            play_unanswered: None,
+            transfer_held: false,
             engine_restart_pending: false,
             signed_in: false,
             premium: None,
@@ -2448,43 +2554,15 @@ impl Worker {
                     self.resume_engine();
                 }
                 Command::ApplyProxy { request, config } => self.change_proxy(request, config, None),
-                Command::Player(command) => {
-                    if matches!(&command, PlayerCommand::Load(_)) {
-                        self.resume = None;
-                    }
-                    match &self.engine {
-                        // Until the new session picks the song up, it has
-                        // nothing to pause: the player does it (#268).
-                        Some(engine)
-                            if command == PlayerCommand::Toggle
-                                && engine.carrying()
-                                && engine.keep_player().toggle() => {}
-                        Some(engine) => {
-                            if let Err(error) = engine.command(command) {
-                                self.emit(Event::Error(format!("Playback error: {error}")));
-                            }
-                        }
-                        // While the session reconnects, the song it left
-                        // pauses and plays on its own player (#268).
-                        None if command == PlayerCommand::Toggle
-                            && self.kept_player.as_ref().is_some_and(KeptPlayer::toggle) => {}
-                        None => {
-                            if matches!(&command, PlayerCommand::Load(_)) {
-                                // Something else chosen: the old song stops.
-                                self.stop_kept_player();
-                            }
-                            self.emit(Event::Error(
-                                "Local playback isn't set up on this computer yet".into(),
-                            ))
-                        }
-                    }
-                }
+                Command::Player(command) => self.player_command(command),
+                Command::HeldTransferDue => self.held_transfer_due(),
                 Command::Api(ApiRequest::Search { query, serial }) => self.search(query, serial),
                 Command::Api(request) => {
                     if let ApiRequest::PlaybackState { seq } = &request {
                         self.connect.poll_sent(*seq, self.cluster_playing());
                     }
-                    self.dispatch(request);
+                    let (after, answered) = self.play_order(&request);
+                    self.dispatch_after(request, after, answered);
                 }
                 Command::ApiFinished {
                     generation,
@@ -2797,6 +2875,7 @@ impl Worker {
                 }
                 Command::UserNames(ids) => self.fetch_user_names(ids),
                 Command::PlayCounts { uri, generation } => self.fetch_play_counts(uri, generation),
+                Command::Profile(id, generation) => self.fetch_profile(id, generation),
                 Command::FriendActivity(generation) => self.fetch_friend_activity(generation),
                 Command::LoadLikedSongsCache { generation } => {
                     if let Some(account) = self.api.account() {
@@ -3524,6 +3603,8 @@ impl Worker {
         self.premium = None;
         self.resume = None;
         self.resume_verify = None;
+        // Its notice may be queued already, and has nothing to run.
+        self.transfer_held = false;
         self.waiting_for_network = false;
         self.cancel_engine_retry();
         self.authorize_if_rejected = false;
@@ -3587,12 +3668,20 @@ impl Worker {
                     let _ = events.send(Event::AudioDeviceFound { name, id });
                     waker.wake();
                 }
-                EngineEvent::RemoteChanged => {
-                    let _ = events.send(Event::RemoteChanged);
+                EngineEvent::RemoteChanged { track, previous } => {
+                    let _ = events.send(Event::RemoteChanged { track, previous });
                     waker.wake();
                 }
                 EngineEvent::RemoteVolume { device_id, volume } => {
                     let _ = events.send(Event::RemoteVolume { device_id, volume });
+                    waker.wake();
+                }
+                EngineEvent::RemoteQueue(view) => {
+                    let _ = events.send(Event::RemoteQueue(view));
+                    waker.wake();
+                }
+                EngineEvent::LocalQueue(view) => {
+                    let _ = events.send(Event::LocalQueue(view));
                     waker.wake();
                 }
             }
@@ -4919,6 +5008,29 @@ impl Worker {
         });
     }
 
+    fn fetch_profile(&self, id: String, generation: u64) {
+        let session = self
+            .engine
+            .as_ref()
+            .map(|engine| engine.session().clone())
+            .filter(|s| same_account(&s.username(), self.api.account().as_ref()));
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        let mut cancelled = self.session.subscribe();
+        tokio::spawn(async move {
+            let view = if let Some(session) = session {
+                tokio::select! {
+                    _ = cancelled.changed() => None,
+                    result = tokio::time::timeout(Duration::from_secs(20), session_reads::profile_view(&session, &id)) => result.ok().flatten()
+                }
+            } else {
+                None
+            };
+            let _ = events.send(Event::Profile(generation, view.map(Box::new)));
+            waker.wake();
+        });
+    }
+
     /// Ask the streaming session what friends are listening to. Without one
     /// there is nobody to ask, which the panel says.
     /// A read still running when the session ends is dropped, so nothing
@@ -4988,8 +5100,134 @@ impl Worker {
         self.search_tasks.push(self.dispatch(request));
     }
 
+    /// What a request waits for, and what it holds back until answered.
+    /// Each request runs as its own task, so a pause pressed as a song
+    /// starts could reach the device before the play, which a shuffled play
+    /// sends as two writes: a player command waits for the play before it.
+    /// A command held behind a play holds the next one back in turn, so a
+    /// pause pressed before a newer play cannot reach the device after it.
+    fn play_order(
+        &mut self,
+        request: &ApiRequest,
+    ) -> (Option<watch::Receiver<()>>, Option<watch::Sender<()>>) {
+        if command_device(request).is_none() {
+            return (None, None);
+        }
+        if matches!(request, ApiRequest::Transfer { .. }) {
+            self.transfer_held = false;
+        }
+        // A play already answered holds nothing back.
+        let after = self
+            .play_unanswered
+            .take()
+            .filter(|play| play.has_changed().is_ok());
+        let starts = matches!(
+            request,
+            ApiRequest::Remote {
+                action: RemoteAction::Play,
+                play: Some(_),
+                ..
+            } | ApiRequest::Remote {
+                action: RemoteAction::Repeat,
+                ..
+            } | ApiRequest::ShufflePlay { .. }
+        );
+        if !starts && after.is_none() {
+            return (None, None);
+        }
+        let (answered, unanswered) = watch::channel(());
+        self.play_unanswered = Some(unanswered);
+        (after, Some(answered))
+    }
+
+    /// Runs `command` on the player here, or holds a transfer to this
+    /// computer back behind a play still on its way to another device.
+    fn player_command(&mut self, command: PlayerCommand) {
+        if let Some(play) = self.transfer_after(&command) {
+            self.hold_transfer(play);
+            return;
+        }
+        if matches!(&command, PlayerCommand::Load(_)) {
+            self.resume = None;
+        }
+        match &self.engine {
+            // Until the new session picks the song up, it has
+            // nothing to pause: the player does it (#268).
+            Some(engine)
+                if command == PlayerCommand::Toggle
+                    && engine.carrying()
+                    && engine.keep_player().toggle() => {}
+            Some(engine) => {
+                if let Err(error) = engine.command(command) {
+                    self.emit(Event::Error(format!("Playback error: {error}")));
+                }
+            }
+            // While the session reconnects, the song it left
+            // pauses and plays on its own player (#268).
+            None if command == PlayerCommand::Toggle
+                && self.kept_player.as_ref().is_some_and(KeptPlayer::toggle) => {}
+            None => {
+                if matches!(&command, PlayerCommand::Load(_)) {
+                    // Something else chosen: the old song stops.
+                    self.stop_kept_player();
+                }
+                self.emit(Event::Error(
+                    "Local playback isn't set up on this computer yet".into(),
+                ))
+            }
+        }
+    }
+
+    /// Holds a transfer to this computer until `play` is answered.
+    fn hold_transfer(&mut self, mut play: watch::Receiver<()>) {
+        self.transfer_held = true;
+        let commands = self.commands.clone();
+        let mut session = self.session.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = session.changed() => {}
+                _ = play.changed() => {
+                    let _ = commands.send(Command::HeldTransferDue);
+                }
+            }
+        });
+    }
+
+    /// Sends the held transfer to this computer on, unless a transfer to
+    /// another device took its place: that one would otherwise end with
+    /// playback back here.
+    fn held_transfer_due(&mut self) {
+        if std::mem::take(&mut self.transfer_held) {
+            self.player_command(PlayerCommand::Transfer);
+        }
+    }
+
+    /// The play a transfer to this computer waits for. A transfer takes
+    /// over what the playing device plays, so a play still on its way there
+    /// would start that device again after it.
+    fn transfer_after(&self, command: &PlayerCommand) -> Option<watch::Receiver<()>> {
+        if *command != PlayerCommand::Transfer {
+            return None;
+        }
+        self.play_unanswered
+            .clone()
+            .filter(|play| play.has_changed().is_ok())
+    }
+
     /// Cancel requests on sign-out and report completion under their original generation.
     fn dispatch(&self, request: ApiRequest) -> tokio::task::AbortHandle {
+        self.dispatch_after(request, None, None)
+    }
+
+    /// Runs `request` once `after` is answered. Dropping `answered`, when
+    /// this request's task ends, lets the requests waiting for it go.
+    fn dispatch_after(
+        &self,
+        request: ApiRequest,
+        after: Option<watch::Receiver<()>>,
+        answered: Option<watch::Sender<()>>,
+    ) -> tokio::task::AbortHandle {
         let soloist = self
             .soloist
             .as_ref()
@@ -5017,9 +5255,13 @@ impl Worker {
         let mut session = self.session.subscribe();
         let generation = *session.borrow_and_update();
         tokio::spawn(async move {
+            let _answered = answered;
             let (response, expired) = tokio::select! {
                 _ = session.changed() => return,
                 result = async {
+                    if let Some(mut play) = after {
+                        let _ = play.changed().await;
+                    }
                     if let Some(soloist) = soloist && let Some(response) = soloist.dispatch(&request).await {
                         return (response, Vec::new());
                     }
@@ -5105,13 +5347,17 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         | ApiRequest::PlaybackState { .. }
         | ApiRequest::Queue { .. }
         | ApiRequest::Remote { .. }
+        | ApiRequest::SkipTo { .. }
         | ApiRequest::Transfer { .. }
         | ApiRequest::ShufflePlay { .. }
         | ApiRequest::AddToQueue { .. }
-        | ApiRequest::AddManyToQueue { .. } => Operation::Playback,
+        | ApiRequest::AddManyToQueue { .. }
+        | ApiRequest::EditQueue { .. } => Operation::Playback,
         ApiRequest::RecentlyPlayed { .. }
         | ApiRequest::TopTracks { .. }
         | ApiRequest::TopArtists { .. }
+        | ApiRequest::ProfileArtists(_)
+        | ApiRequest::ProfileTracks(_)
         | ApiRequest::SavedTracks { .. }
         | ApiRequest::SavedAlbums { .. }
         | ApiRequest::FollowedArtists { .. }
@@ -5143,6 +5389,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::Playlist { id, .. } => Operation::PlaylistMetadata(api.playlist_access(id)),
         ApiRequest::PlaylistItems { id, .. }
         | ApiRequest::PlaylistSample { id, .. }
+        | ApiRequest::PlaylistUris { id }
         | ApiRequest::CheckPlaylistDuplicates {
             playlist_id: id, ..
         } => Operation::PlaylistItems(api.playlist_access(id)),
@@ -5162,11 +5409,13 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::Artist { .. }
         | ApiRequest::ArtistAlbums { .. }
         | ApiRequest::Album { .. }
+        | ApiRequest::AlbumPreload { .. }
         | ApiRequest::AlbumTracks { .. }
         | ApiRequest::AlbumQueueTracks { .. }
         | ApiRequest::Show { .. }
         | ApiRequest::ShowEpisodes { .. }
         | ApiRequest::HomeEpisodes { .. }
+        | ApiRequest::QueueDetails { .. }
         | ApiRequest::Track { .. }
         | ApiRequest::Episode { .. } => Operation::Catalog,
     }
@@ -5521,6 +5770,23 @@ async fn handle(
     }
     let session_engine =
         engine.filter(|engine| same_account(&engine.session().username(), api.account().as_ref()));
+    if let ApiRequest::QueueDetails { uris } = &request {
+        let items = if let Some(engine) = session_engine {
+            let _permit = background_session.acquire().await.ok();
+            match tokio::time::timeout(
+                SESSION_READ_TIMEOUT,
+                session_reads::queue_details(engine.session(), uris),
+            )
+            .await
+            {
+                Ok(Ok(items)) => Some(items),
+                Ok(Err(_)) | Err(_) => None,
+            }
+        } else {
+            None
+        };
+        return (ApiResponse::QueueDetails { items }, Vec::new());
+    }
     if let ApiRequest::NewReleases { generation } = request {
         let mut expired = Vec::new();
         let result =
@@ -5559,6 +5825,28 @@ async fn handle(
             Err(error) => Err(error),
         };
         return (ApiResponse::HiddenSongs { generation, result }, Vec::new());
+    }
+    if let ApiRequest::PlaylistUris { id } = request {
+        // Only the session reads a whole playlist in one request; paging
+        // through the Web API for every playlist would spend its rate
+        // limit, so without a session the index waits for one.
+        let result = match playback_session(api, engine) {
+            Ok(session) => {
+                let _permit = background_session.acquire().await.ok();
+                match tokio::time::timeout(
+                    SESSION_READ_TIMEOUT,
+                    session_reads::playlist_uris(session, &id),
+                )
+                .await
+                {
+                    Ok(Ok((_, uris, last_added))) => Ok((uris, last_added)),
+                    Ok(Err(error)) => Err(ApiError::Network(format!("{error:#}"))),
+                    Err(_) => Err(ApiError::Network("The playlist read timed out.".into())),
+                }
+            }
+            Err(error) => Err(error),
+        };
+        return (ApiResponse::PlaylistUris { id, result }, Vec::new());
     }
     if let ApiRequest::SetHiddenInPlaylist {
         playlist_uri,
@@ -5645,6 +5933,14 @@ async fn handle(
     // another app is steering, say), and then refuses its player commands.
     let retry = command_device(&request).map(|_| request.clone());
     let response = match request {
+        ApiRequest::ProfileArtists(generation) => ApiResponse::ProfileArtists(
+            generation,
+            routed!(top_artists("short_term", 20)).map(|p| p.items),
+        ),
+        ApiRequest::ProfileTracks(generation) => ApiResponse::ProfileTracks(
+            generation,
+            routed!(top_tracks("short_term", 20, 0)).map(|p| p.items),
+        ),
         ApiRequest::Me => ApiResponse::Me(routed!(me())),
         ApiRequest::Devices => ApiResponse::Devices(routed!(devices())),
         ApiRequest::PlaybackState { seq } => ApiResponse::PlaybackState {
@@ -5697,7 +5993,9 @@ async fn handle(
         ApiRequest::MadeForYou { .. }
         | ApiRequest::NewReleases { .. }
         | ApiRequest::NewReleaseTracks { .. }
+        | ApiRequest::QueueDetails { .. }
         | ApiRequest::HiddenSongs { .. }
+        | ApiRequest::PlaylistUris { .. }
         | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,
@@ -5926,7 +6224,7 @@ async fn handle(
             result: routed!(related_artists(&id)),
             id,
         },
-        ApiRequest::Album { id } => ApiResponse::Album {
+        ApiRequest::Album { id } | ApiRequest::AlbumPreload { id } => ApiResponse::Album {
             result: routed!(album(&id)),
             id,
         },
@@ -6043,6 +6341,25 @@ async fn handle(
             };
             ApiResponse::Remote { action, result }
         }
+        ApiRequest::SkipTo {
+            device_id, skips, ..
+        } => {
+            // The Web API has no skip that names its song. One Next per
+            // row, each sent once the one before it is answered, so they
+            // reach the device in turn and the first refusal ends them.
+            let device = device_id.as_deref();
+            let mut result = Ok(());
+            for _ in 0..skips.max(1) {
+                result = routed!(next(device));
+                if result.is_err() {
+                    break;
+                }
+            }
+            ApiResponse::Remote {
+                action: RemoteAction::Next,
+                result,
+            }
+        }
         ApiRequest::ShufflePlay { device_id, play } => ApiResponse::Remote {
             action: RemoteAction::Play,
             result: routed!(shuffle_play(device_id.as_deref(), &play)),
@@ -6077,6 +6394,12 @@ async fn handle(
                 result,
             }
         }
+        ApiRequest::EditQueue { request, .. } => ApiResponse::QueueEdited {
+            request,
+            result: Err(ApiError::Network(
+                "No Connect session for editing the queue".into(),
+            )),
+        },
     };
     if let Some(request) = retry
         && refused_as_restricted(&response)
@@ -6106,6 +6429,7 @@ async fn handle(
 fn command_device(request: &ApiRequest) -> Option<Option<&str>> {
     match request {
         ApiRequest::Remote { device_id, .. }
+        | ApiRequest::SkipTo { device_id, .. }
         | ApiRequest::ShufflePlay { device_id, .. }
         | ApiRequest::AddToQueue { device_id, .. }
         | ApiRequest::AddManyToQueue { device_id, .. } => Some(device_id.as_deref()),
@@ -6157,6 +6481,16 @@ async fn over_connect(
             repeat,
         } => {
             let to = connect.command_target(device_id.as_deref(), playing.as_deref())?;
+            // A Next or Previous goes in turn with skips to a Next up row,
+            // so it cannot overtake one still waiting and be undone by it.
+            let _turn = connect.command_turn(*action).await;
+            // A skip right after it counts its rows from where it lands.
+            let step = matches!(action, RemoteAction::Next | RemoteAction::Previous);
+            match action {
+                RemoteAction::Next => engine.note_remote_next(&to),
+                RemoteAction::Previous => engine.note_remote_previous(),
+                _ => {}
+            }
             let result = match crate::sonos::command_body(
                 *action,
                 play.as_ref(),
@@ -6167,8 +6501,45 @@ async fn over_connect(
                 Some(body) => crate::sonos::command(session, &to, &body).await,
                 None => crate::sonos::set_volume(session, &to, *percent).await,
             };
+            if step && result.is_err() {
+                engine.remote_step_failed();
+            }
             ApiResponse::Remote {
                 action: *action,
+                result,
+            }
+        }
+        ApiRequest::SkipTo {
+            device_id,
+            uri,
+            occurrence,
+            skips,
+        } => {
+            let to = connect.command_target(device_id.as_deref(), playing.as_deref())?;
+            // One skip that names its row, as Spotify's own apps send it.
+            // In turn, so a second click's skip follows the first one's.
+            let _turn = connect.queue_skip_turn().await;
+            let uid = engine.remote_row(&to, uri, *occurrence);
+            let named_by = match &uid {
+                Some(_) => "naming its row",
+                None if *occurrence == 0 => "naming its song",
+                // Naming the song would take the device to its first copy.
+                None => "a Next per row",
+            };
+            log::info!("queue skip to {uri} on another device, {named_by}");
+            let bodies = crate::sonos::skip_to_commands(uri, uid.as_deref(), *occurrence, *skips);
+            let mut result = Ok(());
+            for (sent, body) in bodies.iter().enumerate() {
+                result = crate::sonos::command(session, &to, body).await;
+                if result.is_err() {
+                    // A later click counts from where the device got to,
+                    // past the rows the commands before this one passed.
+                    engine.remote_skip_stopped(&to, sent);
+                    break;
+                }
+            }
+            ApiResponse::Remote {
+                action: RemoteAction::Next,
                 result,
             }
         }
@@ -6188,8 +6559,25 @@ async fn over_connect(
         }
         ApiRequest::Transfer { device_id, .. } => {
             connect.restricted_target(Some(device_id))?;
+            // What plays on this computer goes along by name. Anything
+            // else, a song queued by hand playing or another device's
+            // playback, is left for Spotify to move.
+            let here = playing
+                .as_deref()
+                .is_none_or(|device| device == engine.device_id());
+            let carried = here.then(|| engine.carried()).flatten();
+            let result = match carried {
+                Some(carried) => match connect.carry(session, device_id, &carried).await {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        log::info!("the play that moves playback was refused: {error}");
+                        connect.transfer(session, device_id).await
+                    }
+                },
+                None => connect.transfer(session, device_id).await,
+            };
             ApiResponse::Transferred {
-                result: connect.transfer(session, device_id).await,
+                result,
                 device_id: device_id.clone(),
             }
         }
@@ -6220,8 +6608,207 @@ async fn over_connect(
                 result,
             }
         }
+        ApiRequest::EditQueue {
+            device,
+            request,
+            edit,
+            expected,
+            manual,
+        } => {
+            let _turn = connect.queue_skip_turn().await;
+            let result = edit_connect_queue(engine, device, edit, expected, *manual).await;
+            ApiResponse::QueueEdited {
+                request: *request,
+                result,
+            }
+        }
         _ => return None,
     })
+}
+
+async fn edit_connect_queue(
+    engine: &Engine,
+    device: &str,
+    edit: &crate::player::QueueEdit,
+    expected: &[String],
+    manual: usize,
+) -> ApiResult<crate::player::RemoteQueueView> {
+    edit_published_queue(
+        device,
+        edit,
+        expected,
+        manual,
+        || engine.queue_state(device),
+        |body| async move { crate::sonos::command(engine.session(), device, &body).await },
+    )
+    .await
+}
+
+/// How long a device has to publish a queue rewrite before the app looks
+/// again, and sends it once more.
+const QUEUE_EDIT_WAIT: Duration = Duration::from_secs(6);
+
+async fn edit_published_queue<R, S, F>(
+    device: &str,
+    edit: &crate::player::QueueEdit,
+    expected: &[String],
+    manual: usize,
+    mut read: R,
+    mut send: S,
+) -> ApiResult<crate::player::RemoteQueueView>
+where
+    R: FnMut() -> Option<crate::player::QueueSnapshot>,
+    S: FnMut(serde_json::Value) -> F,
+    F: std::future::Future<Output = ApiResult<()>>,
+{
+    let Some((state, _)) = read() else {
+        return Err(ApiError::Status {
+            status: 409,
+            message: "The device's queue is unavailable".into(),
+        });
+    };
+    let Some(body) = edit.command(&state) else {
+        return Err(ApiError::Status {
+            status: 409,
+            message: "The device's queue changed or does not allow this edit".into(),
+        });
+    };
+    let timeout = || ApiError::Status {
+        status: 504,
+        message: "The device did not confirm the queue edit".into(),
+    };
+    let confirm = |before: &librespot_protocol::player::PlayerState,
+                   current: &librespot_protocol::player::PlayerState,
+                   view: &crate::player::RemoteQueueView| {
+        let confirmation = edit.confirmation(before, current);
+        (confirmation != crate::player::QueueConfirmation::No
+            && edit.confirmed(view, expected, manual))
+        .then_some(confirmation)
+    };
+    let describe = |before: &librespot_protocol::player::PlayerState,
+                    last: &Option<crate::player::QueueSnapshot>| {
+        last.as_ref().map_or_else(
+            || "nothing published".to_string(),
+            |(current, _)| edit.mismatch(before, current),
+        )
+    };
+    let mut last = None;
+    if let Some(result) = wait_for_queue_edit(
+        device, &state, body, &confirm, &mut read, &mut send, &mut last,
+    )
+    .await
+    {
+        return result;
+    }
+    log::warn!(
+        "Queue edit on {device} not confirmed within {} s: {}",
+        QUEUE_EDIT_WAIT.as_secs(),
+        describe(&state, &last)
+    );
+    // The app holds the order on show meanwhile. A device that took the
+    // edit while it rewrote its later rows shows it by now, and one that
+    // dropped it, such as a rewrite naming a revision it had just
+    // replaced, takes it once more from a fresh snapshot.
+    let Some((fresh, published_at)) = read() else {
+        return Err(timeout());
+    };
+    if fresh.track.uri != state.track.uri || fresh.track.uid != state.track.uid {
+        return Err(queue_changed());
+    }
+    let mut view = crate::player::RemoteQueueView::from_state(device.to_owned(), &fresh);
+    if edit.confirmed(&view, expected, manual) {
+        log::info!("Queue edit on {device} confirmed by the rows on show after the wait");
+        view.published_at = Some(published_at);
+        return Ok(view);
+    }
+    let Some(body) = edit.command(&fresh) else {
+        log::warn!(
+            "Queue edit on {device} not sent again: its queue no longer holds the order the edit was made on"
+        );
+        return Err(timeout());
+    };
+    log::warn!(
+        "Queue edit on {device} sent again from revision {:?}",
+        fresh.queue_revision
+    );
+    let mut last = None;
+    match wait_for_queue_edit(
+        device, &fresh, body, &confirm, &mut read, &mut send, &mut last,
+    )
+    .await
+    {
+        Some(result) => {
+            if result.is_ok() {
+                log::info!("Queue edit on {device} confirmed after sending it again");
+            }
+            result
+        }
+        None => {
+            log::warn!(
+                "Queue edit on {device} still not confirmed: {}",
+                describe(&fresh, &last)
+            );
+            Err(timeout())
+        }
+    }
+}
+
+fn queue_changed() -> ApiError {
+    ApiError::Status {
+        status: 409,
+        message: "The device's queue changed".into(),
+    }
+}
+
+/// Sends a queue rewrite made on `state` and waits for the device to
+/// publish it. `None` once the wait runs out, with the last queue read in
+/// `last`.
+async fn wait_for_queue_edit<R, S, F, C>(
+    device: &str,
+    state: &librespot_protocol::player::PlayerState,
+    body: serde_json::Value,
+    confirm: &C,
+    read: &mut R,
+    send: &mut S,
+    last: &mut Option<crate::player::QueueSnapshot>,
+) -> Option<ApiResult<crate::player::RemoteQueueView>>
+where
+    R: FnMut() -> Option<crate::player::QueueSnapshot>,
+    S: FnMut(serde_json::Value) -> F,
+    F: std::future::Future<Output = ApiResult<()>>,
+    C: Fn(
+        &librespot_protocol::player::PlayerState,
+        &librespot_protocol::player::PlayerState,
+        &crate::player::RemoteQueueView,
+    ) -> Option<crate::player::QueueConfirmation>,
+{
+    // A successful command response does not yet supply the receiver's next
+    // revision. Read its published queue before sending another rewrite.
+    tokio::time::timeout(QUEUE_EDIT_WAIT, async {
+        send(body).await?;
+        loop {
+            if let Some((current, published_at)) = read() {
+                if current.track.uri != state.track.uri || current.track.uid != state.track.uid {
+                    return Err(queue_changed());
+                }
+                let mut view =
+                    crate::player::RemoteQueueView::from_state(device.to_owned(), &current);
+                if let Some(confirmation) = confirm(state, &current, &view) {
+                    if confirmation == crate::player::QueueConfirmation::ShownRows {
+                        log::info!(
+                            "Queue edit on {device} confirmed by the rows on show; the device changed the rows after them"
+                        );
+                    }
+                    view.published_at = Some(published_at);
+                    return Ok(view);
+                }
+                *last = Some((current, published_at));
+            }
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+    })
+    .await
+    .ok()
 }
 
 /// Waits for shuffle to succeed before starting playback, preserving either error.
@@ -6431,18 +7018,24 @@ async fn spotify_lyrics(
     cache_dir: &std::path::Path,
 ) -> Option<crate::lyrics::Lyrics> {
     let id = uri.strip_prefix("spotify:track:")?;
-    // Answers from before the request named the cover are kept only for what
-    // they found: nearly all their "none"s were the request's doing.
-    let path = cache_dir.join(format!("spotify-v2-{id}.json"));
-    let before = cache_dir.join(format!("spotify-{id}.json"));
+    // Older answers left out the instrumental breaks, so they are asked
+    // again, and only what they found stands in while Spotify cannot be
+    // reached. Nearly all the first version's "none"s were the request's
+    // doing, as it did not name the cover.
+    let path = cache_dir.join(format!("spotify-v3-{id}.json"));
+    let older = [
+        cache_dir.join(format!("spotify-v2-{id}.json")),
+        cache_dir.join(format!("spotify-{id}.json")),
+    ];
     if let Some(cached) = crate::lyrics::cached(&path) {
         return cached;
     }
-    if let Some(Some(found)) = crate::lyrics::cached(&before) {
-        return Some(found);
-    }
     let found_before = || {
-        crate::lyrics::previously_found(&path).or_else(|| crate::lyrics::previously_found(&before))
+        crate::lyrics::previously_found(&path).or_else(|| {
+            older
+                .iter()
+                .find_map(|before| crate::lyrics::previously_found(before))
+        })
     };
     let Some(engine) = engine else {
         return found_before();
@@ -8064,6 +8657,13 @@ mod authorization_tests {
         };
         assert_eq!(command_device(&pause(Some("move"))), Some(Some("move")));
         assert_eq!(command_device(&pause(None)), Some(None));
+        let skip = ApiRequest::SkipTo {
+            device_id: Some("move".into()),
+            uri: "spotify:track:c".into(),
+            occurrence: 0,
+            skips: 3,
+        };
+        assert_eq!(command_device(&skip), Some(Some("move")));
         assert_eq!(command_device(&ApiRequest::Devices), None);
     }
 
@@ -9966,6 +10566,13 @@ mod cover_routing_tests {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_album_fetched_ahead_of_the_click_yields_to_requests_the_user_made() {
+        let id = "album".to_string();
+        assert!(ApiRequest::AlbumPreload { id: id.clone() }.background());
+        assert!(!ApiRequest::Album { id }.background());
+    }
+
     #[tokio::test]
     async fn soloist_without_a_playback_login_can_still_use_old_spotify_lyrics() {
         let root =
@@ -10002,12 +10609,13 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    /// Old "none"s stop counting, old finds keep working, and a new "none"
-    /// asks again after a week.
+    /// Old "none"s stop counting, old finds stand in while Spotify cannot be
+    /// reached, the current version's answer wins, and a new "none" asks
+    /// again after a week.
     #[tokio::test]
     async fn spotify_lyrics_answers_are_versioned_and_a_none_is_short_lived() {
         let root = std::env::temp_dir().join(format!(
-            "spotifast-spotify-lyrics-v2-{}",
+            "spotifast-spotify-lyrics-v3-{}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
@@ -10019,6 +10627,19 @@ mod tests {
             found
         );
 
+        let older = crate::lyrics::from_text("[00:02.00] An older line");
+        crate::lyrics::store(&root.join("spotify-v2-older.json"), &older);
+        assert_eq!(
+            spotify_lyrics(None, "spotify:track:older", &root).await,
+            older
+        );
+        let current = crate::lyrics::from_text("[00:03.00] A current line");
+        crate::lyrics::store(&root.join("spotify-v3-older.json"), &current);
+        assert_eq!(
+            spotify_lyrics(None, "spotify:track:older", &root).await,
+            current
+        );
+
         let old_none = root.join("spotify-gone.json");
         crate::lyrics::store(&old_none, &None);
         assert_eq!(crate::lyrics::cached(&old_none), Some(None), "as it was");
@@ -10028,7 +10649,7 @@ mod tests {
                 .is_none()
         );
 
-        let none = root.join("spotify-v2-none.json");
+        let none = root.join("spotify-v3-none.json");
         crate::lyrics::store(&none, &None);
         assert_eq!(crate::lyrics::cached(&none), Some(None), "fresh");
         let eight_days = std::time::SystemTime::now() - Duration::from_secs(60 * 60 * 24 * 8);
@@ -10040,6 +10661,205 @@ mod tests {
             .unwrap();
         assert_eq!(crate::lyrics::cached(&none), None, "and gone in a week");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_rewrites_wait_for_revisions_and_allow_an_append_but_time_out_on_old_pushes() {
+        use crate::player::{QueueEdit, QueueEditOperation};
+        use librespot_protocol::player::{PlayerState, ProvidedTrack};
+        use std::cell::RefCell;
+        let row = |uri: &str, provider: &str| ProvidedTrack {
+            uri: uri.into(),
+            uid: uri.into(),
+            provider: provider.into(),
+            ..Default::default()
+        };
+        let state = |revision: &str, rows| PlayerState {
+            track: protobuf::MessageField::some(row("now", "context")),
+            queue_revision: revision.into(),
+            next_tracks: rows,
+            ..Default::default()
+        };
+        let r0 = state(
+            "r0",
+            vec![row("a", "queue"), row("b", "context"), row("c", "context")],
+        );
+        let r1 = state(
+            "r1",
+            vec![
+                row("a", "queue"),
+                row("b", "queue"),
+                row("d", "queue"),
+                row("c", "context"),
+            ],
+        );
+        let r2 = state(
+            "r2",
+            vec![row("a", "queue"), row("d", "queue"), row("c", "context")],
+        );
+        let pending = RefCell::new(VecDeque::from([r0.clone(), r0, r1.clone()]));
+        let bodies = RefCell::new(Vec::new());
+        let mut read = || {
+            let mut pending = pending.borrow_mut();
+            let state = if pending.len() > 1 {
+                pending.pop_front()
+            } else {
+                pending.front().cloned()
+            };
+            state.map(|state| (state, Instant::now()))
+        };
+        let mut send = |body| {
+            bodies.borrow_mut().push(body);
+            std::future::ready(Ok(()))
+        };
+        let first = QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into(), "c".into()],
+            manual: 1,
+            operation: QueueEditOperation::Move {
+                from: 1,
+                to: 1,
+                into_manual: true,
+            },
+        };
+        edit_published_queue(
+            "device",
+            &first,
+            &["a".into(), "b".into(), "c".into()],
+            2,
+            &mut read,
+            &mut send,
+        )
+        .await
+        .unwrap();
+        *pending.borrow_mut() = VecDeque::from([r1, r2.clone()]);
+        let second = QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into(), "d".into(), "c".into()],
+            manual: 3,
+            operation: QueueEditOperation::Remove { indexes: vec![1] },
+        };
+        edit_published_queue(
+            "device",
+            &second,
+            &["a".into(), "d".into(), "c".into()],
+            2,
+            &mut read,
+            &mut send,
+        )
+        .await
+        .unwrap();
+        assert_eq!(bodies.borrow()[0]["command"]["queue_revision"], "r0");
+        assert_eq!(bodies.borrow()[1]["command"]["queue_revision"], "r1");
+        *pending.borrow_mut() = VecDeque::from([r2.clone()]);
+        let third = QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "d".into(), "c".into()],
+            manual: 2,
+            operation: QueueEditOperation::Move {
+                from: 2,
+                to: 0,
+                into_manual: true,
+            },
+        };
+        let result = edit_published_queue(
+            "device",
+            &third,
+            &["c".into(), "a".into(), "d".into()],
+            3,
+            &mut read,
+            &mut send,
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::Status { status: 504, .. })));
+        assert_eq!(
+            bodies.borrow().len(),
+            4,
+            "an unconfirmed rewrite is sent once more from a fresh snapshot"
+        );
+        assert_eq!(bodies.borrow()[3]["command"]["queue_revision"], "r2");
+        let mut late = r2;
+        late.queue_revision = "r3".into();
+        let mut c = late.next_tracks.remove(2);
+        c.provider = "queue".into();
+        late.next_tracks.insert(0, c);
+        *pending.borrow_mut() = VecDeque::from([late]);
+        let result = edit_published_queue("device", &third, &[], 0, &mut read, &mut send).await;
+        assert!(matches!(result, Err(ApiError::Status { status: 409, .. })));
+        assert_eq!(
+            bodies.borrow().len(),
+            4,
+            "a late push cannot validate old positions"
+        );
+    }
+
+    /// A rewrite the device drops, here one naming a revision it replaced
+    /// as its listening session started, goes again from a fresh snapshot
+    /// once the wait runs out, and its confirmation ends the edit well.
+    #[tokio::test(start_paused = true)]
+    async fn an_unconfirmed_queue_rewrite_is_sent_once_more_from_a_fresh_snapshot() {
+        use crate::player::{QueueEdit, QueueEditOperation};
+        use librespot_protocol::player::{PlayerState, ProvidedTrack};
+        use std::cell::RefCell;
+
+        let row = |uri: &str, provider: &str| ProvidedTrack {
+            uri: uri.into(),
+            uid: format!("uid-{uri}"),
+            provider: provider.into(),
+            ..Default::default()
+        };
+        let state = |revision: &str, rows| PlayerState {
+            track: protobuf::MessageField::some(ProvidedTrack {
+                uri: "now".into(),
+                uid: "now-uid".into(),
+                ..Default::default()
+            }),
+            next_tracks: rows,
+            queue_revision: revision.into(),
+            ..Default::default()
+        };
+        let r0 = state("r0", vec![row("a", "queue"), row("b", "queue")]);
+        let r1 = state("r1", vec![row("a", "queue"), row("b", "queue")]);
+        let r2 = state("r2", vec![row("b", "queue"), row("a", "queue")]);
+        // The device moves to r1 before it reads the rewrite naming r0,
+        // and drops it; the rewrite naming r1 lands.
+        let shown = RefCell::new(r0);
+        let bodies = RefCell::new(Vec::new());
+        let mut read = || Some((shown.borrow().clone(), Instant::now()));
+        let mut send = |body: serde_json::Value| {
+            let revision = body["command"]["queue_revision"].clone();
+            bodies.borrow_mut().push(body);
+            if revision == "r0" {
+                *shown.borrow_mut() = r1.clone();
+            } else {
+                *shown.borrow_mut() = r2.clone();
+            }
+            std::future::ready(Ok(()))
+        };
+        let edit = QueueEdit {
+            playing: "now".into(),
+            before: vec!["a".into(), "b".into()],
+            manual: 2,
+            operation: QueueEditOperation::Move {
+                from: 1,
+                to: 0,
+                into_manual: true,
+            },
+        };
+        let view = edit_published_queue(
+            "device",
+            &edit,
+            &["b".into(), "a".into()],
+            2,
+            &mut read,
+            &mut send,
+        )
+        .await
+        .expect("confirmed after sending it again");
+        assert_eq!(view.queued, ["b", "a"]);
+        let bodies = bodies.borrow();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[1]["command"]["queue_revision"], "r1");
     }
 
     /// Avoids shared playlist search after a successful session read.
@@ -10183,6 +11003,186 @@ mod tests {
                 assert_eq!(sent, [shuffle.clone(), play.clone()]);
             }
         }
+    }
+
+    /// A pause pressed as a song starts reaches the device after the play,
+    /// though each request runs as its own task.
+    #[test]
+    fn a_player_command_waits_for_the_play_sent_before_it() {
+        let (runtime, mut worker, _events) = super::authorization_tests::worker("play-order");
+        let play = ApiRequest::ShufflePlay {
+            device_id: Some("speaker".into()),
+            play: PlayRequest::tracks(vec!["spotify:track:a".into()]),
+        };
+        let pause = ApiRequest::Remote {
+            action: RemoteAction::Pause,
+            device_id: Some("speaker".into()),
+            play: None,
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        };
+        // #given a play Spotify has not answered yet
+        let (first, answered) = worker.play_order(&play);
+        assert!(first.is_none(), "nothing came before the play");
+        let answered = answered.expect("the play holds later commands back");
+        // #when a pause follows it
+        let (after, held) = worker.play_order(&pause);
+        let held = held.expect("a held pause holds the next command back");
+        let mut after = after.expect("the pause waits for the play");
+        // #then the pause goes once the play is answered, and not before
+        runtime.block_on(async {
+            let waiting = tokio::time::timeout(Duration::from_millis(20), after.changed());
+            assert!(waiting.await.is_err(), "the play is still unanswered");
+            drop(answered);
+            assert!(after.changed().await.is_err(), "the play was answered");
+        });
+        drop(held);
+        assert!(
+            worker.play_order(&pause).0.is_none(),
+            "an answered play holds nothing"
+        );
+        assert!(
+            matches!(worker.play_order(&ApiRequest::Devices), (None, None)),
+            "a read never waits"
+        );
+    }
+
+    /// A pause pressed before a newer play, while an older play is still
+    /// unanswered, reaches the device before the newer play.
+    #[test]
+    fn a_newer_play_waits_for_the_control_held_before_it() {
+        let (runtime, mut worker, _events) = super::authorization_tests::worker("play-chain");
+        let older = ApiRequest::ShufflePlay {
+            device_id: Some("speaker".into()),
+            play: PlayRequest::tracks(vec!["spotify:track:a".into()]),
+        };
+        let pause = ApiRequest::Remote {
+            action: RemoteAction::Pause,
+            device_id: Some("speaker".into()),
+            play: None,
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        };
+        let newer = ApiRequest::Remote {
+            action: RemoteAction::Play,
+            device_id: Some("speaker".into()),
+            play: Some(PlayRequest::tracks(vec!["spotify:track:b".into()])),
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        };
+        // #given an unanswered play and a pause held behind it
+        let older_answered = worker.play_order(&older).1.expect("the play holds back");
+        let pause_sent = worker.play_order(&pause).1.expect("the pause holds back");
+        // #when a newer play follows
+        let mut after = worker.play_order(&newer).0.expect("the newer play waits");
+        // #then it goes after the pause, not as soon as the older play is answered
+        runtime.block_on(async {
+            drop(older_answered);
+            let waiting = tokio::time::timeout(Duration::from_millis(20), after.changed());
+            assert!(waiting.await.is_err(), "the pause has not gone yet");
+            drop(pause_sent);
+            assert!(after.changed().await.is_err(), "the pause has gone");
+        });
+    }
+
+    fn speaker_play() -> ApiRequest {
+        ApiRequest::Remote {
+            action: RemoteAction::Play,
+            device_id: Some("speaker".into()),
+            play: Some(PlayRequest::tracks(vec!["spotify:track:a".into()])),
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        }
+    }
+
+    /// Choosing this computer while a play is on its way to a speaker takes
+    /// the speaker over after the play, which would otherwise start it again.
+    #[test]
+    fn a_transfer_here_waits_for_the_play_sent_before_it() {
+        let (_runtime, mut worker, _events) = super::authorization_tests::worker("play-transfer");
+        let play = speaker_play();
+        assert!(
+            worker.transfer_after(&PlayerCommand::Transfer).is_none(),
+            "nothing to wait for"
+        );
+        // #given a play Spotify has not answered yet
+        let answered = worker.play_order(&play).1.expect("the play holds back");
+        // #then a transfer here waits for it, and the local player's own
+        // controls do not
+        assert!(worker.transfer_after(&PlayerCommand::Transfer).is_some());
+        assert!(worker.transfer_after(&PlayerCommand::Toggle).is_none());
+        // #when the play is answered, the transfer goes
+        drop(answered);
+        assert!(worker.transfer_after(&PlayerCommand::Transfer).is_none());
+    }
+
+    #[test]
+    fn a_speaker_chosen_after_this_computer_takes_the_held_transfer_s_place() {
+        let (runtime, mut worker, events) = super::authorization_tests::worker("held-transfer");
+        let (send, mut commands) = mpsc::unbounded_channel();
+        worker.commands = send;
+        let play = speaker_play();
+        let kitchen = ApiRequest::Transfer {
+            device_id: "kitchen".into(),
+            play: true,
+        };
+        let mut transfer_here_runs = |speaker_after: bool| {
+            // #given a play Spotify has not answered yet, and this computer
+            // chosen meanwhile
+            let answered = worker.play_order(&play).1.expect("the play holds back");
+            {
+                let _entered = runtime.enter();
+                worker.player_command(PlayerCommand::Transfer);
+            }
+            // #when another speaker is chosen too, and answered with the play
+            if speaker_after {
+                drop(worker.play_order(&kitchen));
+            }
+            drop(answered);
+            let due = runtime.block_on(commands.recv());
+            assert!(matches!(due, Some(Command::HeldTransferDue)));
+            worker.held_transfer_due();
+            // With no engine here, a transfer that runs says so.
+            events.try_recv().is_ok()
+        };
+        // #then the transfer here runs only when nothing took its place
+        assert!(transfer_here_runs(false), "nothing else was chosen");
+        assert!(!transfer_here_runs(true), "the speaker took its place");
+    }
+
+    #[test]
+    fn signing_out_drops_the_held_transfer() {
+        let (runtime, mut worker, events) = super::authorization_tests::worker("held-sign-out");
+        let (send, mut commands) = mpsc::unbounded_channel();
+        worker.commands = send;
+        // #given a transfer here held behind a play, whose answer has
+        // queued its notice
+        let play = speaker_play();
+        let answered = worker.play_order(&play).1.expect("the play holds back");
+        {
+            let _entered = runtime.enter();
+            worker.player_command(PlayerCommand::Transfer);
+        }
+        drop(answered);
+        let due = runtime.block_on(commands.recv());
+        assert!(matches!(due, Some(Command::HeldTransferDue)));
+        // #when the account signs out before the notice is taken
+        {
+            let _entered = runtime.enter();
+            worker.sign_out();
+        }
+        while events.try_recv().is_ok() {}
+        worker.held_transfer_due();
+        // #then the transfer does not run
+        assert!(events.try_recv().is_err());
     }
 
     #[test]

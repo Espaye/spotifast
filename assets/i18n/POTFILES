@@ -26,6 +26,7 @@ src/ui/new_releases.rs
 src/ui/login.rs
 src/ui/mod.rs
 src/ui/prerelease.rs
+src/ui/profile.rs
 src/ui/radio.rs
 src/ui/search.rs
 src/ui/show.rs

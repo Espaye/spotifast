@@ -3,7 +3,7 @@
 //! no per-app quota, so a playlist someone else owns opens without waiting on
 //! the shared app's rate limit.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use base64::Engine as _;
 use librespot_core::{FileId, Session, SpotifyUri, error::ErrorKind, spotify_id::SpotifyId};
@@ -387,12 +387,16 @@ pub struct PageMetadata {
     /// Songs' play counts by track URI, and an artist's monthly listeners
     /// under the artist's own URI.
     pub play_counts: HashMap<String, u64>,
+    /// An album's songs that Spotify says this account cannot play, by the
+    /// album's own track URI. The Web API's album answer carries no market,
+    /// so it never says.
+    pub unplayable: HashSet<String>,
     pub upcoming: Option<crate::prerelease::UpcomingRelease>,
 }
 
-/// Read song play counts and, for artists, monthly listeners and the
-/// upcoming release. None of them is available through the Web API. Songs
-/// without counts are left out.
+/// Read song play counts and, for albums, which songs cannot play, and for
+/// artists, monthly listeners and the upcoming release. None of them is
+/// available through the Web API. Songs without counts are left out.
 pub async fn page_metadata(
     session: &Session,
     web: &crate::api::ApiClient,
@@ -401,6 +405,7 @@ pub async fn page_metadata(
     let login = session.login5().auth_token().await?;
     let client_token = session.spclient().client_token().await?;
     let mut counts = HashMap::new();
+    let mut unplayable = HashSet::new();
     let mut upcoming = None;
     match crate::util::uri_kind(uri) {
         Some("album") => {
@@ -422,6 +427,7 @@ pub async fn page_metadata(
                     .pointer("/data/albumUnion/tracksV2")
                     .ok_or_else(|| anyhow::anyhow!("Spotify answered without the album's songs"))?;
                 let rows = play_counts_from(page, &mut counts);
+                unplayable_from(page, &mut unplayable);
                 let total = page
                     .get("totalCount")
                     .and_then(|total| total.as_u64())
@@ -465,6 +471,7 @@ pub async fn page_metadata(
     }
     Ok(PageMetadata {
         play_counts: counts,
+        unplayable,
         upcoming,
     })
 }
@@ -500,6 +507,31 @@ fn play_counts_from(list: &serde_json::Value, counts: &mut HashMap<String, u64>)
         }
     }
     rows.len()
+}
+
+/// Adds the songs of a Pathfinder album page whose `playability` says this
+/// account cannot play them. A song Spotify plays through a relinked
+/// recording is playable; rows that do not say are left out.
+fn unplayable_from(list: &serde_json::Value, unplayable: &mut HashSet<String>) {
+    let rows = list
+        .get("items")
+        .and_then(|items| items.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    for row in rows {
+        let Some(track) = row.get("track") else {
+            continue;
+        };
+        let playable = track
+            .pointer("/playability/playable")
+            .and_then(|playable| playable.as_bool());
+        if let Some(uri) = track.get("uri").and_then(|uri| uri.as_str())
+            && uri.starts_with("spotify:track:")
+            && playable == Some(false)
+        {
+            unplayable.insert(uri.to_string());
+        }
+    }
 }
 
 /// An artist's monthly listeners in its `queryArtistOverview` answer.
@@ -607,7 +639,7 @@ pub async fn remove_playlist_rows(
     rows: &[RemovedRow],
 ) -> anyhow::Result<Option<String>> {
     const CHANGED: &str = "The playlist changed meanwhile. Check it and try again.";
-    let (revision, uris) = playlist_uris(session, id).await?;
+    let (revision, uris, _) = playlist_uris(session, id).await?;
     let indices = removal_indices(&uris, rows).ok_or_else(|| anyhow::anyhow!(CHANGED))?;
     let changes = removal_changes(
         &revision,
@@ -631,9 +663,13 @@ pub async fn remove_playlist_rows(
         .map(|revision| snapshot(&revision)))
 }
 
-/// The list's revision and every row's URI, read page by page from the
-/// same revision.
-async fn playlist_uris(session: &Session, id: &str) -> anyhow::Result<(Vec<u8>, Vec<String>)> {
+/// The list's revision, every row's URI, and when its newest row was added
+/// (milliseconds since the epoch, `None` when no row says), read page by
+/// page from the same revision.
+pub(crate) async fn playlist_uris(
+    session: &Session,
+    id: &str,
+) -> anyhow::Result<(Vec<u8>, Vec<String>, Option<i64>)> {
     const PAGE: u32 = 1000;
     let failed = |failure: Failure| match failure {
         Failure::Definitive(error) => anyhow::anyhow!("{error}"),
@@ -641,6 +677,7 @@ async fn playlist_uris(session: &Session, id: &str) -> anyhow::Result<(Vec<u8>, 
     };
     let mut revision = None;
     let mut uris = Vec::new();
+    let mut last_added = None;
     loop {
         let from = uris.len() as u32;
         let list = window(session, id, from, PAGE).await.map_err(failed)?;
@@ -652,12 +689,20 @@ async fn playlist_uris(session: &Session, id: &str) -> anyhow::Result<(Vec<u8>, 
             ),
         }
         let page = rows(&list, from, PAGE);
+        let total = total(&list);
+        complete(page.len(), from, PAGE, total).map_err(failed)?;
         uris.extend(page.iter().map(|row| row.id.to_uri()));
-        if page.is_empty() || uris.len() as u32 >= total(&list) {
+        let newest = page
+            .iter()
+            .map(|row| row.attributes.timestamp.as_timestamp_ms())
+            .filter(|at| *at > 0)
+            .max();
+        last_added = last_added.max(newest);
+        if page.is_empty() || uris.len() as u32 >= total {
             break;
         }
     }
-    Ok((revision.unwrap_or_default(), uris))
+    Ok((revision.unwrap_or_default(), uris, last_added))
 }
 
 /// Where each picked row sits in `uris`, the list as Spotify holds it: at
@@ -1151,6 +1196,91 @@ fn profile_from_json(json: &serde_json::Value) -> UserProfile {
         name: text("name"),
         image_url: text("image_url"),
     }
+}
+
+/// A navigable card in Spotify's public profile view.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileEntry {
+    pub page: crate::model::Page,
+    pub name: String,
+    pub image: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProfileView {
+    pub user: UserProfile,
+    pub playlist_count: Option<u64>,
+    pub followers_count: Option<u64>,
+    pub following_count: Option<u64>,
+    pub playlists: Option<Vec<ProfileEntry>>,
+    pub followers: Vec<ProfileEntry>,
+    pub following: Vec<ProfileEntry>,
+}
+
+fn profile_entries(json: &serde_json::Value, key: &str, people: bool) -> Option<Vec<ProfileEntry>> {
+    use crate::model::Page;
+    Some(
+        json.get(key)?
+            .as_array()?
+            .iter()
+            .filter_map(|item| {
+                let uri = crate::link::canonical_context_uri(item.get("uri")?.as_str()?);
+                let page = Page::from_uri(&uri)?;
+                match (&page, people) {
+                    (Page::Artist(_) | Page::User(_), true) | (Page::Playlist(_), false) => {}
+                    _ => return None,
+                }
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| uri.rsplit(':').next().unwrap_or_default())
+                    .to_owned();
+                let image = item
+                    .get("image_url")
+                    .and_then(|v| v.as_str())
+                    .and_then(image_url);
+                Some(ProfileEntry { page, name, image })
+            })
+            .collect(),
+    )
+}
+
+pub async fn profile_view(session: &Session, id: &str) -> Option<ProfileView> {
+    let client = session.spclient();
+    let bytes = client.get_user_profile(id, Some(50), Some(0)).await.ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let mut view = ProfileView {
+        user: profile_from_json(&json),
+        playlist_count: json["total_public_playlists_count"].as_u64(),
+        followers_count: json["followers_count"].as_u64(),
+        following_count: json["following_count"].as_u64(),
+        playlists: profile_entries(&json, "public_playlists", false),
+        ..Default::default()
+    };
+    if json["show_follows"].as_bool() != Some(false) {
+        let (followers, following) = tokio::join!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.get_user_followers(id)
+            ),
+            tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                client.get_user_following(id)
+            )
+        );
+        for (response, entries) in [
+            (followers, &mut view.followers),
+            (following, &mut view.following),
+        ] {
+            if let Some(bytes) = response.ok().and_then(|result| result.ok())
+                && let Ok(list) = serde_json::from_slice(&bytes)
+            {
+                *entries = profile_entries(&list, "profiles", true).unwrap_or_default();
+            }
+        }
+    }
+    Some(view)
 }
 
 /// What one friend is listening to, or last played, with names to show.
@@ -1698,6 +1828,23 @@ pub(crate) fn normalize_local_track_labels(track: &mut Track) {
 }
 
 /// Track and episode details for the given URIs, in one batched request.
+/// The queue can use the available answers while others are missing.
+pub(crate) async fn queue_details(
+    session: &Session,
+    uris: &[String],
+) -> Result<HashMap<String, PlayableItem>, Failure> {
+    let uris: Vec<_> = uris
+        .iter()
+        .filter_map(|uri| SpotifyUri::from_uri(uri).ok())
+        .collect();
+    let tolerated = uris.iter().map(SpotifyUri::to_uri).collect();
+    let mut details = metadata_tolerating(session, uris.iter(), &tolerated).await?;
+    // These details decorate an existing row whose URI must stay the same.
+    details.retain(|uri, item| uri == item.uri());
+    Ok(details)
+}
+
+/// Track and episode details for the given URIs, in one batched request.
 /// A URI Spotify says it has no item for is absent, as the Web API leaves
 /// such a row's item empty. An answer Spotify could not give, or one this
 /// cannot read, fails the page rather than pass for rows without songs.
@@ -1896,9 +2043,7 @@ fn playable(kind: ExtensionKind, bytes: &[u8]) -> Option<PlayableItem> {
     match kind {
         ExtensionKind::TRACK_V4 => {
             let message = librespot_protocol::metadata::Track::parse_from_bytes(bytes).ok()?;
-            Some(PlayableItem::Track(track(
-                SessionTrack::try_from(&message).ok()?,
-            )))
+            track_of(&message).map(PlayableItem::Track)
         }
         ExtensionKind::EPISODE_V4 => {
             let message = librespot_protocol::metadata::Episode::parse_from_bytes(bytes).ok()?;
@@ -1914,6 +2059,27 @@ fn playable(kind: ExtensionKind, bytes: &[u8]) -> Option<PlayableItem> {
         }
         _ => None,
     }
+}
+
+fn track_of(message: &librespot_protocol::metadata::Track) -> Option<Track> {
+    let mut track = track(SessionTrack::try_from(message).ok()?);
+    // The typed album fills a missing month or day in with the first, so
+    // the date comes from the message, as precise as Spotify knows it.
+    if let Some(album) = &mut track.album {
+        album.release_date = message.album.date.as_ref().and_then(release_date);
+    }
+    Some(track)
+}
+
+/// A release date as the Web API writes it: a year alone stays a year, and
+/// a month without a day stays a month.
+fn release_date(date: &librespot_protocol::metadata::Date) -> Option<String> {
+    let year = date.year.filter(|year| *year > 0)?;
+    Some(match (date.month, date.day) {
+        (Some(month), Some(day)) => format!("{year:04}-{month:02}-{day:02}"),
+        (Some(month), None) => format!("{year:04}-{month:02}"),
+        _ => format!("{year:04}"),
+    })
 }
 
 fn track(track: SessionTrack) -> Track {
@@ -2023,6 +2189,23 @@ mod tests {
             super::play_counts_from(&serde_json::json!({}), &mut counts),
             0
         );
+    }
+
+    /// Only a row that says it cannot play is greyed out; a missing answer
+    /// leaves the song as it was.
+    #[test]
+    fn unplayable_album_songs_read_pathfinder_rows() {
+        let list = serde_json::json!({"items": [
+            {"track": {"uri": "spotify:track:a", "playability": {"playable": false, "reason": "COUNTRY_RESTRICTED"}}},
+            {"track": {"uri": "spotify:track:b", "playability": {"playable": true}}},
+            {"track": {"uri": "spotify:track:c"}},
+            {"track": {"uri": "spotify:episode:d", "playability": {"playable": false}}},
+            {"track": {"playability": {"playable": false}}},
+            {"uid": "no track"},
+        ]});
+        let mut unplayable = HashSet::new();
+        super::unplayable_from(&list, &mut unplayable);
+        assert_eq!(unplayable, HashSet::from(["spotify:track:a".to_string()]));
     }
 
     #[test]
@@ -2387,6 +2570,22 @@ mod tests {
         assert_eq!(iso8601(0), None, "never recorded");
     }
 
+    #[test]
+    fn mixed_profile_entries_keep_their_kind_and_ignore_unknown_uris() {
+        use crate::model::Page;
+        let json = serde_json::json!({"profiles":[{"uri":"spotify:user:juniper","name":"Juniper"},
+            {"uri":"spotify:artist:abc","image_url":"spotify:image:ab12"}, {"uri":"spotify:track:abc"}, {}]});
+        let entries = profile_entries(&json, "profiles", true).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].page, Page::User("juniper".into()));
+        assert_eq!(entries[1].page, Page::Artist("abc".into()));
+        assert_eq!(
+            entries[1].image.as_deref(),
+            Some("https://i.scdn.co/image/ab12")
+        );
+        assert!(profile_entries(&json, "public_playlists", false).is_none());
+    }
+
     /// The profile view gives a user's name and avatar; blanks and nulls
     /// read as absent.
     #[test]
@@ -2676,6 +2875,29 @@ mod tests {
             "the cover is on the image host at its stated size"
         );
         assert_eq!(album.images[1].width, None, "a size Spotify left out");
+    }
+
+    /// A song read through the session carries its album's release date, as
+    /// precise as Spotify knows it, as one read through the Web API does.
+    #[test]
+    fn a_tracks_album_keeps_its_release_date() {
+        let dated = |year, month, day| {
+            let mut message = librespot_protocol::metadata::Track::new();
+            message.set_gid(GID.to_vec());
+            let album = message.album.mut_or_insert_default();
+            album.set_gid(vec![0x03; 16]);
+            let date = album.date.mut_or_insert_default();
+            date.year = year;
+            date.month = month;
+            date.day = day;
+            let track = super::track_of(&message).unwrap();
+            track.album.unwrap().release_date
+        };
+
+        assert_eq!(dated(Some(1987), Some(3), Some(9)).unwrap(), "1987-03-09");
+        assert_eq!(dated(Some(1987), Some(3), None).unwrap(), "1987-03");
+        assert_eq!(dated(Some(1987), None, None).unwrap(), "1987");
+        assert_eq!(dated(None, None, None), None, "an undated album");
     }
 
     /// An episode brings its show and its date along.

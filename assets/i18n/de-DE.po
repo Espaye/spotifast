@@ -222,8 +222,12 @@ msgstr "{name}, Ordner, eingeklappt"
 msgid "{name}, folder, expanded"
 msgstr "{name}, Ordner, ausgeklappt"
 
-#: src/ui/player_bar.rs:81
-msgid "Click to change the visualizer"
+#: src/ui/player_bar.rs:88
+msgid "The visualiser shows only music playing on this computer"
+msgstr "Der Visualizer zeigt nur Musik, die auf diesem Computer läuft"
+
+#: src/ui/player_bar.rs:91
+msgid "Click to change the visualiser"
 msgstr "Klicken, um den Visualizer zu wechseln"
 
 #: src/ui/player_bar.rs:440 src/ui/lyrics.rs:134 src/ui/lyrics.rs:808
@@ -270,17 +274,29 @@ msgstr "Pause"
 msgid "Next"
 msgstr "Weiter"
 
-#: src/ui/player_bar.rs:849
+#: src/ui/player_bar.rs:854
 msgid "Repeat"
 msgstr "Wiederholen"
 
-#: src/ui/player_bar.rs:853
+#: src/ui/player_bar.rs:860
 msgid "Repeat one"
 msgstr "Einen Titel wiederholen"
 
-#: src/ui/player_bar.rs:858
+#: src/ui/player_bar.rs:866
 msgid "Repeat off"
 msgstr "Wiederholen aus"
+
+#: src/ui/player_bar.rs:855
+msgid "Repeat is off. Click to repeat all."
+msgstr "Wiederholen ist aus. Klicken, um alles zu wiederholen."
+
+#: src/ui/player_bar.rs:861
+msgid "Repeating all. Click to repeat this song."
+msgstr "Alles wird wiederholt. Klicken, um diesen Titel zu wiederholen."
+
+#: src/ui/player_bar.rs:867
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "Dieser Titel wird wiederholt. Klicken, um Wiederholen auszuschalten."
 
 #: src/ui/player_bar.rs:919
 msgid "Playback position (%)"
@@ -656,7 +672,12 @@ msgctxt "column heading"
 msgid "DATE ADDED"
 msgstr "HINZUGEFÜGT AM"
 
-#: src/ui/widgets.rs:2732
+#: src/ui/widgets.rs:3026
+msgctxt "column heading"
+msgid "RELEASE DATE"
+msgstr "ERSCHEINUNGSDATUM"
+
+#: src/ui/widgets.rs:2507
 msgctxt "column heading"
 msgid "PLAYS"
 msgstr "WIEDERGABEN"
@@ -1706,12 +1727,12 @@ msgstr "Autoscroll per Mittelklick"
 msgid "Custom title bar"
 msgstr "Eigene Titelleiste"
 
-#: src/ui/settings.rs:1205
-msgid "Player bar visualizer"
+#: src/ui/settings.rs:1242
+msgid "Player bar visualiser"
 msgstr "Visualizer in der Wiedergabeleiste"
 
-#: src/ui/settings.rs:1206
-msgid "Click player bar to change visualizer"
+#: src/ui/settings.rs:1243
+msgid "Click player bar to change visualiser"
 msgstr "Klick auf die Wiedergabeleiste ändert die Visualisierung"
 
 #: src/ui/settings.rs:1215
@@ -1799,13 +1820,15 @@ msgstr ""
 
 #: src/ui/settings.rs:1306
 msgid ""
-"Show the song moving behind the player bar's controls while it plays here."
+"Show the song moving behind the player bar's controls. It shows only music "
+"playing on this computer, not on a speaker or another device."
 msgstr ""
-"Zeigt den Song in Bewegung hinter den Steuerelementen der Wiedergabeleiste, "
-"während er hier läuft."
+"Zeigt den Song in Bewegung hinter den Steuerelementen der Wiedergabeleiste. "
+"Nur Musik, die auf diesem Computer läuft, nicht auf einem Lautsprecher oder "
+"einem anderen Gerät."
 
-#: src/ui/settings.rs:1311
-msgid "Allow clicks on empty player bar space to cycle the visualizer."
+#: src/ui/settings.rs:1348
+msgid "Allow clicks on empty player bar space to cycle the visualiser."
 msgstr ""
 "Klicks auf freie Bereiche der Wiedergabeleiste wechseln die Visualisierung."
 
@@ -1815,7 +1838,7 @@ msgstr "Bildrate"
 
 #: src/ui/settings.rs:1317
 msgid ""
-"How often the player bar and mini player visualizers draw. Lower rates use "
+"How often the player bar and mini player visualisers draw. Lower rates use "
 "fewer resources. MilkDrop has its own."
 msgstr ""
 "Wie oft die Visualisierungen der Wiedergabeleiste und des Mini-Players "
@@ -2933,6 +2956,22 @@ msgstr "Gemeinsame Playlist"
 #: src/ui/collection.rs:2324
 msgid "Public Playlist"
 msgstr "Öffentliche Playlist"
+
+#: src/ui/collection.rs:2328
+msgid "Private Playlist"
+msgstr "Private Playlist"
+
+#: src/ui/collection.rs:1641
+msgid "Date added"
+msgstr "Hinzugefügt am"
+
+#: src/ui/collection.rs:1642
+msgid "Release date"
+msgstr "Erscheinungsdatum"
+
+#: src/ui/collection.rs:1643
+msgid "Duration"
+msgstr "Dauer"
 
 #: src/ui/collection.rs:2398
 msgid "Save to Your Library"
@@ -4225,13 +4264,10 @@ msgstr "{day}. {month} {year}"
 msgid "{month} {year}"
 msgstr "{month} {year}"
 
-#. Translators: How long ago a song was added. Keep {count}.
+#. Translators: When a song was added or played, less than a minute ago.
 #: src/util.rs:136
-#, rust-format
-msgid "{count} second ago"
-msgid_plural "{count} seconds ago"
-msgstr[0] "vor {count} Sekunde"
-msgstr[1] "vor {count} Sekunden"
+msgid "Just now"
+msgstr "Gerade eben"
 
 #. Translators: How long ago a song was added. Keep {count}.
 #: src/util.rs:146
@@ -4816,3 +4852,137 @@ msgstr ""
 
 #~ msgid "Reduce lyrics motion"
 #~ msgstr "Songtextanimation reduzieren"
+
+#: src/ui/queue.rs:640 src/ui/queue.rs:941
+msgid "Next in queue"
+msgstr "Next in queue"
+
+#: src/ui/queue.rs:729
+msgid "Next from:"
+msgstr "Next from:"
+
+#: src/app.rs:8621
+msgid "This song is already playing"
+msgstr "This song is already playing"
+
+#: src/app.rs:8645
+msgid "Play a song to reorder the queue"
+msgstr "Play a song to reorder the queue"
+
+#: src/app.rs:8649 src/app.rs:8666
+msgid "The queue is still updating. Try again in a moment."
+msgstr "The queue is still updating. Try again in a moment."
+
+#: src/app.rs:8654
+msgid "Spotifast has not seen this device's queue yet. Try again in a moment."
+msgstr "Spotifast has not seen this device's queue yet. Try again in a moment."
+
+#: src/app.rs:8663
+msgid "The songs just added are still on their way. Try again in a moment."
+msgstr "The songs just added are still on their way. Try again in a moment."
+
+#: src/app.rs:8659
+msgid "This device does not let Spotifast reorder its queue"
+msgstr "This device does not let Spotifast reorder its queue"
+
+#: src/app.rs:8103
+msgid "The queue changed. Drag the song again."
+msgstr "The queue changed. Drag the song again."
+
+#: src/app.rs:11465
+#. Translators: {error} is the reason the queue edit failed.
+#, rust-format
+msgid "Couldn't change the queue: {error}"
+msgstr "Couldn't change the queue: {error}"
+
+#: src/app.rs:8657
+msgid "This device does not let Spotifast insert into its queue"
+msgstr "This device does not let Spotifast insert into its queue"
+
+#: src/model.rs:668
+msgid "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+msgstr "Ranked by Spotify from about a year of listening. New activity is included as Spotify processes it."
+
+#: src/ui/player_bar.rs:838
+msgid "Repeat is off. Click to repeat all."
+msgstr "Repeat is off. Click to repeat all."
+
+#: src/ui/player_bar.rs:844
+msgid "Repeating all. Click to repeat this song."
+msgstr "Repeating all. Click to repeat this song."
+
+#: src/ui/player_bar.rs:850
+msgid "Repeating this song. Click to turn repeat off."
+msgstr "Repeating this song. Click to turn repeat off."
+
+#: src/ui/topbar.rs:627
+msgid "Show MilkDrop only"
+msgstr "Show MilkDrop only"
+
+#: src/ui/lyrics.rs:1071
+msgid "Sync lyrics"
+msgstr "Sync lyrics"
+
+#: src/ui/lyrics.rs:1047
+msgid "Toggle MilkDrop background (V)"
+msgstr "Toggle MilkDrop background (V)"
+
+#: src/ui/profile.rs:201
+msgid "Connect Spotify to see this profile."
+msgstr "Verbinde Spotify, um dieses Profil zu sehen."
+
+#: src/ui/profile.rs:124
+msgid "Edit profile in Spotify"
+msgstr "Profil in Spotify bearbeiten"
+
+#: src/ui/profile.rs:180
+msgid "Followers"
+msgstr "Follower"
+
+#: src/ui/profile.rs:188
+msgid "Following"
+msgstr "Folge ich"
+
+#: src/ui/profile.rs:356
+msgid "No public list to show."
+msgstr "Keine öffentliche Liste vorhanden."
+
+#: src/ui/profile.rs:275
+msgid "Only visible to you"
+msgstr "Nur für dich sichtbar"
+
+#: src/ui/profile.rs:97 src/ui/topbar.rs:510
+msgid "Profile"
+msgstr "Profil"
+
+#: src/ui/profile.rs:368
+msgid "Profiles"
+msgstr "Profile"
+
+#: src/ui/profile.rs:146
+msgid "Public playlists"
+msgstr "Öffentliche Playlists"
+
+#: src/ui/profile.rs:283
+msgid "Top artists this month"
+msgstr "Top-Künstler dieses Monats"
+
+#: src/ui/profile.rs:305
+msgid "Top tracks this month"
+msgstr "Top-Songs dieses Monats"
+
+#. Translators: {count} is how many people and artists the listener follows; English uses the same word for one and many.
+#: src/ui/profile.rs:77
+#, rust-format
+msgid "{count} following"
+msgid_plural "{count} following"
+msgstr[0] "{count} Folge ich"
+msgstr[1] "{count} Folge ich"
+
+#. Translators: {count} is how many public playlists the listener has.
+#: src/ui/profile.rs:48
+#, rust-format
+msgid "{count} public playlist"
+msgid_plural "{count} public playlists"
+msgstr[0] "{count} öffentliche Playlist"
+msgstr[1] "{count} öffentliche Playlists"

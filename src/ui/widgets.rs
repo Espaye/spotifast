@@ -192,6 +192,37 @@ fn stand_in(
         .then(|| std::sync::Arc::clone(&shown.url))
 }
 
+/// Whether [`playing_cover`] under `key` shows the last song's cover in
+/// place of `url`'s, which is still being made.
+pub fn playing_cover_stands_in(
+    ui: &Ui,
+    art: &crate::images::ArtLoader,
+    key: &str,
+    url: Option<&str>,
+) -> bool {
+    let id = egui::Id::new(("playing-cover", key));
+    let now = ui.input(|input| input.time);
+    let shown = ui.ctx().data(|data| data.get_temp::<ShownCover>(id));
+    stand_in(shown.as_ref(), url, now).is_some() && !url.is_some_and(|url| art.has_copy(url))
+}
+
+/// Called after [`playing_cover`] painted `url`'s in a place laid out while
+/// the last song's cover stood in for it (`stood_in`, from
+/// [`playing_cover_stands_in`]). The new cover can be made while it paints,
+/// and would then show in the last one's place, so that frame is drawn again
+/// with the new cover in its own.
+pub fn settle_playing_cover(
+    ui: &Ui,
+    art: &crate::images::ArtLoader,
+    url: Option<&str>,
+    stood_in: bool,
+) {
+    if stood_in && url.is_some_and(|url| art.has_copy(url)) {
+        ui.ctx()
+            .request_discard("the new song's cover takes its own place");
+    }
+}
+
 /// Paints the playing song's cover. A new song's cover still being made
 /// keeps the last song's in its place for a moment, so a change of song
 /// does not pass through the placeholder. `key` tells apart the places that
@@ -244,19 +275,34 @@ fn paint_cover_url(
     art: Option<&crate::images::ArtLoader>,
     shift_thumbnail: bool,
 ) -> bool {
-    let CoverAt { url, rect, corner } = cover;
+    let CoverAt { rect, corner, .. } = cover;
+    let Some(texture) = cover_copy(ui, cover.url, rect.size(), art) else {
+        return false;
+    };
+    paint_cover_texture(ui, texture, rect, corner, shift_thumbnail);
+    true
+}
+
+/// The copy of `url`'s artwork for a cover `size` points wide, asking for
+/// it to be fetched and made when egui has none yet.
+pub(crate) fn cover_copy(
+    ui: &Ui,
+    url: &str,
+    size: Vec2,
+    art: Option<&crate::images::ArtLoader>,
+) -> Option<egui::load::SizedTexture> {
     if let Some(art) = art {
         art.touch(url);
     }
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), size);
     let scaled = (url.starts_with("https://") || url.starts_with("http://"))
         .then(|| crate::images::scaled_uri(url, cover_copy_pixels(ui, rect)));
     let uri = scaled.as_deref().unwrap_or(url);
     let image = egui::Image::new(uri)
         .texture_options(crate::images::COVER_TEXTURE)
         .show_loading_spinner(false);
-    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), rect.size())
-    else {
-        return false;
+    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), size) else {
+        return None;
     };
     match art {
         Some(art) => {
@@ -276,8 +322,7 @@ fn paint_cover_url(
         // as soon as egui holds the texture.
         None => crate::images::forget_decoded(ui.ctx(), uri),
     }
-    paint_cover_texture(ui, texture, rect, corner, shift_thumbnail);
-    true
+    Some(texture)
 }
 
 fn paint_cover_texture(
@@ -358,21 +403,226 @@ pub fn virtual_rows(
     let clip = ui.clip_rect();
     let start_y = ui.cursor().top();
     let width = ui.available_width();
-    // Retain a neighbour on either side so Tab can focus it and scroll it in.
-    let first = (((clip.top() - start_y) / row_height).floor().max(0.0) as usize)
-        .min(count)
-        .saturating_sub(1);
-    let last = (((clip.bottom() - start_y) / row_height).ceil().max(0.0) as usize + 1).min(count);
+    let (first, last) = laid_out_rows(clip, start_y, count, row_height);
     if first > 0 {
         ui.allocate_space(vec2(width, first as f32 * row_height));
     }
     for index in first..last {
-        row(ui, index);
+        edge_faded(ui, row_height, |ui| row(ui, index));
     }
     if last < count {
         ui.allocate_space(vec2(width, (count - last) as f32 * row_height));
     }
     ui.spacing_mut().item_spacing = previous_spacing;
+}
+
+fn list_edge_id() -> egui::Id {
+    egui::Id::new("spotifast-list-edge-fade")
+}
+
+/// Draws the scroll area `add` makes with its rows fading out from `band`
+/// points before its top and bottom edges, for a list on a rounded pane:
+/// a row the area's square edge cuts shows what of it is inside, faint, and
+/// the list reads as part of the pane rather than a box inside it. Rows from
+/// [`virtual_rows`] fade on their own; anything else in the list goes through
+/// [`edge_faded`].
+pub fn fade_list_edges<R>(ui: &mut Ui, band: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let id = list_edge_id();
+    ui.ctx().data_mut(|data| data.insert_temp(id, band));
+    let shown = add(ui);
+    ui.ctx().data_mut(|data| data.remove::<f32>(id));
+    shown
+}
+
+/// Draws `add`, `height` points tall at the cursor, faded by how near it is
+/// to an edge of the visible list while [`fade_list_edges`] is on, and as it
+/// is otherwise.
+pub fn edge_faded<R>(ui: &mut Ui, height: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let Some(band) = ui.ctx().data(|data| data.get_temp::<f32>(list_edge_id())) else {
+        return add(ui);
+    };
+    let item = Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), height));
+    let opacity = ui.opacity();
+    ui.set_opacity(opacity * list_edge_opacity(item, ui.clip_rect(), band));
+    let shown = add(ui);
+    ui.set_opacity(opacity);
+    shown
+}
+
+/// How visible `item` is near the edges of `view`. It fades by whichever of
+/// its edges is nearer the edge of `view`, over `band` points, and is gone
+/// before that edge reaches it, so the clip never cuts it in half. An item
+/// too tall to clear the band at both ends at once fades over the room it
+/// has, so it still shows whole in the middle, and one taller than `view`
+/// does not fade at all.
+pub fn edge_opacity(item: Rect, view: Rect, band: f32) -> f32 {
+    let band = band.min((view.height() - item.height()) / 2.0);
+    if band <= 0.0 {
+        return 1.0;
+    }
+    let room = (item.top() - view.top()).min(view.bottom() - item.bottom());
+    let edge = (room / band).clamp(0.0, 1.0);
+    edge * edge * (3.0 - 2.0 * edge)
+}
+
+/// How visible a list row `item` is near the edges of `view`: whole while it
+/// is `band` points inside them, then fading as it nears and crosses the
+/// nearer edge until it has left `view`. A row the edge cuts still shows what
+/// of it is inside, so a list never ends in an empty strip where its next row
+/// is waiting for room.
+pub fn list_edge_opacity(item: Rect, view: Rect, band: f32) -> f32 {
+    let band = band.min((view.height() - item.height()) / 2.0);
+    if band <= 0.0 {
+        return 1.0;
+    }
+    let room = (item.top() - view.top()).min(view.bottom() - item.bottom());
+    let edge = ((room + item.height()) / (band + item.height())).clamp(0.0, 1.0);
+    edge * edge * (3.0 - 2.0 * edge)
+}
+
+/// The rows [`virtual_rows`] lays out, as a range's start and end: those
+/// that meet `clip`, with a neighbour on either side so Tab can focus it
+/// and scroll it in.
+fn laid_out_rows(clip: Rect, start_y: f32, count: usize, row_height: f32) -> (usize, usize) {
+    let first = (((clip.top() - start_y) / row_height).floor().max(0.0) as usize)
+        .min(count)
+        .saturating_sub(1);
+    let last = (((clip.bottom() - start_y) / row_height).ceil().max(0.0) as usize + 1).min(count);
+    (first, last)
+}
+
+/// The rows wholly inside `clip`, as a range's start and end. A row's
+/// cover lies within the row, so the list paints, and so asks for, the
+/// cover of every one of them. A row only partly on screen, or one
+/// [`laid_out_rows`] adds for Tab, may have its cover outside the clip,
+/// where nothing asks for it.
+fn whole_rows(clip: Rect, start_y: f32, count: usize, row_height: f32) -> (usize, usize) {
+    let row = |y: f32| ((y - start_y) / row_height).max(0.0);
+    let first = (row(clip.top()).ceil() as usize).min(count);
+    let last = (row(clip.bottom()).floor() as usize).clamp(first, count);
+    (first, last)
+}
+
+/// How far past the rows on screen song covers are fetched and made, in
+/// heights of the visible list each way.
+const COVERS_AHEAD: f32 = 2.0;
+
+/// The same reach for card grids, whose covers are larger and many to a
+/// row.
+const CARDS_AHEAD: f32 = 1.0;
+
+/// Fetches and makes the covers of the songs within two screens above and
+/// below those [`virtual_rows`] lays out, so a song scrolled into view
+/// shows its cover at once instead of a placeholder. Call it just before
+/// `virtual_rows`, with the same row count and height; `item` gives the
+/// song in a row, if it is loaded.
+///
+/// The rows wholly on screen come first: nothing further is asked for until
+/// their own covers have arrived, and each of them is asked for again after
+/// these in the frame, so the cover scaler, which makes the copies asked
+/// for last first, keeps them ahead. The nearest rows ahead are asked for
+/// last for the same reason. Rows only partly on screen are among the
+/// nearest, so their covers are asked for whether or not they show.
+pub fn warm_row_covers<'a>(
+    ui: &Ui,
+    app: &App,
+    count: usize,
+    row_height: f32,
+    compact: bool,
+    item: impl Fn(usize) -> Option<&'a PlayableItem>,
+) {
+    let size = row_cover_size(compact);
+    let pixels = app.art_px(size);
+    let url = |row: usize| item(row).and_then(|item| app.item_image(item, pixels));
+    warm_covers(ui, app, (count, 1), row_height, COVERS_AHEAD, size, url);
+}
+
+/// Fetches and makes the covers of the cards within a screen above and
+/// below those [`virtual_wrapped_cards`] lays out, by the same rules as
+/// [`warm_row_covers`]. Call it just before `virtual_wrapped_cards`, with
+/// the same card count and height; `url` gives the cover of a card.
+pub fn warm_card_covers(
+    ui: &Ui,
+    app: &App,
+    count: usize,
+    card_height: f32,
+    url: impl Fn(usize) -> Option<String>,
+) {
+    let columns = grid_columns(ui.available_width());
+    let url = |index: usize| if index < count { url(index) } else { None };
+    let rows = (count.div_ceil(columns), columns);
+    warm_covers(
+        ui,
+        app,
+        rows,
+        card_height + CARD_GAP,
+        CARDS_AHEAD,
+        CARD_ART,
+        url,
+    );
+}
+
+/// Fetches and makes the covers `screens` heights of the visible list above
+/// and below the rows on screen, `size` points wide. `rows` is the count of
+/// rows and how many covers each holds; `url` gives a cover by its index.
+/// Nothing is fetched on a metered connection.
+fn warm_covers(
+    ui: &Ui,
+    app: &App,
+    (count, per_row): (usize, usize),
+    row_height: f32,
+    screens: f32,
+    size: f32,
+    url: impl Fn(usize) -> Option<String>,
+) {
+    if count == 0 || per_row == 0 || row_height <= 0.0 || app.metered() {
+        return;
+    }
+    let clip = ui.clip_rect();
+    let start_y = ui.cursor().top();
+    let art = app.backend.art();
+    let (first, last) = whole_rows(clip, start_y, count, row_height);
+    let settled = (first * per_row..last * per_row)
+        .filter_map(&url)
+        .all(|cover| art.is_settled(&cover));
+    if !settled {
+        return;
+    }
+    let reach = clip.height() * screens;
+    let rows_at = |shift: f32| {
+        let clip = clip.translate(vec2(0.0, shift));
+        laid_out_rows(clip, start_y, count, row_height)
+    };
+    let (above, below) = (rows_at(-reach).0, rows_at(reach).1);
+    for row in rows_ahead(first, last, above, below) {
+        for index in row * per_row..(row + 1) * per_row {
+            if let Some(url) = url(index) {
+                cover_copy(ui, &url, Vec2::splat(size), Some(art));
+            }
+        }
+    }
+}
+
+/// The rows within `above..below` but outside `first..last` whose covers
+/// are fetched ahead, the farthest first, so the nearest are asked for last
+/// and made first.
+fn rows_ahead(
+    first: usize,
+    last: usize,
+    above: usize,
+    below: usize,
+) -> impl Iterator<Item = usize> {
+    let farthest = first.saturating_sub(above).max(below.saturating_sub(last));
+    (1..=farthest).rev().flat_map(move |distance| {
+        let up = first.checked_sub(distance).filter(|row| *row >= above);
+        let down = Some(last + distance - 1).filter(|row| *row < below);
+        up.into_iter().chain(down)
+    })
+}
+
+/// The side of a song row's cover.
+fn row_cover_size(compact: bool) -> f32 {
+    if compact { 36.0 } else { 40.0 }
 }
 
 /// A wrapping grid of cards, laid out row by row so only visible cards are
@@ -388,9 +638,7 @@ pub fn virtual_wrapped_cards(
     }
     let spacing = CARD_GAP / 2.0;
     let row_width = ui.available_width().max(CARD_WIDTH);
-    let cards_per_row = ((row_width + spacing) / (CARD_WIDTH + spacing))
-        .floor()
-        .max(1.0) as usize;
+    let cards_per_row = grid_columns(row_width);
     let row_count = count.div_ceil(cards_per_row);
     // CARD_GAP is already in the row height. Do not also inherit item_spacing.y.
     let previous_spacing = ui.spacing().item_spacing;
@@ -410,6 +658,48 @@ pub fn virtual_wrapped_cards(
         ui.allocate_space(vec2(row_width, CARD_GAP));
     });
     ui.spacing_mut().item_spacing = previous_spacing;
+}
+
+/// How many cards a row of [`virtual_wrapped_cards`] `width` points wide
+/// holds.
+fn grid_columns(width: f32) -> usize {
+    let spacing = CARD_GAP / 2.0;
+    let width = width.max(CARD_WIDTH);
+    ((width + spacing) / (CARD_WIDTH + spacing))
+        .floor()
+        .max(1.0) as usize
+}
+
+/// How long the pointer rests on a card before the page it opens is
+/// fetched ahead of the click. Passing over a card asks for nothing.
+const PRELOAD_REST: f64 = 0.25;
+
+/// Whether the pointer has now rested on `response` long enough to fetch
+/// what it opens. True once per visit.
+pub fn rested_on(ui: &Ui, response: &egui::Response) -> bool {
+    type Rest = (egui::Id, f64, bool);
+    let key = egui::Id::new("spotifast-card-rest");
+    let mine = ui
+        .data(|data| data.get_temp::<Rest>(key))
+        .filter(|(id, ..)| *id == response.id);
+    if !response.hovered() {
+        if mine.is_some() {
+            ui.data_mut(|data| data.remove::<Rest>(key));
+        }
+        return false;
+    }
+    let now = ui.input(|input| input.time);
+    let (since, done) = mine.map_or((now, false), |(_, since, done)| (since, done));
+    let rested = now - since;
+    let ready = !done && rested >= PRELOAD_REST;
+    if mine.is_none() || ready {
+        ui.data_mut(|data| data.insert_temp(key, (response.id, since, done || ready)));
+    }
+    if !done && !ready {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(PRELOAD_REST - rested));
+    }
+    ready
 }
 
 /// Asks for the next page when the user scrolls near the end of a list.
@@ -801,14 +1091,16 @@ fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
     }
 }
 
-/// The heart's choices while its menu is open: whether the playing song
-/// stays in Liked Songs and which playlists should hold it. Nothing changes
-/// until Done.
+/// The heart's choices while its menu is open: whether the song is in
+/// Liked Songs and which playlists should hold it. Nothing changes until
+/// Done.
 #[derive(Clone)]
 pub(crate) struct PlaylistChecks {
     /// The song the menu opened for.
     pub uri: String,
     pub liked: bool,
+    /// Whether the song was in Liked Songs when the menu opened.
+    liked_before: bool,
     /// The playlists known to hold the song when the menu opened.
     holding: std::collections::BTreeSet<String>,
     /// The playlists not read far enough to tell. Done never takes the song
@@ -827,28 +1119,45 @@ pub(crate) enum Mark {
 }
 
 impl PlaylistChecks {
-    /// A liked song, with a check on each playlist known to hold it.
-    pub(crate) fn new(app: &App, item: &PlayableItem) -> Self {
+    /// A check on Liked Songs when the song is liked, and on each playlist
+    /// known to hold it. `containing` is the playlist the heart's row sits
+    /// in, which holds the song whatever the index has read.
+    pub(crate) fn new(app: &App, item: &PlayableItem, containing: Option<&str>) -> Self {
         let mut holding = std::collections::BTreeSet::new();
         let mut unread = std::collections::BTreeSet::new();
         for (id, _) in app.editable_playlists() {
-            match app.local_playlist_duplicates(&id, std::slice::from_ref(item)) {
-                Some(found) if found.is_empty() => {}
-                Some(_) => {
+            let held = if containing == Some(id.as_str()) {
+                Some(true)
+            } else {
+                app.playlist_holds(&id, item.uri()).or_else(|| {
+                    app.local_playlist_duplicates(&id, std::slice::from_ref(item))
+                        .map(|found| !found.is_empty())
+                })
+            };
+            match held {
+                Some(true) => {
                     holding.insert(id);
                 }
+                Some(false) => {}
                 None => {
                     unread.insert(id);
                 }
             }
         }
+        let liked = app.is_saved(item.uri()) == Some(true);
         Self {
             uri: item.uri().to_string(),
-            liked: true,
+            liked,
+            liked_before: liked,
             chosen: holding.clone(),
             holding,
             unread,
         }
+    }
+
+    /// Whether any check differs from when the menu opened.
+    pub(crate) fn changed(&self) -> bool {
+        self.liked != self.liked_before || self.chosen != self.holding
     }
 
     pub(crate) fn mark(&self, id: &str) -> Mark {
@@ -865,6 +1174,26 @@ impl PlaylistChecks {
         if !self.chosen.remove(id) {
             self.chosen.insert(id.to_string());
         }
+    }
+
+    /// What Done asks: Liked Songs changed when its check did, then the
+    /// playlists. Unliking takes out every saved copy of the song, as the
+    /// heart does, since any of them shows it as liked.
+    pub(crate) fn done(&self, app: &App, item: &PlayableItem) -> Vec<Action> {
+        let mut actions = Vec::new();
+        if self.liked != self.liked_before {
+            let uris = if self.liked {
+                vec![self.uri.clone()]
+            } else {
+                app.saved_toggle_targets(&self.uri)
+            };
+            actions.push(Action::SetSavedMany {
+                uris,
+                saved: self.liked,
+            });
+        }
+        actions.extend(self.changes(app, item));
+        actions
     }
 
     /// What Done asks of the playlists, as one action: `item` added to each
@@ -891,6 +1220,106 @@ impl PlaylistChecks {
     }
 }
 
+const HEART_MENU_OPEN: &str = "heart-menu-open";
+const HEART_MENU_WHEEL: &str = "heart-menu-wheel";
+
+/// Takes the wheel from every list while a heart's menu is open, so the
+/// page under the menu stays put; the menu hands it to its own list. Runs
+/// once a frame, before anything is drawn.
+pub(crate) fn hold_wheel_for_heart_menu(ctx: &egui::Context) {
+    let open = ctx
+        .data(|data| data.get_temp::<egui::Id>(egui::Id::new(HEART_MENU_OPEN)))
+        .is_some_and(|id| egui::Popup::is_id_open(ctx, id));
+    let wheel = open.then(|| {
+        ctx.input_mut(|input| std::mem::replace(&mut input.smooth_scroll_delta, Vec2::ZERO))
+    });
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(HEART_MENU_WHEEL), wheel));
+}
+
+/// A heart's menu for `item`, opened by the heart's `response`: a
+/// checklist of Liked Songs and the account's playlists, as Spotify's
+/// phone app has. Checks change nothing until Done, and a click outside
+/// drops them; the button reads Cancel until something is checked or
+/// unchecked. `containing` is the playlist the heart's row sits in.
+/// Returns whether the menu is open.
+pub(crate) fn heart_menu(
+    ui: &mut Ui,
+    app: &mut App,
+    response: &egui::Response,
+    popup_id: egui::Id,
+    item: &PlayableItem,
+    containing: Option<&str>,
+) -> bool {
+    let palette = app.palette;
+    let query_id = popup_id.with("query");
+    let checks_id = popup_id.with("checks");
+    let shown = egui::Popup::menu(response)
+        .id(popup_id)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(menu_frame(&palette))
+        .show(|ui| {
+            ui.data_mut(|data| data.insert_temp(egui::Id::new(HEART_MENU_OPEN), popup_id));
+            let wheel = ui
+                .data(|data| data.get_temp::<Option<Vec2>>(egui::Id::new(HEART_MENU_WHEEL)))
+                .flatten();
+            if let Some(wheel) = wheel {
+                ui.input_mut(|input| input.smooth_scroll_delta = wheel);
+            }
+            let stored = ui.data(|data| data.get_temp::<String>(query_id));
+            let fresh = stored.is_none();
+            let mut query = stored.unwrap_or_default();
+            let mut checks = ui
+                .data(|data| data.get_temp::<PlaylistChecks>(checks_id))
+                .filter(|checks| checks.uri == item.uri())
+                .unwrap_or_else(|| PlaylistChecks::new(app, item, containing));
+            let before = app.actions.len();
+            let field = playlist_picker(
+                ui,
+                app,
+                std::slice::from_ref(item),
+                &mut query,
+                Some(&mut checks),
+            );
+            if fresh {
+                field.request_focus();
+            }
+            menu_separator(ui, &palette);
+            let changed = checks.changed();
+            let label = if changed {
+                gettext(app.locale, "Done")
+            } else {
+                gettext(app.locale, "Cancel")
+            };
+            let done = ui
+                .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    theme::pill_button(ui, &palette, &label, changed)
+                })
+                .inner
+                .clicked();
+            if done && changed {
+                let actions = checks.done(app, item);
+                app.actions.extend(actions);
+            }
+            ui.data_mut(|data| {
+                data.insert_temp(query_id, query);
+                data.insert_temp(checks_id, checks);
+            });
+            // Done, Cancel or New playlist closes it.
+            if done || app.actions.len() > before {
+                ui.close();
+            }
+            // What the menu's list left of the wheel stays out of the page.
+            ui.input_mut(|input| input.smooth_scroll_delta = Vec2::ZERO);
+        });
+    if shown.is_none() {
+        ui.data_mut(|data| {
+            data.remove::<String>(query_id);
+            data.remove::<PlaylistChecks>(checks_id);
+        });
+    }
+    shown.is_some()
+}
+
 /// Shared by single-item and selection menus. Filtering is local and keeps
 /// the existing playlist edit permissions and library order. With `checks`,
 /// as the heart's menu, Liked Songs leads the list and a click or Enter
@@ -904,27 +1333,37 @@ pub(crate) fn playlist_picker(
 ) -> egui::Response {
     let palette = app.palette;
     let locale = app.locale;
-    ui.set_min_width(220.0);
-    ui.set_max_width(300.0);
+    ui.set_min_width(260.0);
+    ui.set_max_width(340.0);
     let width = ui.available_width();
     let field_id = ui.make_persistent_id("playlist-filter");
     let highlight_id = ui.make_persistent_id("playlist-highlight");
     let playlists = app.editable_playlists();
+    // Liked Songs, pinned as in the library, joins the checklist's rows.
+    // The filter matches it like any playlist.
+    let liked_name = gettext(locale, "Liked Songs");
+    let with_liked = checks.is_some();
+    let liked_matches = |needle: &str| with_liked && liked_name.to_lowercase().contains(needle);
     let matching = |query: &str| {
         let needle = query.trim().to_lowercase();
-        playlists
+        let found = playlists
             .iter()
-            .filter(move |(_, name)| name.to_lowercase().contains(&needle))
-            .count()
+            .filter(|(_, name)| name.to_lowercase().contains(&needle))
+            .count();
+        found + usize::from(liked_matches(&needle))
     };
     // The keyboard's choice among the matches, for the filter it was made
     // under. Typing chooses the first match; Up and Down move the choice
     // and Enter adds to it. The keys are taken before the field sees them.
     // Like the filter itself, the choice lasts while the menu is drawn.
     let frame = ui.ctx().cumulative_frame_nr();
-    let (mut highlighted, chosen_for) = ui
+    let last_drawn = ui
         .data(|data| data.get_temp::<(u64, Option<usize>, String)>(highlight_id))
-        .filter(|(last_frame, _, _)| frame.saturating_sub(*last_frame) <= 1)
+        .filter(|(last_frame, _, _)| frame.saturating_sub(*last_frame) <= 1);
+    // Not drawn last frame: the menu has just opened, so its list starts
+    // at the top, however far it was scrolled when it last closed.
+    let opened = last_drawn.is_none();
+    let (mut highlighted, chosen_for) = last_drawn
         .map(|(_, highlighted, query)| (highlighted, query))
         .unwrap_or_default();
     let mut moved = false;
@@ -972,50 +1411,75 @@ pub(crate) fn playlist_picker(
         Some(Icon::Plus),
         &gettext(locale, "New playlist"),
     ) {
-        app.actions.push(Action::ShowDialog(Dialog::CreatePlaylist {
-            name: String::new(),
-            public: false,
-            add_uris: items.iter().map(|item| item.uri().to_string()).collect(),
-        }));
+        let uris = items.iter().map(|item| item.uri().to_string()).collect();
+        app.actions.push(Action::ShowDialog(Dialog::new_playlist(
+            String::new(),
+            uris,
+        )));
     }
     menu_separator(ui, &palette);
     let needle = query.trim().to_lowercase();
-    let matches: Vec<_> = playlists
+    let mut matches: Vec<_> = playlists
         .iter()
         .filter(|(_, name)| name.to_lowercase().contains(&needle))
         .collect();
-    highlighted = highlighted.filter(|index| *index < matches.len());
-    ui.data_mut(|data| data.insert_temp(highlight_id, (frame, highlighted, query.clone())));
-    if enter && let Some((id, name)) = highlighted.and_then(|index| matches.get(index)) {
-        if let Some(checks) = checks.as_deref_mut() {
-            checks.toggle(id);
+    // The playlists that held the song when the menu opened come first, so
+    // its own are found at once. The rest follow, the one a song was last
+    // added to first, in the order taken when the menu opened, so neither
+    // a check nor a read landing meanwhile moves a row.
+    let held = |id: &String| {
+        checks
+            .as_deref()
+            .is_some_and(|checks| checks.holding.contains(id))
+    };
+    let order_id = ui.make_persistent_id("playlist-order");
+    if opened {
+        let order = app
+            .membership
+            .by_last_added(playlists.iter().map(|(id, _)| id.as_str()));
+        ui.data_mut(|data| data.insert_temp(order_id, order));
+    }
+    let order: Vec<String> = ui.data(|data| data.get_temp(order_id)).unwrap_or_default();
+    let place: std::collections::HashMap<&str, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(place, id)| (id.as_str(), place))
+        .collect();
+    matches.sort_by_key(|(id, _)| {
+        if held(id) {
+            (false, 0)
         } else {
-            app.actions.push(Action::AddToPlaylist {
-                playlist_id: id.clone(),
-                playlist_name: name.clone(),
-                items: items.to_vec(),
-            });
-            ui.close();
+            (true, place.get(id.as_str()).copied().unwrap_or(usize::MAX))
+        }
+    });
+    let held_count = matches.iter().take_while(|(id, _)| held(id)).count();
+    let found = matches.len();
+    // Every row in order, Liked Songs as `None`. It leads the other
+    // playlists, and the song's own too when the song is liked.
+    let mut rows: Vec<Option<&(String, String)>> = matches.into_iter().map(Some).collect();
+    let liked_shown = liked_matches(&needle);
+    if liked_shown {
+        let liked_before = checks.as_deref().is_some_and(|checks| checks.liked_before);
+        rows.insert(if liked_before { 0 } else { held_count }, None);
+    }
+    highlighted = highlighted.filter(|index| *index < rows.len());
+    ui.data_mut(|data| data.insert_temp(highlight_id, (frame, highlighted, query.clone())));
+    if enter && let Some(row) = highlighted.and_then(|index| rows.get(index).copied()) {
+        match (row, checks.as_deref_mut()) {
+            (None, Some(checks)) => checks.liked = !checks.liked,
+            (Some((id, _)), Some(checks)) => checks.toggle(id),
+            (Some((id, name)), None) => {
+                app.actions.push(Action::AddToPlaylist {
+                    playlist_id: id.clone(),
+                    playlist_name: name.clone(),
+                    items: items.to_vec(),
+                });
+                ui.close();
+            }
+            (None, None) => {}
         }
     }
-    if let Some(checks) = checks.as_deref_mut() {
-        let (_, clicked) = picker_row(
-            ui,
-            &palette,
-            |ui, rect| super::sidebar::liked_cover(ui, rect, 4.0),
-            &gettext(locale, "Liked Songs"),
-            false,
-            Some(if checks.liked {
-                Mark::Checked
-            } else {
-                Mark::Unchecked
-            }),
-        );
-        if clicked {
-            checks.liked = !checks.liked;
-        }
-    }
-    if matches.is_empty() {
+    if found == 0 && (needle.is_empty() || !liked_shown) {
         theme::subtle(
             ui,
             &palette,
@@ -1029,7 +1493,7 @@ pub(crate) fn playlist_picker(
     // The popup lays out within last frame's size, so a list a filter has
     // shrunk would stay that short once the filter is cleared. Asking for
     // the full height lets it grow back; it still shrinks to fit its rows.
-    let list_height = 320.0;
+    let list_height = 360.0;
     let art = app.backend.art().clone();
     // Every row's cover, read in one pass over the library.
     let covers: std::collections::HashMap<String, String> = app
@@ -1043,72 +1507,120 @@ pub(crate) fn playlist_picker(
             Some((playlist.id.clone(), image.to_string()))
         })
         .collect();
-    crate::autoscroll::show(
-        ui,
-        egui::ScrollArea::vertical()
-            .id_salt("filtered-playlists")
-            .max_height(list_height)
-            .min_scrolled_height(list_height),
-        egui::Vec2b::new(false, true),
-        |ui| {
-            for (index, (id, name)) in matches.into_iter().enumerate() {
-                ui.push_id(id, |ui| {
-                    let chosen = highlighted == Some(index);
-                    let image = covers.get(id).map(String::as_str);
-                    let (row, clicked) = picker_row(
-                        ui,
-                        &palette,
-                        |ui, rect| {
-                            paint_cover(ui, &palette, image, rect, 4.0, Icon::Music, Some(&art))
-                        },
-                        name,
-                        chosen,
-                        checks.as_deref().map(|checks| checks.mark(id)),
-                    );
+    let mut list = egui::ScrollArea::vertical()
+        .id_salt("filtered-playlists")
+        .max_height(list_height)
+        .min_scrolled_height(list_height);
+    if opened {
+        list = list.vertical_scroll_offset(0.0);
+    }
+    crate::autoscroll::show(ui, list, egui::Vec2b::new(false, true), |ui| {
+        for (index, row) in rows.into_iter().enumerate() {
+            let chosen = highlighted == Some(index);
+            let Some((id, name)) = row else {
+                if let Some(checks) = checks.as_deref_mut() {
+                    let row = liked_picker_row(ui, &palette, &liked_name, chosen, checks);
                     if chosen && moved {
                         row.scroll_to_me(None);
                     }
-                    if clicked {
-                        if let Some(checks) = checks.as_deref_mut() {
-                            checks.toggle(id);
-                        } else {
-                            app.actions.push(Action::AddToPlaylist {
-                                playlist_id: id.clone(),
-                                playlist_name: name.clone(),
-                                items: items.to_vec(),
-                            });
-                        }
+                }
+                continue;
+            };
+            ui.push_id(id, |ui| {
+                let image = covers.get(id).map(String::as_str);
+                let (row, clicked) = picker_row(
+                    ui,
+                    &palette,
+                    |ui, rect| paint_cover(ui, &palette, image, rect, 4.0, Icon::Music, Some(&art)),
+                    name,
+                    false,
+                    chosen,
+                    checks.as_deref().map(|checks| checks.mark(id)),
+                );
+                if chosen && moved {
+                    row.scroll_to_me(None);
+                }
+                if clicked {
+                    if let Some(checks) = checks.as_deref_mut() {
+                        checks.toggle(id);
+                    } else {
+                        app.actions.push(Action::AddToPlaylist {
+                            playlist_id: id.clone(),
+                            playlist_name: name.clone(),
+                            items: items.to_vec(),
+                        });
                     }
-                });
-            }
-        },
-    );
+                }
+            });
+        }
+    });
     field
 }
 
-/// A playlist in the picker, with its cover. A row with a `mark` shows a
-/// check that a click turns on or off, leaving the menu open; otherwise a
-/// click closes the menu.
-fn picker_row(
+/// Liked Songs in the picker's checklist, with the library's pin.
+fn liked_picker_row(
     ui: &mut Ui,
     palette: &Palette,
-    cover: impl FnOnce(&Ui, Rect),
-    label: &str,
+    name: &str,
     highlighted: bool,
-    mark: Option<Mark>,
-) -> (egui::Response, bool) {
+    checks: &mut PlaylistChecks,
+) -> egui::Response {
+    ui.push_id("liked-songs", |ui| {
+        let (row, clicked) = picker_row(
+            ui,
+            palette,
+            |ui, rect| super::sidebar::liked_cover(ui, rect, 4.0),
+            name,
+            true,
+            highlighted,
+            Some(if checks.liked {
+                Mark::Checked
+            } else {
+                Mark::Unchecked
+            }),
+        );
+        if clicked {
+            checks.liked = !checks.liked;
+        }
+        row
+    })
+    .inner
+}
+
+/// The check at the end of a checklist row, centred on `center`.
+fn paint_mark(ui: &Ui, palette: &Palette, center: egui::Pos2, mark: Mark) {
+    match mark {
+        Mark::Checked => {
+            ui.painter().circle_filled(center, 9.0, palette.accent);
+            Icon::Check
+                .image(palette.on_accent, 12.0)
+                .paint_at(ui, Rect::from_center_size(center, Vec2::splat(12.0)));
+        }
+        Mark::Unchecked => {
+            ui.painter()
+                .circle_stroke(center, 8.5, Stroke::new(1.5, palette.secondary));
+        }
+        Mark::Unknown => {
+            let faint = palette.secondary.gamma_multiply(0.4);
+            ui.painter()
+                .circle_stroke(center, 8.5, Stroke::new(1.5, faint));
+        }
+    }
+}
+
+/// A menu entry with the checklist's check at its end. A click turns it on
+/// or off and leaves the menu open for the next, when the menu closes only
+/// on a click outside it.
+pub(crate) fn menu_check_item(ui: &mut Ui, palette: &Palette, label: &str, checked: bool) -> bool {
     let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 36.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 32.0), Sense::click());
     if ui.is_rect_visible(rect) {
-        if response.hovered() || highlighted {
+        if response.hovered() {
             ui.painter()
                 .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
         }
-        let cover_rect =
-            Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(28.0));
-        cover(ui, cover_rect);
-        let x = cover_rect.right() + 10.0;
-        let right = rect.right() - if mark.is_some() { 36.0 } else { 10.0 };
+        let x = rect.left() + 10.0;
+        let right = rect.right() - 38.0;
         let galley = crate::bidi::layout(
             ui.painter(),
             label,
@@ -1127,25 +1639,129 @@ fn picker_row(
             galley,
             palette.text,
         );
-        if let Some(mark) = mark {
-            let center = pos2(rect.right() - 20.0, rect.center().y);
-            match mark {
-                Mark::Checked => {
-                    ui.painter().circle_filled(center, 9.0, palette.accent);
-                    Icon::Check
-                        .image(palette.on_accent, 12.0)
-                        .paint_at(ui, Rect::from_center_size(center, Vec2::splat(12.0)));
-                }
-                Mark::Unchecked => {
-                    ui.painter()
-                        .circle_stroke(center, 8.5, Stroke::new(1.5, palette.secondary));
-                }
-                Mark::Unknown => {
-                    let faint = palette.secondary.gamma_multiply(0.4);
-                    ui.painter()
-                        .circle_stroke(center, 8.5, Stroke::new(1.5, faint));
-                }
+        paint_mark(
+            ui,
+            palette,
+            pos2(rect.right() - 20.0, rect.center().y),
+            if checked {
+                Mark::Checked
+            } else {
+                Mark::Unchecked
+            },
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), checked, label)
+    });
+    theme::focus_ring(ui, &response);
+    response.clicked()
+}
+
+/// The columns a playlist's song list can show, each a check that stays
+/// in a menu that closes only on a click outside it. The menu is only as
+/// wide as its longest name and the check beside it.
+pub(crate) fn track_column_checks(
+    ui: &mut Ui,
+    app: &mut App,
+    columns: crate::settings::TrackColumns,
+) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let choices = [
+        (gettext(locale, "Album"), columns.album),
+        (gettext(locale, "Date added"), columns.added),
+        (gettext(locale, "Release date"), columns.released),
+        (gettext(locale, "Duration"), columns.duration),
+    ];
+    let longest = choices
+        .iter()
+        .map(|(label, _)| {
+            ui.painter()
+                .layout_no_wrap(label.to_string(), theme::regular(13.5), palette.text)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    // `menu_check_item`'s margin before the name and the room it keeps for
+    // the check, with a little space between the two.
+    let width = (10.0 + longest.ceil() + 8.0 + 38.0).min(300.0);
+    ui.set_min_width(width);
+    ui.set_max_width(width);
+    for (choice, (label, shown)) in choices.into_iter().enumerate() {
+        if menu_check_item(ui, &palette, &label, shown) {
+            let mut toggled = columns;
+            match choice {
+                0 => toggled.album = !shown,
+                1 => toggled.added = !shown,
+                2 => toggled.released = !shown,
+                _ => toggled.duration = !shown,
             }
+            app.actions.push(Action::SetTrackColumns(toggled));
+        }
+    }
+}
+
+/// The pin beside a pinned row's name, as the library list shows it.
+const PICKER_PIN: f32 = 13.0;
+
+/// A playlist in the picker, with its cover. A `pinned` row shows the
+/// library's pin beside its name. A row with a `mark` shows a check that a
+/// click turns on or off, leaving the menu open; otherwise a click closes
+/// the menu.
+fn picker_row(
+    ui: &mut Ui,
+    palette: &Palette,
+    cover: impl FnOnce(&Ui, Rect),
+    label: &str,
+    pinned: bool,
+    highlighted: bool,
+    mark: Option<Mark>,
+) -> (egui::Response, bool) {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() || highlighted {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
+        }
+        let cover_rect =
+            Rect::from_center_size(pos2(rect.left() + 24.0, rect.center().y), Vec2::splat(40.0));
+        cover(ui, cover_rect);
+        let x = cover_rect.right() + 12.0;
+        let right = rect.right() - if mark.is_some() { 36.0 } else { 10.0 };
+        let pin_room = if pinned { PICKER_PIN + 6.0 } else { 0.0 };
+        let galley = crate::bidi::layout(
+            ui.painter(),
+            label,
+            theme::regular(15.0),
+            palette.text,
+            (right - x - pin_room).max(0.0),
+            1,
+            Some(crate::bidi::ELLIPSIS),
+        );
+        let text_rect = Rect::from_min_max(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            pos2(right - pin_room, rect.center().y + galley.size().y / 2.0),
+        );
+        let text_pos = crate::bidi::galley_pos(text_rect, &galley);
+        let text_right = text_pos.x + galley.rect.right();
+        ui.painter().galley(text_pos, galley, palette.text);
+        if pinned {
+            Icon::Pin.image(palette.secondary, PICKER_PIN).paint_at(
+                ui,
+                Rect::from_center_size(
+                    pos2(text_right + 6.0 + PICKER_PIN / 2.0, rect.center().y),
+                    Vec2::splat(PICKER_PIN),
+                ),
+            );
+        }
+        if let Some(mark) = mark {
+            paint_mark(
+                ui,
+                palette,
+                pos2(rect.right() - 20.0, rect.center().y),
+                mark,
+            );
         }
     }
     response.widget_info(|| match mark {
@@ -1222,8 +1838,6 @@ fn item_menu_at(
             label: label.clone(),
         });
     }
-    // Only a song the user queued, and only on this computer's queue: the
-    // context's rows play themselves, and no other queue can be rewritten.
     if let (Some(RowContext::Queue), Some(index)) = (context, index)
         && app.can_remove_from_queue(index)
         && menu_item(
@@ -1470,6 +2084,19 @@ pub fn context_menu_items(
     name: &str,
     owned_playlist: Option<&Playlist>,
 ) {
+    context_menu_items_with_columns(ui, app, uri, name, owned_playlist, None);
+}
+
+/// [`context_menu_items`] with a submenu choosing the song list's
+/// `columns`, for the More menu on a playlist's own page.
+pub fn context_menu_items_with_columns(
+    ui: &mut Ui,
+    app: &mut App,
+    uri: &str,
+    name: &str,
+    owned_playlist: Option<&Playlist>,
+    columns: Option<crate::settings::TrackColumns>,
+) {
     let palette = app.palette;
     let locale = app.locale;
     ui.set_min_width(200.0);
@@ -1515,33 +2142,45 @@ pub fn context_menu_items(
     if owned_playlist.is_none() && menu_item(ui, &palette, Some(icon), &text) {
         app.actions.push(Action::ToggleSaved(uri.to_string()));
     }
-    if let Some(playlist) = owned_playlist {
-        if menu_item(
+    if let Some(playlist) = owned_playlist
+        && menu_item(
             ui,
             &palette,
             Some(Icon::Pencil),
             &gettext(locale, "Edit details"),
-        ) {
-            app.actions.push(Action::ShowDialog(Dialog::EditPlaylist {
-                cover: Default::default(),
+        )
+    {
+        app.actions.push(Action::ShowDialog(Dialog::EditPlaylist {
+            cover: Default::default(),
+            id: playlist.id.clone(),
+            name: playlist.name.clone(),
+            description: playlist
+                .description
+                .clone()
+                .map(|d| util::strip_html(&d))
+                .unwrap_or_default(),
+            public: playlist.public,
+        }));
+    }
+    if let Some(columns) = columns {
+        submenu(
+            ui,
+            &palette,
+            Some(Icon::LayoutList),
+            &gettext(locale, "Columns"),
+            Some(egui::PopupCloseBehavior::CloseOnClickOutside),
+            |ui| track_column_checks(ui, app, columns),
+        );
+    }
+    if let Some(playlist) = owned_playlist
+        && menu_item(ui, &palette, Some(Icon::Trash), &gettext(locale, "Delete"))
+    {
+        app.actions
+            .push(Action::ShowDialog(Dialog::ConfirmDeletePlaylist {
                 id: playlist.id.clone(),
                 name: playlist.name.clone(),
-                description: playlist
-                    .description
-                    .clone()
-                    .map(|d| util::strip_html(&d))
-                    .unwrap_or_default(),
-                public: playlist.public,
+                owned: true,
             }));
-        }
-        if menu_item(ui, &palette, Some(Icon::Trash), &gettext(locale, "Delete")) {
-            app.actions
-                .push(Action::ShowDialog(Dialog::ConfirmDeletePlaylist {
-                    id: playlist.id.clone(),
-                    name: playlist.name.clone(),
-                    owned: true,
-                }));
-        }
     }
     menu_separator(ui, &palette);
     let radio = match kind {
@@ -1574,6 +2213,9 @@ pub fn context_menu_items(
     }
 }
 
+/// The opacity of every cell in a row whose song cannot play.
+const UNAVAILABLE_ROW_OPACITY: f32 = 0.4;
+
 /// Whether a row can start playback through Spotify. Unknown availability
 /// remains playable, while local files and missing entries cannot be requested.
 pub(crate) fn row_playable(item: &PlayableItem) -> bool {
@@ -1593,11 +2235,15 @@ pub struct TrackRow<'a> {
     pub show_album: bool,
     pub added_at: Option<&'a str>,
     /// Who put the song here, on playlists made together.
-    pub added_by: Option<&'a str>,
+    pub added_by: Option<&'a (String, String)>,
     pub show_added_by: bool,
     /// Spotify's play count for the song, on album pages and an artist's
     /// popular songs once the counts arrived.
     pub show_plays: bool,
+    /// The album's release date, where the list's columns include it.
+    pub show_released: bool,
+    /// Whether the row ends with the song's length.
+    pub show_duration: bool,
     pub compact: bool,
     /// One line for the name and the artists in a shorter row without the
     /// cover: the compact track list. `compact` stays the queue's narrow row.
@@ -1616,6 +2262,10 @@ pub struct TrackRow<'a> {
     pub picked_positions: &'a [u32],
     /// This row's position in its playlist, whatever the view's order.
     pub position: Option<u32>,
+    /// Whether a song in Liked Songs or one of the account's playlists
+    /// shows its green heart without the pointer: an artist's popular
+    /// songs. Other lists show the heart only under the pointer.
+    pub show_saved_heart: bool,
 }
 
 /// Draw each credited artist separately so its Spotify id remains clickable.
@@ -1659,6 +2309,7 @@ struct Columns {
     album: f32,
     added_by: f32,
     added: f32,
+    released: f32,
     plays: f32,
     heart: f32,
     duration: f32,
@@ -1673,40 +2324,188 @@ fn plays_fit(width: f32) -> bool {
     width > 560.0
 }
 
+/// The widths of the columns a list can leave out, shared by the rows and
+/// their header so the two always line up.
+struct OptionalColumns {
+    album: f32,
+    added: f32,
+    added_by: f32,
+    released: f32,
+}
+
+/// The widths a list needs before it shows one, two, three or four of its
+/// optional columns. Columns claim them in order (album, date added, added
+/// by, release date), so one that is switched off hands its place to the
+/// next and the narrowest lists still keep the title readable.
+const OPTIONAL_COLUMN_STEPS: [f32; 4] = [560.0, 760.0, 920.0, 1080.0];
+
+/// How the title and the optional columns share a row's free width, as
+/// Spotify's own lists share it: six parts for the title, four for the
+/// album, three for each date or name. Whichever columns are shown, the
+/// gaps between them stay even.
+const TITLE_SHARE: f32 = 6.0;
+const ALBUM_SHARE: f32 = 4.0;
+const DETAIL_SHARE: f32 = 3.0;
+
+/// `width` is the whole row's; `free` what is left for the title and the
+/// optional columns once the fixed ones (number, cover, plays, heart,
+/// duration, More) have theirs.
+fn optional_columns(
+    width: f32,
+    free: f32,
+    album: bool,
+    added: bool,
+    added_by: bool,
+    released: bool,
+) -> OptionalColumns {
+    let mut shown = 0;
+    let mut fits = |wanted: bool| {
+        let fits = wanted
+            && OPTIONAL_COLUMN_STEPS
+                .get(shown)
+                .is_some_and(|step| width > *step);
+        if fits {
+            shown += 1;
+        }
+        fits
+    };
+    let album = fits(album);
+    let added = fits(added);
+    let added_by = fits(added_by);
+    let released = fits(released);
+    let shares = TITLE_SHARE
+        + [
+            (album, ALBUM_SHARE),
+            (added, DETAIL_SHARE),
+            (added_by, DETAIL_SHARE),
+            (released, DETAIL_SHARE),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, share)| share)
+        .sum::<f32>();
+    let part = free.max(0.0) / shares;
+    let size = |on: bool, share: f32, min: f32, max: f32| {
+        if on {
+            (part * share).clamp(min, max)
+        } else {
+            0.0
+        }
+    };
+    OptionalColumns {
+        album: size(album, ALBUM_SHARE, 140.0, 360.0),
+        added: size(added, DETAIL_SHARE, 120.0, 180.0),
+        added_by: size(added_by, DETAIL_SHARE, 130.0, 200.0),
+        released: size(released, DETAIL_SHARE, 120.0, 180.0),
+    }
+}
+
 fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
-    let extra_wide = width > 920.0;
-    let wide = width > 760.0;
-    let medium = width > 560.0;
+    let number = if row.compact { 0.0 } else { 44.0 };
+    let cover = if row.show_cover {
+        if row.compact { 44.0 } else { 52.0 }
+    } else {
+        0.0
+    };
+    let plays = if row.show_plays && !row.compact && plays_fit(width) {
+        PLAYS_WIDTH
+    } else {
+        0.0
+    };
+    let heart = if row.compact { 0.0 } else { 36.0 };
+    let duration = if !row.show_duration {
+        0.0
+    } else if row.compact {
+        44.0
+    } else {
+        56.0
+    };
+    let more = if row.compact { 0.0 } else { 36.0 };
+    // The same sum the header takes, so the two line up.
+    let free = width - number - cover - plays - heart - duration - more - 8.0;
+    let optional = optional_columns(
+        width,
+        free,
+        row.show_album,
+        row.added_at.is_some(),
+        row.show_added_by,
+        row.show_released,
+    );
     Columns {
-        number: if row.compact { 0.0 } else { 44.0 },
-        cover: if row.show_cover {
-            if row.compact { 44.0 } else { 52.0 }
-        } else {
-            0.0
-        },
-        album: if row.show_album && medium {
-            (width * 0.28).clamp(140.0, 360.0)
-        } else {
-            0.0
-        },
-        added_by: if row.show_added_by && extra_wide {
-            130.0
-        } else {
-            0.0
-        },
-        added: if row.added_at.is_some() && wide {
-            120.0
-        } else {
-            0.0
-        },
-        plays: if row.show_plays && !row.compact && plays_fit(width) {
-            PLAYS_WIDTH
-        } else {
-            0.0
-        },
-        heart: if row.compact { 0.0 } else { 36.0 },
-        duration: if row.compact { 44.0 } else { 56.0 },
-        more: if row.compact { 0.0 } else { 36.0 },
+        number,
+        cover,
+        album: optional.album,
+        added_by: optional.added_by,
+        added: optional.added,
+        released: optional.released,
+        plays,
+        heart,
+        duration,
+        more,
+    }
+}
+
+/// How often the playing song's bars move: 15 times a second, which is
+/// smooth enough on a 16 point mark. Every frame draws the whole window
+/// again, so the bars cost what their pace costs. They keep this pace
+/// while saving energy or out of focus: half of it would stutter.
+/// `None` while nobody can see the window: no frames.
+fn playing_bars_frame(budget: crate::power::Budget) -> Option<std::time::Duration> {
+    match budget {
+        crate::power::Budget::Normal | crate::power::Budget::Saver => {
+            Some(std::time::Duration::from_millis(66))
+        }
+        crate::power::Budget::Background => None,
+    }
+}
+
+/// Half the length of each of the six playing bars `time` seconds in, in the
+/// 24 unit grid of the Audio Lines icon. Each bar swings out from the middle
+/// and back on two waves of its own, so no two bars move together and the
+/// pattern does not visibly repeat.
+fn playing_bar_halves(time: f64) -> [f32; 6] {
+    const LOW: f32 = 1.5;
+    const HIGH: f32 = 9.0;
+    const WAVES: [(f64, f64, f64, f64); 6] = [
+        (5.1, 0.0, 8.3, 1.9),
+        (6.7, 2.1, 3.7, 0.4),
+        (4.3, 4.0, 9.1, 2.8),
+        (7.9, 1.2, 4.9, 5.1),
+        (5.9, 3.3, 7.3, 0.9),
+        (6.3, 5.6, 3.1, 3.7),
+    ];
+    WAVES.map(|(fast, fast_phase, slow, slow_phase)| {
+        let swing =
+            0.5 + 0.25 * (time * fast + fast_phase).sin() + 0.25 * (time * slow + slow_phase).sin();
+        LOW + (HIGH - LOW) * swing as f32
+    })
+}
+
+/// The six green bars that mark the playing song, centred in `rect` at
+/// `size` points. They move while the song plays, at the pace `budget`
+/// allows, and stand still as the Audio Lines icon when the system asks
+/// for less motion.
+fn playing_bars(ui: &Ui, rect: Rect, size: f32, color: Color32, budget: crate::power::Budget) {
+    if crate::motion::reduced(ui.ctx()) {
+        theme::paint_icon(ui, Icon::AudioLines, rect, size, color);
+        return;
+    }
+    let unit = size / 24.0;
+    let width = 2.0 * unit;
+    let origin = rect.center() - Vec2::splat(size / 2.0);
+    let halves = playing_bar_halves(ui.input(|input| input.time));
+    for (bar, half) in halves.into_iter().enumerate() {
+        let x = origin.x + (2.0 + 4.0 * bar as f32) * unit;
+        let middle = origin.y + 12.0 * unit;
+        let reach = half * unit + width / 2.0;
+        let bar_rect = Rect::from_min_max(
+            pos2(x - width / 2.0, middle - reach),
+            pos2(x + width / 2.0, middle + reach),
+        );
+        ui.painter().rect_filled(bar_rect, width / 2.0, color);
+    }
+    if let Some(frame) = playing_bars_frame(budget) {
+        theme::repaint_after(ui.ctx(), frame);
     }
 }
 
@@ -1718,11 +2517,25 @@ pub fn track_row(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<RowPic
     track_row_response(ui, app, row).1
 }
 
+/// A row in the queue panel, Queue or Recent alike.
+pub(crate) fn queue_track_row(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) {
+    track_row_with_menu(ui, app, row, true);
+}
+
 /// Also exposes the row body so a collection can navigate between whole songs.
 pub(crate) fn track_row_response(
     ui: &mut Ui,
     app: &mut App,
     row: TrackRow<'_>,
+) -> (egui::Response, Option<RowPick>) {
+    track_row_with_menu(ui, app, row, false)
+}
+
+fn track_row_with_menu(
+    ui: &mut Ui,
+    app: &mut App,
+    row: TrackRow<'_>,
+    queue_menu: bool,
 ) -> (egui::Response, Option<RowPick>) {
     // Virtual lists reuse the visible slots as they scroll. Keep focus and
     // accessibility actions attached to the song and its occurrence instead.
@@ -1739,7 +2552,7 @@ pub(crate) fn track_row_response(
             .unwrap_or(row.index),
     ));
     ui.scope_builder(UiBuilder::new().id(id), |ui| {
-        track_row_contents(ui, app, row)
+        track_row_contents(ui, app, row, queue_menu)
     })
     .inner
 }
@@ -1748,6 +2561,7 @@ fn track_row_contents(
     ui: &mut Ui,
     app: &mut App,
     row: TrackRow<'_>,
+    queue_menu: bool,
 ) -> (egui::Response, Option<RowPick>) {
     let palette = app.palette;
     let row_height = if row.thin {
@@ -1761,6 +2575,19 @@ fn track_row_contents(
     let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
     let rect = rect.translate(vec2(0.0, row.shift));
     let unavailable = !app.row_playable(row.item);
+    // A queue row whose details are still on the way says so. The song keeps
+    // its empty name, so the menu has no title to copy yet.
+    let item = row.item;
+    let loading;
+    let title: &str = if queue_menu
+        && item.needs_queue_details()
+        && (item.name().is_empty() || item.name() == item.uri())
+    {
+        loading = gettext(app.locale, "Loading…");
+        &loading
+    } else {
+        item.name()
+    };
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,
@@ -1771,7 +2598,7 @@ fn track_row_contents(
                 // Translators: {title} is a song or episode name, {subtitle} its artists or podcast.
                 "Play {title}, {subtitle}",
             )
-            .replace("{title}", row.item.name())
+            .replace("{title}", title)
             .replace("{subtitle}", &row.item.subtitle()),
         )
     });
@@ -1794,18 +2621,23 @@ fn track_row_contents(
             } => Some(id.clone()),
             _ => None,
         };
-        // Keep the source index for moves within an editable playlist, or
-        // within the manually queued section while it can be rewritten.
+        // Keep the source index for moves within an editable playlist. A
+        // queue row always names the section it left, whether or not the
+        // queue can be rewritten now, so a row of Next in queue dropped
+        // back on the queue never queues another copy of it.
         let from = (items.len() == 1)
             .then(|| match row.context {
                 RowContext::Context {
                     editable_playlist: Some((id, _)),
                     ..
                 } => Some((id.clone(), row.index as u32)),
-                RowContext::Queue
-                    if row.index < app.queued_rows_len() && app.queue_locally_reorderable() =>
-                {
-                    Some(("queue".to_string(), row.index as u32))
+                RowContext::Queue => {
+                    let origin = if row.index < app.queued_rows_len() {
+                        crate::model::QUEUED_ROW
+                    } else {
+                        crate::model::UPCOMING_ROW
+                    };
+                    Some((origin.to_string(), row.index as u32))
                 }
                 _ => None,
             })
@@ -1819,6 +2651,9 @@ fn track_row_contents(
                 items,
                 from,
                 source_playlist,
+                queue_origin: matches!(row.context, RowContext::Queue)
+                    .then(|| app.queue_origin())
+                    .flatten(),
             },
         );
     }
@@ -1857,6 +2692,14 @@ fn track_row_contents(
     }
     // The row highlight also shows keyboard focus. Do not add an outline
     // when a mouse click gives the row focus for arrow-key navigation.
+
+    // A song that cannot play fades in every cell. A removed song keeps its
+    // cover, album and dates but loses its title, so dimming the title alone
+    // left the row looking playable.
+    let opacity = ui.opacity();
+    if unavailable {
+        ui.multiply_opacity(UNAVAILABLE_ROW_OPACITY);
+    }
     let cols = columns(width, &row);
     let painter = ui.painter().clone();
     let mut x = rect.left() + 8.0;
@@ -1879,7 +2722,7 @@ fn track_row_contents(
             };
             theme::paint_icon(ui, icon, cell, 14.0, palette.text);
         } else if playing {
-            theme::paint_icon(ui, Icon::AudioLines, cell, 16.0, palette.accent);
+            playing_bars(ui, cell, 16.0, palette.accent, app.budget);
         } else {
             let color = if is_current {
                 palette.accent
@@ -1899,7 +2742,7 @@ fn track_row_contents(
     }
     // Cover.
     if cols.cover > 0.0 {
-        let size = if row.compact { 36.0 } else { 40.0 };
+        let size = row_cover_size(row.compact);
         let cover_rect = Rect::from_center_size(
             pos2(x + size / 2.0 + 2.0, rect.center().y),
             Vec2::splat(size),
@@ -1945,23 +2788,26 @@ fn track_row_contents(
                 theme::paint_icon(ui, icon, cover_rect, 16.0, Color32::WHITE);
             } else if playing {
                 scrim(110);
-                theme::paint_icon(ui, Icon::AudioLines, cover_rect, 16.0, palette.accent);
+                playing_bars(ui, cover_rect, 16.0, palette.accent, app.budget);
             }
         }
         x += cols.cover;
     }
     let right_fixed = cols.heart + cols.duration + cols.more + 8.0;
-    let text_right =
-        rect.right() - right_fixed - cols.plays - cols.added - cols.added_by - cols.album;
+    let text_right = rect.right()
+        - right_fixed
+        - cols.plays
+        - cols.released
+        - cols.added
+        - cols.added_by
+        - cols.album;
     let title_rect = Rect::from_min_max(
         pos2(x, rect.top()),
         pos2((text_right - 12.0).max(x), rect.bottom()),
     );
 
-    // Title and artists.
-    let title_color = if unavailable {
-        palette.dim
-    } else if is_current {
+    // Title and artists. An unplayable row is already faded whole.
+    let title_color = if is_current {
         palette.accent
     } else {
         palette.text
@@ -1979,12 +2825,7 @@ fn track_row_contents(
         );
         child.set_clip_rect(title_rect.intersect(ui.clip_rect()));
         child.spacing_mut().item_spacing = vec2(6.0, 0.0);
-        theme::text(
-            &mut child,
-            row.item.name(),
-            theme::medium(14.0),
-            title_color,
-        );
+        theme::text(&mut child, title, theme::medium(14.0), title_color);
         match row.item {
             PlayableItem::Track(track) => {
                 if track.explicit {
@@ -2075,7 +2916,7 @@ fn track_row_contents(
         child.add_space(vertical_pad);
         child.horizontal(|ui| {
             ui.set_max_width(title_rect.width());
-            theme::text(ui, row.item.name(), theme::medium(14.5), title_color);
+            theme::text(ui, title, theme::medium(14.5), title_color);
         });
         child.horizontal(|ui| {
             ui.set_max_width(title_rect.width());
@@ -2175,21 +3016,20 @@ fn track_row_contents(
     }
     // Added by.
     if cols.added_by > 0.0 {
-        if let Some(adder) = row.added_by {
+        if let Some((id, name)) = row.added_by {
             let cell = Rect::from_min_max(
                 pos2(x, rect.top()),
                 pos2(x + cols.added_by - 12.0, rect.bottom()),
             );
-            let clipped = painter.with_clip_rect(cell.intersect(ui.clip_rect()));
-            crate::bidi::paint_line(
-                &clipped,
-                cell.left(),
-                cell.right(),
-                cell.center().y,
-                adder,
-                theme::regular(13.0),
-                palette.secondary,
+            let mut child = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(cell)
+                    .layout(Layout::left_to_right(Align::Center)),
             );
+            child.set_clip_rect(cell.intersect(ui.clip_rect()));
+            if theme::link(&mut child, name, theme::regular(13.0), palette.secondary).clicked() {
+                app.actions.push(Action::Open(Page::User(id.clone())));
+            }
         }
         x += cols.added_by;
     }
@@ -2220,6 +3060,26 @@ fn track_row_contents(
         }
         x += cols.added;
     }
+    // Release date, of the song's album. Spotify leaves it out of some
+    // answers, and then the cell stays empty.
+    if cols.released > 0.0 {
+        if let PlayableItem::Track(track) = row.item
+            && let Some(released) = track
+                .album
+                .as_ref()
+                .and_then(|album| album.release_date.as_deref())
+        {
+            let cell = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.released, row_height));
+            painter.text(
+                pos2(cell.left(), cell.center().y),
+                egui::Align2::LEFT_CENTER,
+                util::format_date(app.locale, released),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        }
+        x += cols.released;
+    }
     // Plays.
     if cols.plays > 0.0 {
         if let Some(plays) = app.play_counts.get(row.item.uri()) {
@@ -2235,51 +3095,70 @@ fn track_row_contents(
         x += cols.plays;
     }
 
-    // Heart.
+    // Heart: green when the song is in Liked Songs or any of the
+    // account's playlists, and a click opens the checklist of them.
     if cols.heart > 0.0 {
-        let saved = app.is_saved(row.item.uri());
         let heart_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.heart, row_height));
         if row.item.is_track() {
+            let saved = app.saved_anywhere(row.item.uri());
+            let popup_id = ui.id().with(("row-heart", row.index));
             let mut child = ui.new_child(
                 UiBuilder::new()
                     .max_rect(heart_rect)
                     .layout(Layout::centered_and_justified(egui::Direction::LeftToRight)),
             );
             if !hovered
-                && saved != Some(true)
+                && !(saved && row.show_saved_heart)
+                && !egui::Popup::is_id_open(ui.ctx(), popup_id)
                 && !child.memory(|memory| memory.has_focus(child.next_auto_id()))
             {
                 child.set_opacity(0.0);
             }
-            // A liked heart stays green under the pointer.
-            let (icon, color, hover) = if saved == Some(true) {
+            // A green heart stays green under the pointer.
+            let (icon, color, hover) = if saved {
                 (Icon::HeartFilled, palette.accent, palette.accent_hover)
             } else {
                 (Icon::Heart, palette.secondary, palette.text)
             };
-            let tooltip = if saved == Some(true) {
-                gettext(app.locale, "Remove from Liked Songs")
-            } else {
-                gettext(app.locale, "Save to Liked Songs")
+            let response = theme::icon_button(
+                &mut child,
+                icon,
+                16.0,
+                color,
+                hover,
+                &gettext(app.locale, "Add to playlist"),
+            );
+            let containing = match row.context {
+                RowContext::Context {
+                    editable_playlist: Some((id, _)),
+                    ..
+                }
+                | RowContext::View {
+                    editable_playlist: Some((id, _)),
+                    ..
+                } => Some(id.as_str()),
+                _ => None,
             };
-            if theme::icon_button(&mut child, icon, 16.0, color, hover, &tooltip).clicked() {
-                app.actions
-                    .push(Action::ToggleSaved(row.item.uri().to_string()));
-            }
+            heart_menu(ui, app, &response, popup_id, row.item, containing);
         }
         x += cols.heart;
     }
 
     // Duration.
-    let duration_rect = Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
-    painter.text(
-        pos2(duration_rect.right() - 6.0, duration_rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        util::format_duration_ms(row.item.duration_ms()),
-        theme::regular(13.0),
-        palette.secondary,
-    );
-    x += cols.duration;
+    if cols.duration > 0.0 {
+        if !queue_menu || !row.item.needs_queue_details() {
+            let duration_rect =
+                Rect::from_min_size(pos2(x, rect.top()), vec2(cols.duration, row_height));
+            painter.text(
+                pos2(duration_rect.right() - 6.0, duration_rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                util::format_duration_ms(row.item.duration_ms()),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        }
+        x += cols.duration;
+    }
 
     // More.
     // The row's menu stays alive while it is open: when the button existed
@@ -2321,6 +3200,7 @@ fn track_row_contents(
                 )
             });
     }
+    ui.set_opacity(opacity);
 
     // Row interactions.
     let mut pick = None;
@@ -2370,39 +3250,60 @@ fn track_row_contents(
             });
         }
     }
-    egui::Popup::context_menu(&response)
-        .frame(menu_frame(&palette))
-        .show(|ui| {
-            // Right-clicking one of several picked rows acts on all of
-            // them; on anything else it is the ordinary single-song menu,
-            // including a picked row that is the only one picked.
-            if row.picked && row.picked_songs.len() > 1 {
-                // Every picked row shares this table's context, so one
-                // editable playlist covers the whole selection, including
-                // a sorted or filtered view where removal stays URI-based.
-                let editable = match row.context {
-                    RowContext::Context {
-                        editable_playlist: Some(playlist),
+    let mut menu = egui::Popup::context_menu(&response);
+    // Artist and album links take the click from the row. In the queue
+    // panel, a secondary click over those links still opens the song menu.
+    // The release that made the click names the row, wherever the pointer
+    // moved after it within the frame.
+    let clip = ui.clip_rect();
+    let secondary_release_here = ui.input(|input| {
+        input.pointer.button_clicked(egui::PointerButton::Secondary)
+            && input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed: false,
                         ..
-                    }
-                    | RowContext::View {
-                        editable_playlist: Some(playlist),
-                        ..
-                    } => Some(playlist),
-                    _ => None,
-                };
-                picked_menu(ui, app, row.picked_songs, row.picked_positions, editable);
-            } else {
-                item_menu_at(
-                    ui,
-                    app,
-                    row.item,
-                    Some(row.context),
-                    Some(row.index),
-                    row.position,
-                );
-            }
-        });
+                    } if rect.contains(*pos) && clip.contains(*pos)
+                )
+            })
+    });
+    if queue_menu && ui.is_enabled() && secondary_release_here {
+        menu = menu.open_memory(egui::SetOpenCommand::Bool(true));
+    }
+    menu.frame(menu_frame(&palette)).show(|ui| {
+        // Right-clicking one of several picked rows acts on all of
+        // them; on anything else it is the ordinary single-song menu,
+        // including a picked row that is the only one picked.
+        if row.picked && row.picked_songs.len() > 1 {
+            // Every picked row shares this table's context, so one
+            // editable playlist covers the whole selection, including
+            // a sorted or filtered view where removal stays URI-based.
+            let editable = match row.context {
+                RowContext::Context {
+                    editable_playlist: Some(playlist),
+                    ..
+                }
+                | RowContext::View {
+                    editable_playlist: Some(playlist),
+                    ..
+                } => Some(playlist),
+                _ => None,
+            };
+            picked_menu(ui, app, row.picked_songs, row.picked_positions, editable);
+        } else {
+            item_menu_at(
+                ui,
+                app,
+                row.item,
+                Some(row.context),
+                Some(row.index),
+                row.position,
+            );
+        }
+    });
     crate::autoscroll::row(ui, &response);
     (response, pick)
 }
@@ -2548,12 +3449,16 @@ pub fn table_header(
     show_added: bool,
     show_added_by: bool,
     show_plays: bool,
+    show_released: bool,
+    show_duration: bool,
     show_cover: bool,
     sort: Option<crate::model::TableSort>,
-) -> Option<crate::model::SortColumn> {
+) -> (Option<crate::model::SortColumn>, egui::Response) {
     use crate::model::SortColumn;
     let width = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    // A secondary click anywhere on the headings opens the caller's menu
+    // of columns, so the row and every heading answer it.
+    let (rect, mut menu_response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
     let font = theme::regular(12.0);
     let color = palette.secondary;
     let mut clicked = None;
@@ -2568,6 +3473,7 @@ pub fn table_header(
         let head =
             Rect::from_min_size(top_left, size + vec2(arrow_room, 0.0)).expand2(vec2(4.0, 8.0));
         let response = ui.interact(head, ui.id().with(("table-header", text)), Sense::click());
+        menu_response = menu_response.union(response.clone());
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::WidgetType::Button,
@@ -2613,6 +3519,7 @@ pub fn table_header(
         }
     };
     let mut number_clicked = false;
+    let number_response;
     let mut x = rect.left() + 8.0;
     {
         let number = Rect::from_center_size(pos2(x + 22.0, rect.center().y), vec2(30.0, 22.0));
@@ -2659,6 +3566,7 @@ pub fn table_header(
                 egui::Stroke::NONE,
             ));
         }
+        number_response = response.clone();
         if response
             .on_hover_text(gettext(locale, "Original order, reversed"))
             .clicked()
@@ -2676,54 +3584,64 @@ pub fn table_header(
         &pgettext(locale, "column heading", "TITLE"),
         SortColumn::Title,
     );
-    let medium = width > 560.0;
-    let wide = width > 760.0;
-    let album_width = if show_album && medium {
-        (width * 0.28).clamp(140.0, 360.0)
-    } else {
-        0.0
-    };
-    let added_width = if show_added && wide { 120.0 } else { 0.0 };
-    let extra_wide = width > 920.0;
-    let added_by_width = if show_added_by && extra_wide {
-        130.0
-    } else {
-        0.0
-    };
     let plays_width = if show_plays && plays_fit(width) {
         PLAYS_WIDTH
     } else {
         0.0
     };
-    let right_fixed = 36.0 + 56.0 + 36.0 + 8.0;
-    let mut cx =
-        rect.right() - right_fixed - plays_width - added_width - added_by_width - album_width;
-    if album_width > 0.0 {
+    let duration_width = if show_duration { 56.0 } else { 0.0 };
+    let right_fixed = 36.0 + duration_width + 36.0 + 8.0;
+    let cover_width = if show_cover { 52.0 } else { 0.0 };
+    let optional = optional_columns(
+        width,
+        width - 44.0 - cover_width - plays_width - right_fixed,
+        show_album,
+        show_added,
+        show_added_by,
+        show_released,
+    );
+    let mut cx = rect.right()
+        - right_fixed
+        - plays_width
+        - optional.released
+        - optional.added
+        - optional.added_by
+        - optional.album;
+    if optional.album > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "ALBUM"),
             SortColumn::Album,
         );
-        cx += album_width;
+        cx += optional.album;
     }
-    if added_by_width > 0.0 {
+    if optional.added_by > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "ADDED BY"),
             SortColumn::AddedBy,
         );
-        cx += added_by_width;
+        cx += optional.added_by;
     }
-    if added_width > 0.0 {
+    if optional.added > 0.0 {
         heading(
             ui,
             cx,
             &pgettext(locale, "column heading", "DATE ADDED"),
             SortColumn::Added,
         );
-        cx += added_width;
+        cx += optional.added;
+    }
+    if optional.released > 0.0 {
+        heading(
+            ui,
+            cx,
+            &pgettext(locale, "column heading", "RELEASE DATE"),
+            SortColumn::Released,
+        );
+        cx += optional.released;
     }
     if plays_width > 0.0 {
         heading(
@@ -2736,54 +3654,58 @@ pub fn table_header(
     if number_clicked {
         clicked = Some(SortColumn::Index);
     }
-    let clock = Rect::from_center_size(
-        pos2(rect.right() - 36.0 - 56.0 / 2.0 - 6.0, rect.center().y),
-        Vec2::splat(15.0),
-    );
-    let duration_active = sort.is_some_and(|sort| sort.column == SortColumn::Duration);
-    let response = ui.interact(
-        clock.expand(8.0),
-        ui.id().with("table-header-duration"),
-        Sense::click(),
-    );
-    response.widget_info(|| {
-        egui::WidgetInfo::labeled(
-            egui::WidgetType::Button,
-            ui.is_enabled(),
-            gettext(locale, "Sort by duration"),
-        )
-    });
-    theme::focus_ring(ui, &response);
-    let clock_color = if duration_active {
-        palette.accent
-    } else if response.hovered() {
-        palette.text
-    } else {
-        color
-    };
-    Icon::Clock.image(clock_color, 15.0).paint_at(ui, clock);
-    if let Some(sort) = sort.filter(|sort| sort.column == SortColumn::Duration) {
-        let center = pos2(clock.right() + 9.0, rect.center().y);
-        let (wing, tip) = if sort.ascending {
-            (2.8, -3.2)
+    menu_response = menu_response.union(number_response);
+    if show_duration {
+        let clock = Rect::from_center_size(
+            pos2(rect.right() - 36.0 - 56.0 / 2.0 - 6.0, rect.center().y),
+            Vec2::splat(15.0),
+        );
+        let duration_active = sort.is_some_and(|sort| sort.column == SortColumn::Duration);
+        let response = ui.interact(
+            clock.expand(8.0),
+            ui.id().with("table-header-duration"),
+            Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(
+                egui::WidgetType::Button,
+                ui.is_enabled(),
+                gettext(locale, "Sort by duration"),
+            )
+        });
+        theme::focus_ring(ui, &response);
+        let clock_color = if duration_active {
+            palette.accent
+        } else if response.hovered() {
+            palette.text
         } else {
-            (-2.8, 3.2)
+            color
         };
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![
-                center + vec2(-4.0, wing),
-                center + vec2(4.0, wing),
-                center + vec2(0.0, tip),
-            ],
-            clock_color,
-            egui::Stroke::NONE,
-        ));
-    }
-    if response
-        .on_hover_text(gettext(locale, "Sort by duration"))
-        .clicked()
-    {
-        clicked = Some(SortColumn::Duration);
+        Icon::Clock.image(clock_color, 15.0).paint_at(ui, clock);
+        if let Some(sort) = sort.filter(|sort| sort.column == SortColumn::Duration) {
+            let center = pos2(clock.right() + 9.0, rect.center().y);
+            let (wing, tip) = if sort.ascending {
+                (2.8, -3.2)
+            } else {
+                (-2.8, 3.2)
+            };
+            ui.painter().add(egui::Shape::convex_polygon(
+                vec![
+                    center + vec2(-4.0, wing),
+                    center + vec2(4.0, wing),
+                    center + vec2(0.0, tip),
+                ],
+                clock_color,
+                egui::Stroke::NONE,
+            ));
+        }
+        menu_response = menu_response.union(response.clone());
+        if response
+            .on_hover_text(gettext(locale, "Sort by duration"))
+            .clicked()
+        {
+            clicked = Some(SortColumn::Duration);
+        }
     }
     ui.painter().hline(
         rect.x_range().shrink(8.0),
@@ -2791,7 +3713,7 @@ pub fn table_header(
         Stroke::new(1.0, palette.outline),
     );
     ui.add_space(6.0);
-    clicked
+    (clicked, menu_response)
 }
 
 /// Lays out text limited to `max_rows` lines, ending with an ellipsis.
@@ -3035,7 +3957,7 @@ pub fn linked_shelf(
     clicked
 }
 
-fn shelf_cards(ui: &mut Ui, id: &str, add_contents: impl FnOnce(&mut Ui)) {
+pub(super) fn shelf_cards(ui: &mut Ui, id: &str, add_contents: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     crate::autoscroll::show(
         ui,
@@ -3400,8 +4322,9 @@ pub fn thin_slider(
         let fill = if active { palette.accent } else { palette.text };
         ui.painter().rect_filled(filled, 2.0, fill);
         if active {
+            let radius = (width / 24.0).clamp(3.5, 6.0);
             ui.painter()
-                .circle_filled(pos2(filled.right(), bar.center().y), 6.0, palette.text);
+                .circle_filled(pos2(filled.right(), bar.center().y), radius, palette.text);
         }
     }
     event
@@ -4084,6 +5007,71 @@ mod tests {
     use crate::paths::AppDirs;
     use crate::settings::Settings;
 
+    /// Covers are fetched two screens past the rows on screen each way,
+    /// nearest last, and never for a row wholly on screen or past the list.
+    #[test]
+    fn covers_ahead_reach_two_screens_each_way_nearest_last() {
+        let clip = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 100.0));
+        // Scrolled 50 rows of 10 points down a list of 100.
+        let rows_at = |shift: f32| {
+            let clip = clip.translate(vec2(0.0, shift));
+            laid_out_rows(clip, -500.0, 100, 10.0)
+        };
+        assert_eq!(rows_at(0.0), (49, 61));
+        let (first, last) = whole_rows(clip, -500.0, 100, 10.0);
+        assert_eq!((first, last), (50, 60));
+        let reach = clip.height() * COVERS_AHEAD;
+        let (above, below) = (rows_at(-reach).0, rows_at(reach).1);
+        assert_eq!((above, below), (29, 81));
+        let ahead: Vec<usize> = rows_ahead(first, last, above, below).collect();
+        assert_eq!(ahead.len(), 42);
+        assert_eq!(&ahead[..2], &[29, 80], "the farthest first");
+        assert_eq!(&ahead[40..], &[49, 60], "the nearest last");
+        assert!(ahead.iter().all(|row| !(first..last).contains(row)));
+        // At the top of the list only the rows below are fetched.
+        let ahead: Vec<usize> = rows_ahead(0, 10, 0, 31).collect();
+        assert_eq!(ahead, (10..31).rev().collect::<Vec<_>>());
+        // A list shorter than the screen fetches nothing more.
+        assert_eq!(rows_ahead(0, 5, 0, 5).count(), 0);
+    }
+
+    /// Covers are fetched ahead once those of the rows wholly on screen
+    /// have arrived. The list paints, and so asks for, the cover of each of
+    /// those rows, but not of a row whose cover is off screen: the one
+    /// `virtual_rows` lays out on either side for Tab, or one only partly
+    /// on screen. Waiting on those would wait forever.
+    #[test]
+    fn covers_ahead_wait_only_for_covers_the_list_asks_for() {
+        let clip = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 100.0));
+        // Scrolled 50.5 rows of 10 points down a list of 100, so rows 50
+        // and 60 are half on screen and 49 and 61 wholly off it.
+        let start_y = -505.0;
+        assert_eq!(laid_out_rows(clip, start_y, 100, 10.0), (49, 62));
+        let (first, last) = whole_rows(clip, start_y, 100, 10.0);
+        assert_eq!((first, last), (51, 60));
+        for row in first..last {
+            let top = start_y + row as f32 * 10.0;
+            assert!(
+                clip.top() <= top && top + 10.0 <= clip.bottom(),
+                "row {row}"
+            );
+        }
+        let ahead: Vec<usize> = rows_ahead(first, last, 29, 82).collect();
+        assert_eq!(
+            &ahead[ahead.len() - 4..],
+            &[49, 61, 50, 60],
+            "the nearest last"
+        );
+        // A list shorter than a row waits for nothing, and fetches every
+        // row within reach.
+        let sliver = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 5.0));
+        let (first, last) = whole_rows(sliver, -502.0, 100, 10.0);
+        assert_eq!(first, last);
+        let mut ahead: Vec<usize> = rows_ahead(first, last, 48, 53).collect();
+        ahead.sort_unstable();
+        assert_eq!(ahead, (48..53).collect::<Vec<_>>());
+    }
+
     #[test]
     fn editing_a_proxy_endpoint_clears_its_password_but_password_entry_is_preserved() {
         for label in ["Host", "Port", "Username", "Password"] {
@@ -4726,6 +5714,69 @@ mod tests {
         assert_eq!(painted[0], 0);
     }
 
+    /// The covers fetched ahead of a card grid are counted in its own
+    /// columns.
+    #[test]
+    fn card_grids_fetch_covers_by_their_own_columns() {
+        assert_eq!(grid_columns(100.0), 1);
+        assert_eq!(grid_columns(CARD_WIDTH * 2.0 + CARD_GAP / 2.0), 2);
+        assert_eq!(grid_columns(CARD_WIDTH * 2.0 + CARD_GAP / 2.0 - 1.0), 1);
+        let (mut tops, mut width) = (Vec::new(), 0.0);
+        let size = vec2(800.0, 400.0);
+        run(
+            size,
+            Rect::from_min_size(pos2(0.0, 0.0), size),
+            Vec::new(),
+            |ui| {
+                width = ui.available_width();
+                virtual_wrapped_cards(ui, 40, 180.0, |ui, _| tops.push(ui.min_rect().top()));
+            },
+        );
+        let first_row = tops.iter().take_while(|top| (**top - tops[0]).abs() < 0.5);
+        assert_eq!(first_row.count(), grid_columns(width));
+        assert!(grid_columns(width) > 1);
+    }
+
+    /// Passing over a card asks for nothing; resting on it asks once per
+    /// visit.
+    #[test]
+    fn a_card_asks_for_its_page_once_the_pointer_rests_on_it() {
+        let ctx = egui::Context::default();
+        let frame = |time: f64, pointer: Option<egui::Pos2>| {
+            let mut rested = [false; 2];
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 100.0))),
+                    events: pointer.map(egui::Event::PointerMoved).into_iter().collect(),
+                    ..Default::default()
+                },
+                |ui| {
+                    for (index, left) in [0.0, 150.0].into_iter().enumerate() {
+                        let rect = Rect::from_min_size(pos2(left, 0.0), vec2(100.0, 100.0));
+                        let id = egui::Id::new(("rest-card", index));
+                        let response = ui.interact(rect, id, Sense::click());
+                        rested[index] = rested_on(ui, &response);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+            rested
+        };
+        assert_eq!(frame(0.0, Some(pos2(50.0, 50.0))), [false; 2]);
+        assert_eq!(
+            frame(0.1, None),
+            [false; 2],
+            "passing over asks for nothing"
+        );
+        assert_eq!(frame(0.4, None), [true, false]);
+        assert_eq!(frame(0.5, None), [false; 2], "once per visit");
+        assert_eq!(frame(0.6, Some(pos2(200.0, 50.0))), [false; 2]);
+        assert_eq!(frame(0.7, Some(pos2(50.0, 50.0))), [false; 2]);
+        assert_eq!(frame(0.8, None), [false; 2], "a new visit starts again");
+        assert_eq!(frame(1.1, None), [true, false]);
+    }
+
     fn song(uri: &str) -> PlayableItem {
         PlayableItem::Track(Track {
             uri: uri.to_string(),
@@ -4774,6 +5825,8 @@ mod tests {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays: false,
+                                    show_released: false,
+                                    show_duration: true,
                                     compact: false,
                                     thin: false,
                                     shift: 0.0,
@@ -4781,6 +5834,7 @@ mod tests {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: false,
                                 },
                             );
                             rect = response.rect;
@@ -4837,6 +5891,119 @@ mod tests {
         }
     }
 
+    /// A removed song keeps its cover, album and dates but has no title, so
+    /// every cell of a row that cannot play fades, not only the title.
+    #[test]
+    fn a_song_that_cannot_play_fades_its_whole_row() {
+        let song = |is_playable| {
+            PlayableItem::Track(Track {
+                uri: "spotify:track:removed".to_string(),
+                name: "Gone".to_string(),
+                explicit: true,
+                duration_ms: 200_000,
+                artists: vec![ArtistRef {
+                    name: "Someone".to_string(),
+                    ..Default::default()
+                }],
+                album: Some(Album {
+                    id: "album".to_string(),
+                    name: "WOW".to_string(),
+                    ..Default::default()
+                }),
+                is_playable,
+                ..Default::default()
+            })
+        };
+        let mut app = test_app();
+        app.backend.shutdown();
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        theme::apply(&ctx, &app.palette);
+        let context = RowContext::Queue;
+        // The strongest alpha each piece of text is drawn with.
+        let mut strengths = |item: &PlayableItem| {
+            let mut draw = || {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            vec2(760.0, 520.0),
+                        )),
+                        events: vec![egui::Event::PointerGone],
+                        ..Default::default()
+                    },
+                    |ui| {
+                        track_row_response(
+                            ui,
+                            &mut app,
+                            TrackRow {
+                                index: 0,
+                                number: Some(1),
+                                item,
+                                context: &context,
+                                show_cover: true,
+                                show_album: true,
+                                added_at: None,
+                                added_by: None,
+                                show_added_by: false,
+                                show_plays: false,
+                                show_released: false,
+                                show_duration: true,
+                                compact: false,
+                                thin: false,
+                                shift: 0.0,
+                                picked: false,
+                                picked_songs: &[],
+                                picked_positions: &[],
+                                position: None,
+                                show_saved_heart: false,
+                            },
+                        );
+                    },
+                );
+                output.textures_delta.clear();
+                output
+            };
+            draw();
+            let output = draw();
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) => {
+                        let alpha = text
+                            .galley
+                            .rows
+                            .iter()
+                            .flat_map(|placed| placed.row.visuals.mesh.vertices.iter())
+                            .map(|vertex| match vertex.color {
+                                Color32::PLACEHOLDER => {
+                                    text.override_text_color.unwrap_or(text.fallback_color)
+                                }
+                                color => color,
+                            })
+                            .map(|color| color.a())
+                            .max()?;
+                        Some((text.galley.text().to_string(), alpha))
+                    }
+                    _ => None,
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let shown = strengths(&song(None));
+        let faded = strengths(&song(Some(false)));
+        for text in ["1", "Gone", "Someone", "WOW", "3:20"] {
+            let (Some(&before), Some(&after)) = (shown.get(text), faded.get(text)) else {
+                panic!("{text} is drawn in both rows: {shown:?} {faded:?}");
+            };
+            assert!(
+                f32::from(after) <= f32::from(before) * UNAVAILABLE_ROW_OPACITY + 1.0,
+                "{text} fades with its row: {before} -> {after}"
+            );
+        }
+        assert!(app.actions.is_empty());
+    }
+
     #[test]
     fn dragging_a_picked_row_carries_the_whole_selection() {
         let first = song("spotify:track:first");
@@ -4865,6 +6032,7 @@ mod tests {
                 }),
             ],
             from: None,
+            queue_origin: None,
             source_playlist: None,
         };
         assert_eq!(drag_label(Locale::English, &track), "Kora Panna + 1 more");
@@ -5139,5 +6307,136 @@ mod tests {
             .unwrap();
         assert_eq!(meta.options, crate::images::COVER_TEXTURE);
         assert_eq!(meta.options.mipmap_mode, Some(egui::TextureFilter::Linear));
+    }
+}
+
+#[cfg(test)]
+mod list_edge_tests {
+    use super::*;
+
+    fn item(top: f32) -> Rect {
+        Rect::from_min_size(pos2(0.0, top), vec2(100.0, 20.0))
+    }
+
+    #[test]
+    fn a_row_fades_out_by_its_nearer_edge_of_the_list() {
+        let view = Rect::from_min_size(egui::Pos2::ZERO, vec2(100.0, 200.0));
+        assert_eq!(edge_opacity(item(0.0), view, 12.0), 0.0, "at the top");
+        assert_eq!(edge_opacity(item(6.0), view, 12.0), 0.5, "half way in");
+        assert_eq!(edge_opacity(item(12.0), view, 12.0), 1.0, "a band inside");
+        assert_eq!(edge_opacity(item(90.0), view, 12.0), 1.0, "in the middle");
+        assert_eq!(edge_opacity(item(180.0), view, 12.0), 0.0, "at the bottom");
+        assert_eq!(edge_opacity(item(-30.0), view, 12.0), 0.0, "scrolled past");
+    }
+
+    #[test]
+    fn a_list_row_the_edge_cuts_still_shows_what_is_inside() {
+        let view = Rect::from_min_size(egui::Pos2::ZERO, vec2(100.0, 200.0));
+        let at = |top: f32| list_edge_opacity(item(top), view, 12.0);
+        assert_eq!(at(12.0), 1.0, "a band inside");
+        assert_eq!(at(90.0), 1.0, "in the middle");
+        assert_eq!(at(168.0), 1.0, "a band above the bottom");
+        assert_eq!(at(0.0), at(180.0), "both edges alike");
+        assert!(at(180.0) > 0.5 && at(180.0) < 1.0, "whole at the bottom");
+        assert!(at(190.0) > 0.0 && at(190.0) < at(180.0), "half cut");
+        assert!(at(-10.0) > 0.0 && at(-10.0) < at(0.0), "half gone");
+        assert_eq!(at(200.0), 0.0, "below the list");
+        assert_eq!(at(-20.0), 0.0, "scrolled past");
+    }
+
+    #[test]
+    fn only_a_list_that_asks_for_it_fades_its_edges() {
+        let ctx = egui::Context::default();
+        let mut seen = Vec::new();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            seen.clear();
+            ui.set_clip_rect(Rect::from_min_size(ui.cursor().min, vec2(200.0, 100.0)));
+            seen.push(edge_faded(ui, 20.0, |ui| ui.opacity()));
+            fade_list_edges(ui, 12.0, |ui| {
+                seen.push(edge_faded(ui, 20.0, |ui| ui.opacity()));
+                ui.add_space(12.0);
+                seen.push(edge_faded(ui, 20.0, |ui| ui.opacity()));
+            });
+            seen.push(ui.opacity());
+            seen.push(edge_faded(ui, 20.0, |ui| ui.opacity()));
+        });
+        output.textures_delta.clear();
+        let view = Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 100.0));
+        let at_edge = list_edge_opacity(item(0.0), view, 12.0);
+        assert!(at_edge < 1.0);
+        assert_eq!(seen, [1.0, at_edge, 1.0, 1.0, 1.0]);
+    }
+}
+
+#[cfg(test)]
+mod playing_bars_tests {
+    use super::*;
+
+    #[test]
+    fn the_playing_bars_move_apart_and_stay_inside_the_mark() {
+        let mut last = playing_bar_halves(0.0);
+        assert!(
+            last.windows(2).all(|pair| pair[0] != pair[1]),
+            "each bar keeps its own rhythm: {last:?}"
+        );
+        for step in 1..=300 {
+            let halves = playing_bar_halves(f64::from(step) * 0.05);
+            for (bar, half) in halves.iter().enumerate() {
+                // A 24 unit icon with 1 unit caps leaves 10 units each way.
+                assert!((1.5..=9.0).contains(half), "bar {bar}, step {step}");
+                assert_ne!(*half, last[bar], "bar {bar} stood still at step {step}");
+            }
+            last = halves;
+        }
+    }
+
+    #[test]
+    fn the_playing_bars_keep_one_slow_pace_and_stop_unseen() {
+        use crate::power::Budget;
+        use std::time::Duration;
+        // The repaint delay egui is left with after a playing row's fourth
+        // pass. A new context repaints at once for its first passes, and a
+        // new area asks for one more.
+        let delay = |budget, reduced| {
+            let ctx = egui::Context::default();
+            crate::motion::apply(&ctx, reduced);
+            let mut last = Duration::ZERO;
+            for frame in 1..=4 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(f64::from(frame) / 60.0),
+                        screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(64.0))),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::splat(16.0));
+                        playing_bars(ui, rect, 16.0, Color32::GREEN, budget);
+                    },
+                );
+                output.textures_delta.clear();
+                last = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            }
+            last
+        };
+        // egui takes its predicted frame time off a delayed repaint, and the
+        // bars add it back, so what is left is their own pace.
+        let normal = delay(Budget::Normal, false);
+        assert!(
+            (Duration::from_millis(60)..Duration::from_millis(70)).contains(&normal),
+            "about 15 frames a second: {normal:?}"
+        );
+        let saver = delay(Budget::Saver, false);
+        assert!(
+            (Duration::from_millis(60)..Duration::from_millis(70)).contains(&saver),
+            "and as many while saving energy or out of focus: {saver:?}"
+        );
+        assert!(
+            delay(Budget::Background, false) > Duration::from_secs(1),
+            "no frames while nobody can see the window"
+        );
+        assert!(
+            delay(Budget::Normal, true) > Duration::from_secs(1),
+            "still bars, and no frames, when less motion is asked for"
+        );
     }
 }

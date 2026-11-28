@@ -467,6 +467,8 @@ fn songs(app: &mut App, ui: &mut egui::Ui, results: &SearchResults, limit: usize
                 added_by: None,
                 show_added_by: false,
                 show_plays: false,
+                show_released: false,
+                show_duration: true,
                 compact: limit != usize::MAX,
                 thin: false,
                 shift: 0.0,
@@ -474,6 +476,7 @@ fn songs(app: &mut App, ui: &mut egui::Ui, results: &SearchResults, limit: usize
                 picked_songs: &[],
                 picked_positions: &[],
                 position: None,
+                show_saved_heart: false,
             },
         );
     }
@@ -573,6 +576,8 @@ fn album_card(app: &mut App, ui: &mut egui::Ui, album: &crate::api::models::Albu
     if card.clicked {
         app.actions
             .push(Action::Open(Page::Album(album.id.clone())));
+    } else if widgets::rested_on(ui, &card.response) {
+        app.actions.push(Action::PreloadAlbum(album.id.clone()));
     }
     egui::Popup::context_menu(&card.response)
         .id(ui.make_persistent_id(("search-album-menu", &album.uri)))

@@ -13,6 +13,7 @@ use crate::model::{
     Action, Dialog, DragTrack, Loadable, Page, PagedList, RowContext, RowPick, SortColumn,
     TableItem, TableRowsCache, TableSort, TopPeriod,
 };
+use crate::settings::TrackColumns;
 use crate::theme::{self, Icon, Palette};
 use crate::util;
 
@@ -491,12 +492,16 @@ pub fn actions_row(
                             app.actions.push(Action::SaveRadio(seed.clone()));
                         }
                     } else {
-                        widgets::context_menu_items(
+                        // A playlist's own page also chooses its columns.
+                        let columns = (util::uri_kind(uri) == Some("playlist"))
+                            .then_some(app.settings.track_columns);
+                        widgets::context_menu_items_with_columns(
                             ui,
                             app,
                             uri,
                             actions.name,
                             actions.owned_playlist.as_ref(),
+                            columns,
                         );
                     }
                     if let Some((page, loading)) = &actions.reload {
@@ -818,6 +823,14 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
     );
     let thin = app.settings.tracklist_compact;
     let show_cover = !thin && table.show_cover;
+    // Playlists and Liked Songs show the columns the listener chose, from
+    // the menu on their headings. Other lists keep their own.
+    let chosen = matches!(table.page, Page::Playlist(_) | Page::LikedSongs)
+        .then_some(app.settings.track_columns);
+    let show_album = table.show_album && chosen.is_none_or(|columns| columns.album);
+    let show_added = table.show_added && chosen.is_none_or(|columns| columns.added);
+    let show_released = chosen.is_some_and(|columns| columns.released);
+    let show_duration = chosen.is_none_or(|columns| columns.duration);
     let row_height = if thin {
         theme::THIN_ROW_HEIGHT
     } else {
@@ -828,19 +841,25 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
         .pagination
         .filter(|page| page.total > 0 && sort.is_none() && needle.is_empty());
     let rows = finite.map_or(entry.visible.len(), |page| page.total as usize);
-    if rows > 0
-        && let Some(column) = widgets::table_header(
+    let heading = (rows > 0).then(|| {
+        widgets::table_header(
             ui,
             &palette,
             app.locale,
-            table.show_album,
-            table.show_added,
+            show_album,
+            show_added,
             table.show_added_by,
             table.show_plays,
+            show_released,
+            show_duration,
             show_cover,
             sort,
         )
-    {
+    });
+    if let (Some((_, response)), Some(columns)) = (&heading, chosen) {
+        column_menu(app, response, columns);
+    }
+    if let Some((Some(column), _)) = heading {
         let next = next_sort(sort, column);
         match next {
             Some(sort) => {
@@ -969,6 +988,11 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
     let mut row_responses = Vec::new();
     let mut missing = None;
     let mut retry_shown = false;
+    if show_cover {
+        widgets::warm_row_covers(ui, app, rows, row_height, false, |row| {
+            item_index(row).map(|index| &table.items[index].0)
+        });
+    }
     widgets::virtual_rows(ui, rows, row_height, |ui, row| {
         let Some(index) = item_index(row) else {
             let unavailable = finite.is_some_and(|page| {
@@ -1041,12 +1065,14 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 item,
                 context: &context,
                 show_cover,
-                show_album: table.show_album,
+                show_album,
                 // Rows reserve the column only where the header does.
-                added_at: added_at.as_deref().filter(|_| table.show_added),
-                added_by: added_by.as_deref(),
+                added_at: added_at.as_deref().filter(|_| show_added),
+                added_by: added_by.as_ref(),
                 show_added_by: table.show_added_by,
                 show_plays: table.show_plays,
+                show_released,
+                show_duration,
                 compact: false,
                 thin,
                 shift,
@@ -1054,6 +1080,7 @@ fn table_contents(app: &mut App, ui: &mut egui::Ui, table: Table<'_>) {
                 picked_songs: &picked_songs,
                 picked_positions: &picked_positions,
                 position: playlist_position(&table, index),
+                show_saved_heart: false,
             },
         );
         row_responses.push((row, response));
@@ -1565,7 +1592,11 @@ fn view_indices(
             }),
             SortColumn::Album => sort_by_album(&mut visible, sort.ascending, items),
             SortColumn::AddedBy => sort_by_text_key(&mut visible, sort.ascending, |index| {
-                items[index].2.as_deref().unwrap_or_default().to_lowercase()
+                items[index]
+                    .2
+                    .as_ref()
+                    .map(|(_, name)| name.to_lowercase())
+                    .unwrap_or_default()
             }),
             SortColumn::Plays => visible.sort_by_key(|&index| {
                 let count = play_counts.get(items[index].0.uri()).copied();
@@ -1579,10 +1610,13 @@ fn view_indices(
                     },
                 )
             }),
-            SortColumn::Added | SortColumn::Index | SortColumn::Duration => {
+            SortColumn::Added | SortColumn::Index | SortColumn::Duration | SortColumn::Released => {
                 visible.sort_by(|a, b| {
                     let ordering = match sort.column {
                         SortColumn::Added => items[*a].1.cmp(&items[*b].1),
+                        SortColumn::Released => {
+                            release_date(&items[*a].0).cmp(&release_date(&items[*b].0))
+                        }
                         SortColumn::Index => a.cmp(b),
                         SortColumn::Duration => {
                             items[*a].0.duration_ms().cmp(&items[*b].0.duration_ms())
@@ -1599,6 +1633,26 @@ fn view_indices(
         }
     }
     visible
+}
+
+/// The menu a secondary click on a playlist's headings opens: a checklist
+/// of the columns its song list can show. It stays open for more changes
+/// until a click outside it.
+fn column_menu(app: &mut App, heading: &egui::Response, columns: TrackColumns) {
+    let palette = app.palette;
+    egui::Popup::context_menu(heading)
+        .id(egui::Id::new("track-columns-menu"))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .frame(widgets::menu_frame(&palette))
+        .show(|ui| widgets::track_column_checks(ui, app, columns));
+}
+
+/// The release date of a song's album, as Spotify sent it with the song.
+fn release_date(item: &PlayableItem) -> Option<&str> {
+    match item {
+        PlayableItem::Track(track) => track.album.as_ref()?.release_date.as_deref(),
+        PlayableItem::Episode(_) => None,
+    }
 }
 
 fn total_duration(items: &[TableItem]) -> u64 {
@@ -1629,14 +1683,15 @@ fn playlist_rows(
                 .as_ref()
                 .and_then(|user| user.id.as_deref())
                 .map(|id| {
-                    if Some(id) == owner_id {
+                    let name = if Some(id) == owner_id {
                         owner_name.to_string()
                     } else {
                         names
                             .get(id)
                             .and_then(|name| name.clone())
                             .unwrap_or_else(|| id.to_string())
-                    }
+                    };
+                    (id.to_string(), name)
                 });
             positions.push(start + index);
             rows.push((playable, item.added_at.clone(), adder));
@@ -1915,8 +1970,11 @@ pub fn playlist(app: &mut App, ui: &mut egui::Ui, id: &str) {
             let owner_id = playlist.owner.id.as_deref();
             let others = other_adders(owner_id, &page.contributors, &user_id);
             let made_together = playlist.collaborative || !others.is_empty();
-            let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
-            if let Some(saves) = playlist.followers.as_ref().map(|followers| followers.total) {
+            let mut byline = vec![(
+                owner_name(app, playlist).to_string(),
+                playlist.owner.id.clone().map(Page::User),
+            )];
+            if let Some(saves) = playlist.shown_saves() {
                 byline.push((saves_text(app.locale, saves), None));
             }
             if !others.is_empty() {
@@ -2282,12 +2340,31 @@ pub fn album(app: &mut App, ui: &mut egui::Ui, id: &str) {
 
 fn playlist_loading_hero(app: &mut App, ui: &mut egui::Ui, playlist: &Playlist) {
     let images = hero_images(&playlist.images, None, false, HeroArt::of(app));
-    let mut byline = vec![(owner_name(app, playlist).to_string(), None)];
+    let mut byline = vec![(
+        owner_name(app, playlist).to_string(),
+        playlist.owner.id.clone().map(Page::User),
+    )];
     let count = playlist.track_total();
     if count > 0 {
         byline.push((song_count(app.locale, count), None));
     }
     playlist_hero(app, ui, playlist, images, byline, playlist.collaborative);
+}
+
+/// What a playlist's header calls it, as Spotify's own app does.
+fn playlist_kind(locale: Locale, playlist: &Playlist, collaborative: bool) -> Cow<'static, str> {
+    if collaborative {
+        gettext(locale, "Collaborative Playlist")
+    } else if playlist.public == Some(true) || playlist.owned_by_spotify() {
+        // Spotify's own lists say "private" only of where they show on the
+        // listener's profile, and saving one can flip that; the official
+        // app calls them public either way.
+        gettext(locale, "Public Playlist")
+    } else if playlist.public == Some(false) {
+        gettext(locale, "Private Playlist")
+    } else {
+        gettext(locale, "Playlist")
+    }
 }
 
 fn playlist_hero<'a>(
@@ -2318,13 +2395,7 @@ fn playlist_hero<'a>(
         Hero {
             images,
             liked: false,
-            kind: if collaborative {
-                gettext(app.locale, "Collaborative Playlist")
-            } else if playlist.public == Some(true) {
-                gettext(app.locale, "Public Playlist")
-            } else {
-                gettext(app.locale, "Playlist")
-            },
+            kind: playlist_kind(app.locale, playlist, collaborative),
             title: &playlist.name,
             description: playlist.description.clone(),
             byline,
@@ -2791,6 +2862,35 @@ mod tests {
     use super::*;
     use crate::api::models::{Album, ArtistRef, Image, Track};
     use crate::model::PlaylistPage;
+
+    /// A playlist's header calls it what Spotify's own app does: Spotify's
+    /// own lists are public whether saved or not.
+    #[test]
+    fn a_playlist_is_called_what_spotify_calls_it() {
+        let cases = [
+            ("alice", Some(false), false, "Private Playlist"),
+            ("alice", Some(true), false, "Public Playlist"),
+            ("alice", None, false, "Playlist"),
+            ("spotify", Some(false), false, "Public Playlist"),
+            ("spotify", Some(true), false, "Public Playlist"),
+            ("alice", Some(false), true, "Collaborative Playlist"),
+        ];
+        for (owner, public, collaborative, expected) in cases {
+            let playlist = Playlist {
+                owner: crate::api::models::Owner {
+                    id: Some(owner.into()),
+                    ..Default::default()
+                },
+                public,
+                ..Default::default()
+            };
+            assert_eq!(
+                playlist_kind(Locale::English, &playlist, collaborative),
+                expected,
+                "{owner}, {public:?}"
+            );
+        }
+    }
 
     /// A 2x display: the hero asks for 640, a card for 300.
     const TEST_HERO_ART: HeroArt = HeroArt {
@@ -3687,7 +3787,7 @@ mod tests {
                 (
                     PlayableItem::Track(track),
                     Some(format!("2024-01-0{i}")),
-                    Some(format!("User {i}")),
+                    Some((format!("u_{i}"), format!("User {i}"))),
                 )
             })
             .collect()
@@ -3781,7 +3881,7 @@ mod tests {
             };
             track.name = label.into();
             track.album.as_mut().unwrap().name = label.into();
-            item.2 = Some(label.into());
+            item.2 = Some((label.into(), label.into()));
         }
 
         for column in [SortColumn::Title, SortColumn::Album, SortColumn::AddedBy] {

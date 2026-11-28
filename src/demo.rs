@@ -354,6 +354,7 @@ pub fn populate(app: &mut App) {
     app.local_playback = crate::backend::LocalPlayback::Ready {
         device_id: "local-demo".into(),
     };
+    app.demo_profiles = true;
     app.user = Some(User {
         id: "demo".into(),
         display_name: Some("Carmine".into()),
@@ -884,9 +885,65 @@ fn sample_lyrics() -> crate::lyrics::Lyrics {
     }
 }
 
+pub(crate) fn load_profile(app: &mut App) {
+    use crate::session_reads::{ProfileEntry, ProfileView, UserProfile};
+    let page = &mut app.profile;
+    if page.own {
+        page.top_tracks = Loadable::Loaded((0..6).map(track).collect());
+        page.top_artists = Loadable::Loaded((0..6).map(artist).collect());
+    }
+    if !page.has_session {
+        return;
+    }
+    let people: Vec<_> = demo_friends()
+        .into_iter()
+        .filter_map(|friend| {
+            Some(ProfileEntry {
+                page: Page::from_uri(&friend.user_uri)?,
+                name: friend.user_name,
+                image: friend.image_url,
+            })
+        })
+        .collect();
+    let mut following = people.clone();
+    let artist = artist(0);
+    following.push(ProfileEntry {
+        page: Page::Artist(artist.id),
+        name: artist.name,
+        image: artist.images.first().map(|i| i.url.clone()),
+    });
+    let playlists = (0..3)
+        .map(playlist)
+        .map(|p| ProfileEntry {
+            page: Page::Playlist(p.id),
+            name: p.name,
+            image: p.images.first().map(|i| i.url.clone()),
+        })
+        .collect();
+    let user = if page.own {
+        UserProfile::default()
+    } else {
+        UserProfile {
+            name: people
+                .iter()
+                .find(|e| e.page == Page::User(page.id.clone()))
+                .map(|e| e.name.clone()),
+            image_url: None,
+        }
+    };
+    page.view = Loadable::Loaded(ProfileView {
+        user,
+        playlist_count: Some(3),
+        playlists: Some(playlists),
+        followers_count: Some(people.len() as u64),
+        following_count: Some(following.len() as u64),
+        followers: people,
+        following,
+    });
+}
+
 /// Invented friends for `--demo-show friends`: one listening now, long
 /// titles in two scripts, and each kind of place a song plays from.
-#[cfg(feature = "demo")]
 fn demo_friends() -> Vec<crate::session_reads::FriendActivity> {
     let now = jiff::Timestamp::now().as_millisecond();
     let friend = |name: &str,
@@ -1689,11 +1746,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 });
             }
             "create" => {
-                app.dialog = Some(Dialog::CreatePlaylist {
-                    name: "Autumn drives".into(),
-                    public: false,
-                    add_uris: vec!["spotify:track:trk1".into()],
-                })
+                app.dialog = Some(Dialog::new_playlist(
+                    "Autumn drives".into(),
+                    vec!["spotify:track:trk1".into()],
+                ))
             }
             "duplicate" => {
                 app.dialog = Some(Dialog::ConfirmPlaylistDuplicates {
@@ -2301,6 +2357,33 @@ mod tests {
             .expect("screen-reader tree")
     }
 
+    /// A long description scrolls inside New playlist, so Create and Cancel
+    /// stay in a short window.
+    #[test]
+    fn a_long_description_keeps_new_playlist_buttons_in_the_window() {
+        use egui::accesskit::Role;
+        let (ctx, mut app) = accessible_app("new-playlist-long-description");
+        let mut dialog = Dialog::new_playlist("Road trip".into(), Vec::new());
+        if let Dialog::CreatePlaylist { description, .. } = &mut dialog {
+            *description = "A line of the description.\n".repeat(60);
+        }
+        app.dialog = Some(dialog);
+        let height = 480.0;
+        accessible_frame_height(&ctx, &mut app, vec![], height);
+        let tree = accessible_frame_height(&ctx, &mut app, vec![], height);
+        for label in ["Create", "Cancel"] {
+            let button = accessible_node(&tree, label, Role::Button);
+            let bounds = tree
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == button)
+                .and_then(|(_, node)| node.bounds())
+                .unwrap();
+            assert!(bounds.y1 <= f64::from(height), "{label} at {bounds:?}");
+        }
+        app.backend.shutdown();
+    }
+
     #[test]
     fn artist_upcoming_card_opens_countdown_without_saving_or_playing() {
         let (ctx, mut app) = accessible_app("artist-upcoming");
@@ -2362,6 +2445,22 @@ mod tests {
         tree.nodes
             .iter()
             .find(|(_, node)| node.label() == Some(label) && node.role() == role)
+            .unwrap_or_else(|| panic!("missing {label:?} with role {role:?}"))
+            .0
+    }
+
+    /// The lowest node with `label` and `role`. Every heart reads Add to
+    /// playlist, so this finds the player bar's below any row's.
+    fn lowest_node(
+        tree: &egui::accesskit::TreeUpdate,
+        label: &str,
+        role: egui::accesskit::Role,
+    ) -> egui::accesskit::NodeId {
+        let top = |node: &egui::accesskit::Node| node.bounds().map_or(0.0, |rect| rect.y0);
+        tree.nodes
+            .iter()
+            .filter(|(_, node)| node.label() == Some(label) && node.role() == role)
+            .max_by(|(_, a), (_, b)| top(a).total_cmp(&top(b)))
             .unwrap_or_else(|| panic!("missing {label:?} with role {role:?}"))
             .0
     }
@@ -2864,12 +2963,12 @@ mod tests {
                 let tree = accessible_frame(&ctx, &mut app, vec![]);
                 accessible_node(&tree, &gettext(locale, next), Role::Button);
             }
-            // A liked song's heart opens a checklist where unchecking Liked
-            // Songs and choosing Done unlikes it; the heart then likes it at
-            // once (#792).
+            // The heart opens a checklist where unchecking Liked Songs and
+            // choosing Done unlikes the song. The heart of a song saved
+            // nowhere opens the same checklist rather than liking it at once.
             let click = |ctx: &egui::Context, app: &mut App, label: &'static str| {
                 let tree = accessible_frame(ctx, app, vec![]);
-                let button = accessible_node(&tree, &gettext(locale, label), Role::Button);
+                let button = lowest_node(&tree, &gettext(locale, label), Role::Button);
                 accessible_frame(
                     ctx,
                     app,
@@ -2893,14 +2992,23 @@ mod tests {
             assert_eq!(app.is_saved(&now), Some(true), "a check waits for Done");
             click(&ctx, &mut app, "Done");
             assert_eq!(app.is_saved(&now), Some(false));
-            click(&ctx, &mut app, "Save to Liked Songs");
+            click(&ctx, &mut app, "Add to playlist");
+            assert_eq!(app.is_saved(&now), Some(false), "no like at once");
+            let tree = accessible_frame(&ctx, &mut app, vec![]);
+            let liked = accessible_node(&tree, &gettext(locale, "Liked Songs"), Role::CheckBox);
+            accessible_frame(
+                &ctx,
+                &mut app,
+                vec![accessible_action(liked, AccessibleAction::Click, None)],
+            );
+            click(&ctx, &mut app, "Done");
             assert_eq!(app.is_saved(&now), Some(true));
             let tree = accessible_frame(&ctx, &mut app, vec![]);
             assert!(
                 !tree.nodes.iter().any(|(_, node)| {
                     node.label() == Some(gettext(locale, "Filter playlists").as_ref())
                 }),
-                "liking a song does not open the menu"
+                "Done closes the menu"
             );
 
             app.remote = None;
@@ -2942,6 +3050,20 @@ mod tests {
                 .map(|item| item.uri().to_string())
                 .collect();
             let saved_uris = app.queue_playlist_uris();
+            let context_heading = if app.playing_from().is_some() {
+                "Next from:"
+            } else {
+                "Next up"
+            };
+            let painted = view_frame(&ctx, &mut app, vec![], crate::ui::queue::side_panel);
+            for source in ["Next in queue", context_heading] {
+                assert!(
+                    painted
+                        .iter()
+                        .any(|(text, _)| text == &gettext(locale, source)),
+                    "missing translated queue heading: {source}"
+                );
+            }
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
             let save = accessible_node(&tree, &gettext(locale, "Save as a playlist"), Role::Button);
@@ -2954,6 +3076,7 @@ mod tests {
                 name,
                 public,
                 add_uris,
+                ..
             }) = &app.dialog
             else {
                 panic!("saving the translated queue must open the existing playlist dialog");
@@ -2993,7 +3116,7 @@ mod tests {
 
     #[test]
     fn translated_lyrics_controls_keep_follow_retry_and_fullscreen_actions() {
-        use crate::i18n::{Locale, gettext, pgettext};
+        use crate::i18n::{Locale, gettext};
         use clap::ValueEnum;
         use egui::accesskit::{Action as AccessibleAction, Role};
 
@@ -3006,8 +3129,7 @@ mod tests {
             app.lyrics_following = false;
             accessible_frame(&ctx, &mut app, vec![]);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let follow =
-                accessible_node(&tree, &pgettext(locale, "lyrics", "Follow"), Role::Button);
+            let follow = accessible_node(&tree, &gettext(locale, "Sync lyrics"), Role::Button);
             accessible_frame(
                 &ctx,
                 &mut app,
@@ -3025,8 +3147,7 @@ mod tests {
             assert!(app.lyrics_fullscreen.is_some());
             app.lyrics_following = false;
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let follow =
-                accessible_node(&tree, &pgettext(locale, "lyrics", "Follow"), Role::Button);
+            let follow = accessible_node(&tree, &gettext(locale, "Sync lyrics"), Role::Button);
             accessible_frame(
                 &ctx,
                 &mut app,
@@ -3069,6 +3190,43 @@ mod tests {
             assert!(!app.show_lyrics_panel);
             app.backend.shutdown();
         }
+    }
+
+    /// Sync lyrics returns to the playing line, so only timed lyrics have it,
+    /// in the side panel and in full screen.
+    #[test]
+    fn sync_lyrics_shows_only_for_timed_lyrics() {
+        use egui::accesskit::Role;
+        let (ctx, mut app) = accessible_app("sync-lyrics-timed-only");
+        app.show_lyrics_panel = true;
+        app.lyrics_uri = app.now_playing().map(|now| now.uri);
+        let has_sync = |tree: &egui::accesskit::TreeUpdate| {
+            tree.nodes
+                .iter()
+                .any(|(_, node)| node.label() == Some("Sync lyrics") && node.role() == Role::Button)
+        };
+        for fullscreen in [false, true] {
+            app.lyrics_fullscreen = fullscreen.then_some(false);
+            for synced in [true, false] {
+                let mut lyrics = sample_lyrics();
+                lyrics.synced = synced;
+                if !synced {
+                    for line in &mut lyrics.lines {
+                        line.at_ms = None;
+                    }
+                }
+                app.lyrics = Loadable::Loaded(Some(lyrics));
+                app.lyrics_following = false;
+                accessible_frame(&ctx, &mut app, vec![]);
+                let tree = accessible_frame(&ctx, &mut app, vec![]);
+                assert_eq!(
+                    has_sync(&tree),
+                    synced,
+                    "synced={synced}, fullscreen={fullscreen}"
+                );
+            }
+        }
+        app.backend.shutdown();
     }
 
     #[test]
@@ -3122,7 +3280,7 @@ mod tests {
                     let painted = view_frame(&ctx, &mut app, vec![], view);
                     for message in messages {
                         assert!(
-                            painted.iter().any(|(text, _)| text == &message),
+                            painted.iter().any(|(text, _)| one_line(text) == message),
                             "{locale:?}: missing {message}"
                         );
                     }
@@ -3670,6 +3828,7 @@ mod tests {
                 image: None,
                 items: vec![song],
                 from: None,
+                queue_origin: None,
                 source_playlist: None,
             },
         );
@@ -3733,6 +3892,7 @@ mod tests {
                     ..Default::default()
                 })],
                 from: None,
+                queue_origin: None,
                 source_playlist: None,
             },
         );
@@ -4759,6 +4919,8 @@ mod tests {
                                 added_by: None,
                                 show_added_by: false,
                                 show_plays: false,
+                                show_released: false,
+                                show_duration: true,
                                 compact: false,
                                 thin: false,
                                 shift: 0.0,
@@ -4766,6 +4928,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -4867,6 +5030,8 @@ mod tests {
                                     added_by: None,
                                     show_added_by: false,
                                     show_plays: false,
+                                    show_released: false,
+                                    show_duration: true,
                                     compact: false,
                                     thin: false,
                                     shift: 0.0,
@@ -4874,6 +5039,7 @@ mod tests {
                                     picked_songs: &[],
                                     picked_positions: &[],
                                     position: None,
+                                    show_saved_heart: false,
                                 },
                             );
                         });
@@ -4990,6 +5156,8 @@ mod tests {
                                 added_by: None,
                                 show_added_by: false,
                                 show_plays: false,
+                                show_released: false,
+                                show_duration: true,
                                 compact: false,
                                 thin: false,
                                 shift: 0.0,
@@ -4997,6 +5165,7 @@ mod tests {
                                 picked_songs: &[],
                                 picked_positions: &[],
                                 position: None,
+                                show_saved_heart: false,
                             },
                         );
                     }
@@ -5179,6 +5348,11 @@ mod tests {
         frame_events(ctx, app, Vec::new());
     }
 
+    /// A lyric line drawn on its rows, read back as the one line it is.
+    fn one_line(text: &str) -> String {
+        text.replace('\n', " ")
+    }
+
     /// Where a line of lyrics was drawn, in a frame of full screen lyrics.
     fn lyric_at(ctx: &egui::Context, app: &mut App, line: &str) -> egui::Pos2 {
         let input = egui::RawInput {
@@ -5194,7 +5368,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|shape| match &shape.shape {
-                egui::Shape::Text(text) if text.galley.job.text == line => {
+                egui::Shape::Text(text) if one_line(&text.galley.job.text) == line => {
                     Some(text.pos + text.galley.size() / 2.0)
                 }
                 _ => None,
@@ -5261,11 +5435,11 @@ mod tests {
         (ctx, app)
     }
 
-    /// The cover opens MilkDrop alone; any click brings back just what was
-    /// there; the controls come with the mouse and go again.
+    /// The immersive view hides the lyrics, shows controls on movement,
+    /// and restores the original backdrop on exit.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn the_cover_opens_milkdrop_alone_and_any_click_comes_back() {
+    fn immersive_milkdrop_restores_the_previous_backdrop() {
         use egui::PointerButton::Primary;
         const LINE: &str = "Streetlights blinking down the river road";
         const BAR: &str = "1:23";
@@ -5277,9 +5451,13 @@ mod tests {
             timed_output(ctx, app, t, events)
         };
         let (text, _) = step(&ctx, &mut app, vec![egui::Event::PointerMoved(cover)]);
-        assert!(text.iter().any(|text| text == LINE), "lyrics to begin with");
+        assert!(
+            text.iter().any(|text| one_line(text) == LINE),
+            "lyrics to begin with"
+        );
         step(&ctx, &mut app, Vec::new());
-        step(&ctx, &mut app, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        step(&ctx, &mut app, Vec::new());
         assert!(
             !app.settings.lyrics_milkdrop,
             "the backdrop's memory is safe"
@@ -5309,13 +5487,14 @@ mod tests {
         assert!(!app.immersive());
         assert!(!app.milkdrop_behind_lyrics(), "off as it was, not toggled");
         let text = timed(&ctx, &mut app, 41.2, Vec::new());
-        assert!(text.iter().any(|text| text == LINE));
+        assert!(text.iter().any(|text| one_line(text) == LINE));
 
         // With the backdrop on, it stays on.
         app.actions.push(Action::ToggleLyricsMilkdrop);
         timed(&ctx, &mut app, 45.0, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 45.1, Vec::new());
-        timed(&ctx, &mut app, 45.2, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 45.2, Vec::new());
         timed(&ctx, &mut app, 45.3, Vec::new());
         timed(&ctx, &mut app, 45.4, Vec::new());
         assert!(app.immersive());
@@ -5328,7 +5507,8 @@ mod tests {
         // Esc leaves full screen as ever, and the backdrop as it was.
         timed(&ctx, &mut app, 49.8, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 49.9, Vec::new());
-        timed(&ctx, &mut app, 50.0, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 50.0, Vec::new());
         timed(&ctx, &mut app, 50.1, Vec::new());
         timed(&ctx, &mut app, 50.2, Vec::new());
         assert!(app.immersive());
@@ -5350,7 +5530,8 @@ mod tests {
         // V stays a choice of its own: MilkDrop off, and remembered.
         timed(&ctx, &mut app, 54.8, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 54.9, Vec::new());
-        timed(&ctx, &mut app, 55.0, pointer_click(cover, Primary));
+        app.actions.push(Action::EnterImmersive);
+        timed(&ctx, &mut app, 55.0, Vec::new());
         timed(&ctx, &mut app, 55.1, Vec::new());
         timed(&ctx, &mut app, 55.2, Vec::new());
         assert!(app.immersive());
@@ -5369,10 +5550,66 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// With no MilkDrop, or no art to click, nothing changes.
+    /// A line that starts under a scroll that moves nothing, at the top of
+    /// the lyrics, is still scrolled to once the wheel is quiet.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn a_still_scroll_leaves_a_new_line_to_follow() {
+        const FIRST: &str = "Streetlights blinking down the river road";
+        for fullscreen in [None, Some(false)] {
+            let name = format!("still-scroll-{}", fullscreen.is_some());
+            let (ctx, mut app) = accessible_app(&name);
+            app.backend.set_offline(true);
+            play_here(&mut app);
+            app.local.playback = crate::player::Playback::Paused;
+            app.local.position_ms = 0;
+            app.show_lyrics_panel = true;
+            app.lyrics_fullscreen = fullscreen;
+            app.lyrics_uri = app.now_playing().map(|now| now.uri);
+            app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
+            app.lyrics_following = true;
+            app.lyrics_line_shown = None;
+            let at = lyric_at(&ctx, &mut app, FIRST);
+            assert_eq!(app.lyrics_line_shown, Some(None), "{fullscreen:?}");
+            // The first line starts in the frame the wheel turns up.
+            app.local.position_ms = 40_000;
+            frame_events(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, 50.0),
+                        modifiers: egui::Modifiers::NONE,
+                        phase: egui::TouchPhase::Move,
+                    },
+                ],
+            );
+            assert_ne!(
+                app.lyrics_line_shown,
+                Some(Some(0)),
+                "{fullscreen:?}: the scroll frame does not count the line as shown"
+            );
+            for _ in 0..120 {
+                frame(&ctx, &mut app);
+                if app.lyrics_line_shown == Some(Some(0)) {
+                    break;
+                }
+            }
+            assert_eq!(app.lyrics_line_shown, Some(Some(0)), "{fullscreen:?}");
+            assert!(
+                app.lyrics_following,
+                "{fullscreen:?}: nothing moved by hand"
+            );
+            app.backend.shutdown();
+        }
+    }
+
+    /// Artwork clicks leave the backdrop alone, including when MilkDrop is ready.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn the_cover_changes_nothing_without_milkdrop_or_art() {
+    fn clicking_the_lyrics_cover_leaves_the_backdrop_alone() {
         use crate::milkdrop::pane::Picture;
         use egui::PointerButton::Primary;
         let (ctx, mut app) = immersive_app("immersive-none");
@@ -5387,12 +5624,8 @@ mod tests {
         assert!(!app.immersive());
         assert!(!app.milkdrop_behind_lyrics(), "and the backdrop as it was");
 
-        let (ctx, mut app) = immersive_app("immersive-no-art");
-        if let Some(remote) = &mut app.remote
-            && let Some(PlayableItem::Track(track)) = &mut remote.state.item
-        {
-            track.album = None;
-        }
+        app.backend.shutdown();
+        let (ctx, mut app) = immersive_app("immersive-with-art");
         timed(&ctx, &mut app, 10.0, vec![egui::Event::PointerMoved(cover)]);
         timed(&ctx, &mut app, 10.1, Vec::new());
         timed(&ctx, &mut app, 10.2, pointer_click(cover, Primary));
@@ -5402,11 +5635,11 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// A click on nothing in full screen lyrics is the backdrop's switch, and
-    /// nothing else that happens there touches it.
+    /// The header button switches the backdrop. Clicking the lyrics or
+    /// empty space leaves it alone.
     #[cfg(feature = "milkdrop")]
     #[test]
-    fn only_a_click_on_nothing_switches_the_lyrics_backdrop() {
+    fn the_lyrics_header_button_switches_the_backdrop() {
         use egui::PointerButton::Primary;
         let (ctx, mut app) = accessible_app("lyrics-backdrop-click");
         app.backend.set_offline(true);
@@ -5436,14 +5669,33 @@ mod tests {
             let mut output = ctx.run_ui(input, |ui| app.frame_ui(ui));
             output.textures_delta.clear();
         };
+        let toggle_backdrop = |ctx: &egui::Context, app: &mut App| {
+            let tree = accessible_frame(ctx, app, vec![]);
+            let button = accessible_node(
+                &tree,
+                "Toggle MilkDrop background (V)",
+                egui::accesskit::Role::Button,
+            );
+            accessible_frame(
+                ctx,
+                app,
+                vec![accessible_action(
+                    button,
+                    egui::accesskit::Action::Click,
+                    None,
+                )],
+            );
+        };
+        toggle_backdrop(&ctx, &mut app);
+        assert!(app.milkdrop_behind_lyrics());
+        assert!(app.settings.lyrics_milkdrop);
+        assert!(!app.immersive());
+        toggle_backdrop(&ctx, &mut app);
+        assert!(!app.milkdrop_behind_lyrics());
+
         run(&ctx, &mut app, vec![egui::Event::PointerMoved(empty)]);
         run(&ctx, &mut app, pointer_click(empty, Primary));
-        assert!(app.milkdrop_behind_lyrics(), "a click turns it on");
-        assert!(app.settings.lyrics_milkdrop, "remembered as V is");
-        run(&ctx, &mut app, Vec::new());
-        run(&ctx, &mut app, pointer_click(empty, Primary));
-        assert!(!app.milkdrop_behind_lyrics(), "and off");
-        run(&ctx, &mut app, Vec::new());
+        assert!(!app.milkdrop_behind_lyrics());
 
         // A drag is no click.
         let press = |pos, pressed| egui::Event::PointerButton {
@@ -5474,12 +5726,11 @@ mod tests {
         run(&ctx, &mut app, pointer_click(line, Primary));
         assert!(!app.milkdrop_behind_lyrics(), "an untimed line");
 
-        // A double click is two clicks, back where it started, and leaves
-        // nothing: full screen has no double click of its own.
+        // A double click in empty space leaves both modes as they are.
         run(&ctx, &mut app, vec![egui::Event::PointerMoved(empty)]);
         frame_clicks_close_together(&ctx, &mut app, empty);
         assert!(app.lyrics_fullscreen.is_some());
-        assert!(!app.milkdrop_behind_lyrics(), "off, on, off");
+        assert!(!app.milkdrop_behind_lyrics());
 
         // The bar's button is a control: it leaves and comes back, and the
         // backdrop stays out of it.
@@ -5898,6 +6149,81 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// In a heart's checklist the keyboard reaches Liked Songs like any
+    /// playlist: Down chooses it, a filter finds it, Enter toggles it.
+    #[test]
+    fn the_keyboard_checks_liked_songs_in_a_hearts_checklist() {
+        use crate::ui::widgets::{Mark, PlaylistChecks};
+
+        let (ctx, mut app) = accessible_app("heart-checklist-keys");
+        app.backend.set_offline(true);
+        let owner = app.user_id().unwrap().to_string();
+        app.library.playlists = Loadable::Loaded(vec![Playlist {
+            id: "drive".into(),
+            uri: "spotify:playlist:drive".into(),
+            name: "Night drive".into(),
+            owner: crate::api::models::Owner {
+                id: Some(owner),
+                ..Default::default()
+            },
+            ..Default::default()
+        }]);
+        let item = PlayableItem::Track(track(0));
+        let items = vec![item.clone()];
+        let mut checks = PlaylistChecks::new(&app, &item, None);
+        assert!(checks.liked, "the demo likes this song");
+        let mut query = String::new();
+        let mut draw = |app: &mut App, checks: &mut PlaylistChecks, focus: bool, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760.0, 620.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let field = crate::ui::widgets::playlist_picker(
+                        ui,
+                        app,
+                        &items,
+                        &mut query,
+                        Some(checks),
+                    );
+                    if focus {
+                        field.request_focus();
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        };
+        let key = |key| vec![keyboard(key, egui::Modifiers::NONE)];
+
+        // #when Down chooses the first row and Enter is pressed
+        draw(&mut app, &mut checks, true, vec![]);
+        // The focused field claims the arrow keys as it is drawn.
+        draw(&mut app, &mut checks, false, vec![]);
+        draw(&mut app, &mut checks, false, key(egui::Key::ArrowDown));
+        draw(&mut app, &mut checks, false, key(egui::Key::Enter));
+        // #then Liked Songs, which leads a liked song's list, is unchecked
+        assert!(!checks.liked);
+
+        // #when a filter finds it and Enter is pressed
+        draw(
+            &mut app,
+            &mut checks,
+            false,
+            vec![egui::Event::Text("liked".into())],
+        );
+        draw(&mut app, &mut checks, false, key(egui::Key::Enter));
+        // #then it is checked again, and nothing else changed
+        assert!(checks.liked);
+        assert_ne!(checks.mark("drive"), Mark::Checked);
+        assert!(app.actions.is_empty(), "nothing changes before Done");
+        app.backend.shutdown();
+    }
+
     /// In the heart's checklist a click checks a playlist instead of adding
     /// to it, a playlist holding the song starts checked, one not read in
     /// full is marked as unknown rather than lacking it, and Done adds to
@@ -5931,7 +6257,7 @@ mod tests {
             },
         );
         let items = vec![item.clone()];
-        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let mut checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unknown, "never read");
         let mut query = String::new();
         let mut draw = |app: &mut App, events| {
@@ -5999,7 +6325,7 @@ mod tests {
                 ..PlaylistPage::default()
             },
         );
-        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item);
+        let checks = crate::ui::widgets::PlaylistChecks::new(&app, &item, None);
         assert_eq!(checks.mark("drive"), Mark::Unchecked, "all rows read");
         app.backend.shutdown();
     }
@@ -6073,6 +6399,87 @@ mod tests {
         click(&mut app, "Done", Role::Button);
         assert_eq!(asked(&app), ["drive", "day"]);
         assert_eq!(app.is_saved(&now), Some(true), "it stays liked");
+        app.backend.shutdown();
+    }
+
+    /// The checklist lists the song's own playlists first. Liked Songs
+    /// leads them while the song is liked and follows them when it is not.
+    #[test]
+    fn the_hearts_checklist_lists_the_songs_own_playlists_first() {
+        use egui::accesskit::{Action as AccessibleAction, Role};
+
+        let (ctx, mut app) = accessible_app("heart-checklist-order");
+        app.backend.set_offline(true);
+        let owner = app.user_id().unwrap().to_string();
+        let make = |id: &str, name: &str| Playlist {
+            id: id.into(),
+            uri: format!("spotify:playlist:{id}"),
+            name: name.into(),
+            owner: crate::api::models::Owner {
+                id: Some(owner.clone()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        app.library.playlists = Loadable::Loaded(vec![
+            make("a", "Alpha"),
+            make("b", "Beta"),
+            make("c", "Gamma"),
+        ]);
+        let now = app.now_playing().unwrap().uri;
+        let all = ["a", "b", "c"].map(|id| (id.to_string(), None::<String>));
+        let read = |app: &mut App, id: &str, uris: Vec<String>, at: i64| {
+            app.membership.start_reads(&all);
+            app.membership.receive(id, Ok((uris, Some(at))));
+        };
+        read(&mut app, "a", Vec::new(), 1_000);
+        read(&mut app, "b", Vec::new(), 2_000);
+        read(&mut app, "c", vec![now.clone()], 500);
+        let names = ["Liked Songs", "Alpha", "Beta", "Gamma"];
+        let open = |app: &mut App| {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let heart = lowest_node(&tree, "Add to playlist", Role::Button);
+            let open = accessible_action(heart, AccessibleAction::Click, None);
+            accessible_frame(&ctx, app, vec![open]);
+            // A menu's first frame only measures it.
+            accessible_frame(&ctx, app, vec![]);
+        };
+        let rows = |app: &mut App| -> Vec<String> {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let mut rows: Vec<(f64, String)> = tree
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == Role::CheckBox)
+                .filter_map(|(_, node)| Some((node.bounds()?.y0, node.label()?.to_string())))
+                .collect();
+            rows.retain(|(_, label)| names.contains(&label.as_str()));
+            rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+            rows.into_iter().map(|(_, label)| label).collect()
+        };
+        let close = |app: &mut App| {
+            let tree = accessible_frame(&ctx, app, vec![]);
+            let cancel = lowest_node(&tree, "Cancel", Role::Button);
+            let close = accessible_action(cancel, AccessibleAction::Click, None);
+            accessible_frame(&ctx, app, vec![close]);
+        };
+        // The song's own playlist leads; the rest follow, the one a song was
+        // last added to first.
+        app.saved.insert(now.clone(), true);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Liked Songs", "Gamma", "Beta", "Alpha"]);
+        close(&mut app);
+        app.saved.insert(now, false);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Beta", "Alpha"]);
+        // A read landing while the list is open moves no row; the next
+        // opening takes it.
+        app.membership.seen("a", Some("newer"));
+        read(&mut app, "a", Vec::new(), 3_000);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Beta", "Alpha"]);
+        close(&mut app);
+        open(&mut app);
+        assert_eq!(rows(&mut app), ["Gamma", "Liked Songs", "Alpha", "Beta"]);
+        close(&mut app);
         app.backend.shutdown();
     }
 
@@ -6490,6 +6897,8 @@ mod tests {
                         added_by: None,
                         show_added_by: false,
                         show_plays: false,
+                        show_released: false,
+                        show_duration: true,
                         compact: false,
                         thin: true,
                         shift: 0.0,
@@ -6497,6 +6906,7 @@ mod tests {
                         picked_songs: &[],
                         picked_positions: &[],
                         position: None,
+                        show_saved_heart: false,
                     },
                 );
             }
@@ -6820,12 +7230,17 @@ mod tests {
     }
 
     /// The empty space's tooltip belongs to the empty space: once shown, it
-    /// closes when the pointer moves onto a control drawn over the bar.
+    /// closes when the pointer moves onto a control drawn over the bar. While
+    /// the music plays on another device, it says the visualiser shows only
+    /// music on this computer.
     #[cfg(feature = "demo")]
     #[test]
     fn the_visualizer_tooltip_stays_off_the_player_bar_controls() {
         let (ctx, mut app) = accessible_app("player-bar-tooltip");
         ctx.global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        app.settings.player_bar_vis = crate::settings::PlayerBarVis::Spectrum;
+        play_here(&mut app);
+        app.local.playback = crate::player::Playback::Playing;
         let mut time = 0.0;
         let mut draw = |app: &mut App, pos: egui::Pos2| {
             time += 1.0;
@@ -6858,7 +7273,7 @@ mod tests {
                 .for_each(|clipped| texts(&clipped.shape, &mut found));
             found
         };
-        let tip = "Click to change the visualizer";
+        let tip = "Click to change the visualiser";
 
         // #given the tooltip shown over the empty margin beside the cover
         let empty = egui::pos2(6.0, 796.0);
@@ -6876,6 +7291,118 @@ mod tests {
         // #then the tooltip is gone
         let shown = draw(&mut app, play);
         assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
+
+        // #and with the visualiser off, the empty space offers no tooltip
+        app.settings.player_bar_vis = crate::settings::PlayerBarVis::Off;
+        for _ in 0..3 {
+            draw(&mut app, empty);
+        }
+        let shown = draw(&mut app, empty);
+        assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
+
+        // #and with the music on another device, it says the visualiser shows
+        // only music playing here
+        app.settings.player_bar_vis = crate::settings::PlayerBarVis::Spectrum;
+        app.local.playback = crate::player::Playback::Stopped;
+        for _ in 0..3 {
+            draw(&mut app, empty);
+        }
+        let shown = draw(&mut app, empty);
+        let elsewhere = "The visualiser shows only music playing on this computer";
+        assert!(shown.iter().any(|text| text == elsewhere), "{shown:?}");
+        assert!(!shown.iter().any(|text| text == tip), "{shown:?}");
+        app.backend.shutdown();
+    }
+
+    /// A screen reader hears the Repeat button named by what a click does,
+    /// and its tooltip also says what repeats now.
+    #[cfg(feature = "demo")]
+    #[test]
+    fn the_repeat_button_says_what_repeats_and_what_a_click_does() {
+        use crate::player::RepeatMode;
+        let (ctx, mut app) = accessible_app("repeat-tooltip");
+        ctx.global_style_mut(|style| style.interaction.tooltip_delay = 0.0);
+        play_here(&mut app);
+        app.local.playback = crate::player::Playback::Playing;
+        let mut time = 0.0;
+        let mut draw = |app: &mut App, pos: egui::Pos2| {
+            time += 1.0;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 800.0),
+                    )),
+                    time: Some(time),
+                    events: vec![egui::Event::PointerMoved(pos)],
+                    ..Default::default()
+                },
+                |ui| crate::ui::player_bar::show(app, ui),
+            );
+            output.textures_delta.clear();
+            fn texts(shape: &egui::epaint::Shape, found: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => found.push(text.galley.job.text.clone()),
+                    egui::epaint::Shape::Vec(shapes) => {
+                        shapes.iter().for_each(|shape| texts(shape, found));
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = Vec::new();
+            output
+                .shapes
+                .iter()
+                .for_each(|clipped| texts(&clipped.shape, &mut found));
+            (found, output.platform_output.accesskit_update)
+        };
+        for (mode, name, tip) in [
+            (
+                RepeatMode::Off,
+                "Repeat",
+                "Repeat is off. Click to repeat all.",
+            ),
+            (
+                RepeatMode::Context,
+                "Repeat one",
+                "Repeating all. Click to repeat this song.",
+            ),
+            (
+                RepeatMode::Track,
+                "Repeat off",
+                "Repeating this song. Click to turn repeat off.",
+            ),
+        ] {
+            // #given the song repeating in `mode`
+            app.local.repeat = mode;
+            let away = egui::pos2(640.0, 20.0);
+            draw(&mut app, away);
+            let (_, tree) = draw(&mut app, away);
+
+            // #then the button is named by what a click does
+            let bounds = tree
+                .expect("screen-reader tree")
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.label() == Some(name) && node.role() == egui::accesskit::Role::Button
+                })
+                .and_then(|(_, node)| node.bounds())
+                .unwrap_or_else(|| panic!("missing {name:?}"));
+
+            // #when the pointer rests on it
+            let centre = egui::pos2(
+                (bounds.x0 + bounds.x1) as f32 / 2.0,
+                (bounds.y0 + bounds.y1) as f32 / 2.0,
+            );
+            for _ in 0..3 {
+                draw(&mut app, centre);
+            }
+
+            // #then the tooltip says what repeats now and what a click does
+            let (shown, _) = draw(&mut app, centre);
+            assert!(shown.iter().any(|text| text == tip), "{name}: {shown:?}");
+        }
         app.backend.shutdown();
     }
 
@@ -8632,18 +9159,18 @@ mod tests {
                                 cover: Default::default(),
                             }
                         } else {
-                            Dialog::CreatePlaylist {
-                                name: "Peak Masculinity".into(),
-                                public: false,
-                                add_uris: vec!["spotify:track:trk1".into()],
-                            }
+                            Dialog::new_playlist(
+                                "Peak Masculinity".into(),
+                                vec!["spotify:track:trk1".into()],
+                            )
                         });
                         for _ in 0..3 {
                             let mut output = ctx.run_ui(input.clone(), |ui| app.frame_ui(ui));
                             output.textures_delta.clear();
                         }
                         let dialog = app.dialog_rect.expect("playlist dialog");
-                        let limit = if edit { 600.0 } else { 360.0 };
+                        // Both forms carry a cover and a description.
+                        let limit = 600.0;
                         assert!(
                             dialog.height() <= limit,
                             "edit={edit}, busy={busy}, light={light}, size={size:?}: {dialog:?}"
@@ -8991,11 +9518,10 @@ mod tests {
             app.show_queue_panel = queue;
             app.show_lyrics_panel = lyrics;
             let placed = drawn(&mut app);
+            // The lyrics header holds only its title; Sync lyrics sits
+            // below the words.
             if queue {
                 assert_same_row(&placed, "Queue", "Recent");
-            }
-            if lyrics {
-                assert_same_row(&placed, "Lyrics", "Follow");
             }
         }
         app.backend.shutdown();
@@ -9003,7 +9529,7 @@ mod tests {
 
     /// The queue names where the playing song comes from, on one row
     /// with its label: the playlist, or the song a radio is seeded by.
-    /// With nothing reported, the row is not drawn.
+    /// Without a context it uses Next up.
     #[test]
     fn the_queue_names_where_the_song_plays_from() {
         let root = std::env::temp_dir().join(format!(
@@ -9075,7 +9601,7 @@ mod tests {
         // The name sits to the right of its label on one row. The sidebar
         // draws the same playlist name elsewhere, so look beside the label.
         let beside = |placed: &[(String, egui::Rect)], text: &str| {
-            let label = find(placed, "Playing from");
+            let label = find(placed, "Next from:");
             placed
                 .iter()
                 .find(|(drawn, rect)| {
@@ -9098,15 +9624,16 @@ mod tests {
         }
         beside(&drawn(&mut app), "Rosewood Radio");
 
-        // Nothing reported, nothing named.
+        // Without a context the upcoming section is still named.
         if let Some(remote) = app.remote.as_mut() {
             remote.state.context = None;
         }
         let placed = drawn(&mut app);
         assert!(
-            !placed.iter().any(|(text, _)| text == "Playing from"),
-            "the row hides without a context"
+            !placed.iter().any(|(text, _)| text == "Next from:"),
+            "no context name is shown"
         );
+        find(&placed, "Next up");
         app.backend.shutdown();
     }
 
@@ -9335,7 +9862,7 @@ mod tests {
                         .iter()
                         .find_map(|shape| {
                             if let egui::Shape::Text(text) = &shape.shape
-                                && text.galley.job.text
+                                && one_line(&text.galley.job.text)
                                     == "Streetlights blinking down the river road"
                             {
                                 sung = text.galley.job.sections.first().map(|s| s.format.color);
@@ -9379,7 +9906,7 @@ mod tests {
                 "Audio cache",
                 "Equalizer",
                 "MilkDrop",
-                "Player bar visualizer",
+                "Player bar visualiser",
             ] {
                 let text = settings_text(&ctx, &mut app, title);
                 assert_eq!(
@@ -9436,7 +9963,7 @@ mod tests {
         let (ctx, mut app) = accessible_app("soloist-processing");
         app.settings.soloist_enabled = true;
         app.soloist_audio = true;
-        for title in ["Equalizer", "MilkDrop", "Player bar visualizer"] {
+        for title in ["Equalizer", "MilkDrop", "Player bar visualiser"] {
             let text = settings_text(&ctx, &mut app, title);
             // Windows can observe the owned process but cannot apply EQ to
             // its audible output. Keep the visualizers without promising EQ.
@@ -10170,8 +10697,12 @@ mod tests {
         app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
         app.show_lyrics_panel = true;
         frame(&ctx, &mut app);
+        let palette = app.palette;
         app.lyrics_fullscreen = Some(false);
         frame(&ctx, &mut app);
+        // The queue beside full screen lyrics borrows dark colours only
+        // while it draws.
+        assert_eq!(app.palette, palette);
         app.lyrics_fullscreen = None;
         app.show_lyrics_panel = false;
         for dialog in [
@@ -10180,6 +10711,8 @@ mod tests {
                 name: "x".into(),
                 public: true,
                 add_uris: vec![],
+                cover: Default::default(),
+                description: String::new(),
             },
             Dialog::EditPlaylist {
                 cover: Default::default(),
@@ -10355,6 +10888,7 @@ mod tests {
                     image: None,
                     items: dragged.clone(),
                     from: None,
+                    queue_origin: None,
                     source_playlist: None,
                 },
             );
@@ -10938,13 +11472,14 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// Dropping a dragged song anywhere on the open queue list (side panel
-    /// or full page) queues it. The queue has no positional drop slots, so
-    /// any point in the list works, not just the toggle button.
+    /// A drop at an upcoming row inserts into the context at that position,
+    /// leaving the manual section and the other occurrences intact.
     #[test]
-    fn dropping_a_dragged_song_on_the_open_queue_list_queues_it() {
+    fn dropping_a_dragged_song_on_the_open_queue_list_inserts_at_the_slot() {
         let (ctx, mut app) = accessible_app("queue-list-drop");
         app.show_queue_panel = true;
+        let manual = seed_queued_songs(&mut app);
+        let mut expected = app.queue_origin().unwrap().rows;
         let source_uri = app
             .queue
             .get()
@@ -10958,9 +11493,22 @@ mod tests {
             frame_events(&ctx, &mut app, vec![]);
         }
 
-        // A point well inside the queue side panel's body, clear of its
-        // close/save buttons and tab chips.
-        let end = egui::pos2(1100.0, 300.0);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let bounds = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == egui::accesskit::Role::Button
+                    && node
+                        .label()
+                        .is_some_and(|text| text.starts_with("Play Otomo,"))
+                    && node.bounds().is_some_and(|bounds| bounds.x0 >= 900.0)
+            })
+            .expect("the first context row in the open queue")
+            .1
+            .bounds()
+            .unwrap();
+        let end = egui::pos2(bounds.x0 as f32 + 130.0, bounds.y0 as f32 + 1.0);
 
         let start = egui::pos2(40.0, 755.0);
         frame_events(
@@ -10997,13 +11545,12 @@ mod tests {
             }],
         );
 
-        assert_eq!(app.manual_queue, vec![source_uri]);
+        expected.insert(manual.len(), source_uri);
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual);
         assert!(
-            app.toasts
-                .iter()
-                .any(|toast| toast.message == "1 song added to queue"),
-            "{:?}",
-            app.toasts
+            app.backend.take_queue_requests().is_empty(),
+            "no append as well as the insert"
         );
         app.backend.shutdown();
     }
@@ -11014,8 +11561,10 @@ mod tests {
     /// the queue can be reordered or inserted into positionally.
     fn seed_queued_songs(app: &mut App) -> Vec<String> {
         app.local_ready = true;
+        let now = app.now_playing().unwrap();
         app.local.track = Some(crate::player::LocalTrack {
-            uri: app.now_playing().unwrap().uri,
+            uri: now.uri,
+            title: now.title,
             ..Default::default()
         });
         app.local.playback = crate::player::Playback::Paused;
@@ -11121,9 +11670,8 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// Right-clicking a song under Playing next offers to take it out of
-    /// the queue, and doing so removes that row; a Next up row, which
-    /// plays from the context, offers no such entry (#721).
+    /// The queue menu works on an artist link and removes the chosen row
+    /// from either section.
     #[test]
     fn a_queued_rows_menu_removes_it_from_the_queue() {
         use egui::accesskit::Role;
@@ -11156,27 +11704,56 @@ mod tests {
                 ((bounds.y0 + bounds.y1) / 2.0) as f32,
             )
         };
-        let has_remove = |tree: &egui::accesskit::TreeUpdate| {
-            tree.nodes
-                .iter()
-                .any(|(_, node)| node.label() == Some("Remove from queue"))
-        };
-
         let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let next_up = row_center(&tree, "Otomo");
+        let center = row_center(&tree, "Otomo");
+        let artist = tree
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                let bounds = node.bounds()?;
+                (node.role() == Role::Link
+                    && bounds.x0 >= 900.0
+                    && bounds.y0 <= f64::from(center.y) + 24.0
+                    && bounds.y0 >= f64::from(center.y))
+                .then_some(bounds)
+            })
+            .expect("artist link in the Next up row");
+        let next_up = egui::pos2(
+            ((artist.x0 + artist.x1) / 2.0) as f32,
+            ((artist.y0 + artist.y1) / 2.0) as f32,
+        );
+        let order = |app: &crate::app::App| -> Vec<String> {
+            let queue = &app.queue.get().unwrap().queue;
+            queue.iter().map(|item| item.uri().to_string()).collect()
+        };
+        let mut expected = order(&app);
+        let otomo = app
+            .queue
+            .get()
+            .unwrap()
+            .queue
+            .iter()
+            .position(|item| item.name() == "Otomo")
+            .expect("Otomo is coming up");
+        expected.remove(otomo);
         accessible_frame(
             &ctx,
             &mut app,
             pointer_click(next_up, egui::PointerButton::Secondary),
         );
         let tree = accessible_frame(&ctx, &mut app, vec![]);
-        accessible_node(&tree, "Add to queue", Role::Button);
-        assert!(!has_remove(&tree), "a Next up row cannot be removed");
+        let remove = accessible_node(&tree, "Remove from queue", Role::Button);
         accessible_frame(
             &ctx,
             &mut app,
-            vec![keyboard(egui::Key::Escape, egui::Modifiers::NONE)],
+            vec![accessible_action(
+                remove,
+                egui::accesskit::Action::Click,
+                None,
+            )],
         );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(order(&app), expected, "only Otomo's row left");
 
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         let queued = row_center(&tree, "Queued 1");
@@ -11204,6 +11781,76 @@ mod tests {
                 .is_some_and(|text| text.starts_with("Play Queued 1,"))),
             "the removed row leaves the queue at once"
         );
+        app.backend.shutdown();
+    }
+
+    /// A secondary click on an artist link in Recent opens the song menu,
+    /// as it does in the queue.
+    #[test]
+    fn a_recent_rows_artist_link_opens_the_song_menu() {
+        use egui::accesskit::Role;
+        let (ctx, mut app) = accessible_app("recent-artist-menu");
+        app.show_queue_panel = true;
+        app.queue_tab = QueueTab::Recents;
+        let mut song = track(0);
+        song.name = "Played before".into();
+        let entry = crate::api::models::PlayHistory {
+            track: song,
+            played_at: None,
+            context: None,
+        };
+        app.recents.items = vec![entry.clone()];
+        app.recents_view = std::sync::Arc::from([entry]);
+        app.recents.loaded_once = true;
+        app.recents.complete = true;
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let row = tree
+            .nodes
+            .iter()
+            .find(|(_, node)| {
+                node.role() == Role::Button
+                    && node
+                        .label()
+                        .is_some_and(|text| text.starts_with("Play Played before,"))
+                    && node.bounds().is_some_and(|bounds| bounds.x0 >= 900.0)
+            })
+            .expect("the Recent row in the queue panel")
+            .1
+            .bounds()
+            .unwrap();
+        let center = (row.y0 + row.y1) / 2.0;
+        let artist = tree
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                let bounds = node.bounds()?;
+                (node.role() == Role::Link
+                    && bounds.x0 >= 900.0
+                    && bounds.y0 >= center
+                    && bounds.y0 <= center + 24.0)
+                    .then_some(bounds)
+            })
+            .expect("artist link in the Recent row");
+        let has_menu = |tree: &egui::accesskit::TreeUpdate| {
+            tree.nodes.iter().any(|(_, node)| {
+                node.role() == Role::Button && node.label() == Some("Add to queue")
+            })
+        };
+        assert!(!has_menu(&tree));
+        let pos = egui::pos2(
+            ((artist.x0 + artist.x1) / 2.0) as f32,
+            ((artist.y0 + artist.y1) / 2.0) as f32,
+        );
+        accessible_frame(
+            &ctx,
+            &mut app,
+            pointer_click(pos, egui::PointerButton::Secondary),
+        );
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        assert!(has_menu(&tree), "the song menu opens over the artist link");
         app.backend.shutdown();
     }
 
@@ -11303,104 +11950,20 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// "Next up" plays from the current context, not from a list Spotifast
-    /// can rewrite, so it is never a drop target: dropping a queued row on
-    /// it must not move or insert anything, even though the row sits inside
-    /// the same scrollable list as "Playing next".
     #[test]
-    fn dropping_a_queued_row_on_next_up_does_nothing() {
-        let (ctx, mut app) = accessible_app("queue-reorder-next-up-not-a-target");
+    fn a_manual_row_moves_into_next_up_once() {
+        let (ctx, mut app) = accessible_app("queue-to-next-up");
         app.show_queue_panel = true;
-        let uris = seed_queued_songs(&mut app);
+        let manual = seed_queued_songs(&mut app);
         for _ in 0..3 {
             frame_events(&ctx, &mut app, vec![]);
         }
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        // "Otomo" is also a demo library track shown elsewhere on the page
-        // behind the queue side panel, so match on the queue panel's own
-        // on-screen column (it opens flush against the right edge) rather
-        // than the first node with a matching label.
-        let row_rect = |name: &str| {
-            let prefix = format!("Play {name},");
-            let bounds = tree
-                .nodes
-                .iter()
-                .find(|(_, node)| {
-                    node.role() == egui::accesskit::Role::Button
-                        && node.label().is_some_and(|text| text.starts_with(&prefix))
-                        && node
-                            .bounds()
-                            .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
-                })
-                .unwrap_or_else(|| panic!("missing on-screen queue row {name}"))
-                .1
-                .bounds()
-                .unwrap();
-            egui::Rect::from_min_max(
-                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
-                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
-            )
-        };
-        let start_row = row_rect("Queued 0");
-        let start = egui::pos2(start_row.left() + 80.0, start_row.center().y);
-        // "Otomo" is the first row of "Next up", from the default demo
-        // queue past the three manually queued rows seeded above.
-        let next_up_row = row_rect("Otomo");
-        // The "Next up" heading sits just below Playing next's last row.
-        let heading = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
-            .and_then(|(_, node)| node.bounds())
-            .expect("the Next up heading");
-        let heading = egui::Rect::from_min_max(
-            egui::pos2(heading.x0 as f32, heading.y0 as f32),
-            egui::pos2(heading.x1 as f32, heading.y1 as f32),
-        );
-
-        for end in [
-            egui::pos2(next_up_row.left() + 130.0, next_up_row.center().y),
-            egui::pos2(heading.left() + 130.0, heading.center().y),
-            egui::pos2(heading.left() + 130.0, heading.top() + 1.0),
-        ] {
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![
-                    egui::Event::PointerMoved(start),
-                    egui::Event::PointerButton {
-                        pos: start,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            );
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![egui::Event::PointerMoved(start + egui::vec2(15.0, -10.0))],
-            );
-            egui::DragAndDrop::payload::<DragTrack>(&ctx).expect("a reorderable queue row drags");
-
-            frame_events(&ctx, &mut app, vec![egui::Event::PointerMoved(end)]);
-            frame_events(
-                &ctx,
-                &mut app,
-                vec![egui::Event::PointerButton {
-                    pos: end,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            frame_events(&ctx, &mut app, vec![]);
-
-            assert_eq!(
-                app.manual_queue, uris,
-                "Next up is never a drop target: nothing moves or gets inserted (dropped at {end:?})"
-            );
-        }
+        let mut expected = app.queue_origin().unwrap().rows;
+        let moved = expected.remove(0);
+        expected.insert(2, moved);
+        drag_queue_row_onto(&ctx, &mut app, "Queued 0", Some("Otomo"));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual[1..]);
         app.backend.shutdown();
     }
 
@@ -11495,152 +12058,40 @@ mod tests {
         app.backend.shutdown();
     }
 
-    /// With nothing manually queued yet, every row the open queue shows
-    /// belongs to "Next up", so the panel offers no drop target at all:
-    /// neither a Next up row nor its heading takes a dragged song. The
-    /// player bar's Queue button still does.
     #[test]
-    fn dropping_a_song_on_next_up_with_an_empty_playing_next_does_nothing() {
-        use egui::accesskit::Role;
-        let (ctx, mut app) = accessible_app("queue-empty-playing-next-not-a-target");
-        app.show_queue_panel = true;
-        // Make the local player the active target, like `seed_queued_songs`,
-        // but leave "Playing next" empty.
-        app.local_ready = true;
-        app.local.track = Some(crate::player::LocalTrack {
-            uri: app.now_playing().unwrap().uri,
-            ..Default::default()
-        });
-        app.local.playback = crate::player::Playback::Paused;
-        assert!(app.manual_queue.is_empty());
-        assert!(app.queue_locally_reorderable());
-
-        let source_uri = app
-            .queue
-            .get()
-            .unwrap()
-            .currently_playing
-            .clone()
-            .unwrap()
-            .uri()
-            .to_string();
-
-        for _ in 0..3 {
-            frame_events(&ctx, &mut app, vec![]);
-        }
-        let tree = accessible_frame(&ctx, &mut app, vec![]);
-        let bounds_of = |id: egui::accesskit::NodeId| {
-            let bounds = tree
-                .nodes
-                .iter()
-                .find(|(node, _)| *node == id)
-                .unwrap()
-                .1
-                .bounds()
-                .unwrap();
-            egui::Rect::from_min_max(
-                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
-                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
-            )
+    fn a_playlist_selection_inserts_into_next_up_in_order() {
+        let (ctx, mut app) = accessible_app("playlist-to-next-up");
+        seed_queued_songs(&mut app);
+        let before = app.queue_origin().unwrap();
+        let items: Vec<_> = app.playlist_pages["pl1"]
+            .items
+            .items
+            .iter()
+            .filter_map(|row| row.playable().cloned())
+            .take(2)
+            .collect();
+        assert_eq!(items.len(), 2);
+        let slot = before.manual + 1;
+        let mut expected = before.rows;
+        expected.splice(slot..slot, items.iter().map(|item| item.uri().to_string()));
+        let track = DragTrack {
+            items,
+            title: String::new(),
+            image: None,
+            from: None,
+            source_playlist: Some("pl1".into()),
+            queue_origin: None,
         };
-        // "Otomo" is the first row of the default demo queue's "Next up".
-        // It is also a demo library track shown elsewhere on the page
-        // behind the queue side panel, so match on the queue panel's own
-        // on-screen column (it opens flush against the right edge) rather
-        // than the first node with a matching label.
-        let row = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| {
-                node.role() == Role::Button
-                    && node
-                        .label()
-                        .is_some_and(|text| text.starts_with("Play Otomo,"))
-                    && node
-                        .bounds()
-                        .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
-            })
-            .unwrap_or_else(|| panic!("missing on-screen queue row Otomo"))
-            .0;
-        let row = bounds_of(row);
-        let heading = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| node.label() == Some("Next up") || node.value() == Some("Next up"))
-            .expect("the Next up heading")
-            .0;
-        let heading = bounds_of(heading);
-        // The player bar's Queue button, not the queue panel's Queue tab.
-        let button = tree
-            .nodes
-            .iter()
-            .find(|(_, node)| {
-                node.role() == Role::Button
-                    && node.label() == Some("Queue")
-                    && node.bounds().is_some_and(|bounds| {
-                        bounds.y0 >= f64::from(800.0 - crate::theme::PLAYER_BAR_HEIGHT)
-                    })
-            })
-            .expect("the player bar's Queue button")
-            .0;
-        let button = bounds_of(button);
-
-        let drag_to = |app: &mut App, end: egui::Pos2| {
-            let start = egui::pos2(40.0, 755.0);
-            frame_events(
-                &ctx,
-                app,
-                vec![
-                    egui::Event::PointerMoved(start),
-                    egui::Event::PointerButton {
-                        pos: start,
-                        button: egui::PointerButton::Primary,
-                        pressed: true,
-                        modifiers: egui::Modifiers::NONE,
-                    },
-                ],
-            );
-            frame_events(
-                &ctx,
-                app,
-                vec![egui::Event::PointerMoved(start + egui::vec2(20.0, -10.0))],
-            );
-            let payload = egui::DragAndDrop::payload::<DragTrack>(&ctx)
-                .expect("dragging the now-playing song should create a payload");
-            assert_eq!(payload.items[0].uri(), source_uri);
-            frame_events(&ctx, app, vec![egui::Event::PointerMoved(end)]);
-            frame_events(
-                &ctx,
-                app,
-                vec![egui::Event::PointerButton {
-                    pos: end,
-                    button: egui::PointerButton::Primary,
-                    pressed: false,
-                    modifiers: egui::Modifiers::NONE,
-                }],
-            );
-            frame_events(&ctx, app, vec![]);
-        };
-
-        for end in [
-            egui::pos2(row.left() + 130.0, row.center().y),
-            egui::pos2(row.left() + 130.0, row.top() + 2.0),
-            heading.center(),
-            egui::pos2(heading.left() + 130.0, heading.top() - 2.0),
-        ] {
-            drag_to(&mut app, end);
-            assert!(
-                app.manual_queue.is_empty(),
-                "Next up is never a drop target, even when Playing next has no rows of its own (dropped at {end:?})"
-            );
-        }
-
-        drag_to(&mut app, button.center());
-        assert_eq!(
-            app.manual_queue,
-            vec![source_uri],
-            "the Queue button still queues the dropped song"
+        app.apply(
+            Action::DropInPlaybackQueue {
+                track: Box::new(track),
+                slot,
+                manual: false,
+            },
+            &ctx,
         );
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.queued_rows_len(), before.manual);
         app.backend.shutdown();
     }
 
@@ -11801,6 +12252,240 @@ mod tests {
             ],
         );
         app.backend.shutdown();
+    }
+
+    /// Drags `name`'s row of the open queue and drops it on the top edge of
+    /// `onto`'s row, or on the player bar's Queue button without one,
+    /// returning the payload the drag carried.
+    fn drag_queue_row_onto(
+        ctx: &egui::Context,
+        app: &mut App,
+        name: &str,
+        onto: Option<&str>,
+    ) -> DragTrack {
+        let tree = accessible_frame(ctx, app, vec![]);
+        // The queue panel's own rows: some songs are also on the page
+        // behind it, and the panel opens against the right edge.
+        let row_rect = |name: &str| {
+            let prefix = format!("Play {name},");
+            let bounds = tree
+                .nodes
+                .iter()
+                .find(|(_, node)| {
+                    node.role() == egui::accesskit::Role::Button
+                        && node.label().is_some_and(|text| text.starts_with(&prefix))
+                        && node
+                            .bounds()
+                            .is_some_and(|bounds| bounds.x0 >= 900.0 && bounds.y1 <= 800.0)
+                })
+                .unwrap_or_else(|| panic!("missing on-screen queue row {name}"))
+                .1
+                .bounds()
+                .unwrap();
+            egui::Rect::from_min_max(
+                egui::pos2(bounds.x0 as f32, bounds.y0 as f32),
+                egui::pos2(bounds.x1 as f32, bounds.y1 as f32),
+            )
+        };
+        let start_row = row_rect(name);
+        let start = egui::pos2(start_row.left() + 80.0, start_row.center().y);
+        let end = match onto {
+            Some(onto) => {
+                let end_row = row_rect(onto);
+                egui::pos2(end_row.left() + 130.0, end_row.top() + 2.0)
+            }
+            None => {
+                // The player bar's Queue button, not the queue panel's tab.
+                let bounds = tree
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button
+                            && node.label() == Some("Queue")
+                            && node.bounds().is_some_and(|bounds| {
+                                bounds.y0 >= f64::from(800.0 - crate::theme::PLAYER_BAR_HEIGHT)
+                            })
+                    })
+                    .expect("the player bar's Queue button")
+                    .1
+                    .bounds()
+                    .unwrap();
+                egui::pos2(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                )
+            }
+        };
+        frame_events(
+            ctx,
+            app,
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        frame_events(
+            ctx,
+            app,
+            vec![egui::Event::PointerMoved(start + egui::vec2(15.0, -10.0))],
+        );
+        let payload = egui::DragAndDrop::payload::<DragTrack>(ctx)
+            .expect("a queue row drags")
+            .as_ref()
+            .clone();
+        frame_events(ctx, app, vec![egui::Event::PointerMoved(end)]);
+        frame_events(
+            ctx,
+            app,
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame_events(ctx, app, vec![]);
+        payload
+    }
+
+    #[test]
+    fn next_up_to_manual_moves_the_existing_occurrence() {
+        let (ctx, mut app) = accessible_app("next-up-to-manual");
+        app.show_queue_panel = true;
+        let mut manual = seed_queued_songs(&mut app);
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let mut expected = app.queue_origin().unwrap().rows;
+        let moved = expected.remove(3);
+        expected.insert(1, moved.clone());
+        manual.insert(1, moved);
+        drag_queue_row_onto(&ctx, &mut app, "Otomo", Some("Queued 1"));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert_eq!(app.manual_queue, manual);
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn next_up_reorders_with_an_empty_manual_queue() {
+        let (ctx, mut app) = accessible_app("reorder-next-up");
+        app.show_queue_panel = true;
+        seed_queued_songs(&mut app);
+        if let Loadable::Loaded(queue) = &mut app.queue {
+            queue.queue.drain(..3);
+        }
+        app.manual_queue.clear();
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let queue = &app.queue.get().unwrap().queue;
+        let first = queue[0].name().to_owned();
+        let second = queue[1].name().to_owned();
+        let mut expected = app.queue_origin().unwrap().rows;
+        expected.swap(0, 1);
+        drag_queue_row_onto(&ctx, &mut app, &second, Some(&first));
+        assert_eq!(app.queue_origin().unwrap().rows, expected);
+        assert!(app.manual_queue.is_empty());
+        app.backend.shutdown();
+    }
+
+    /// A Next in queue row that cannot be moved right now stays where it
+    /// is, adds no copy, and the toast says why.
+    #[test]
+    fn a_queued_row_that_cannot_move_now_is_not_queued_again() {
+        let (ctx, mut app) = accessible_app("queue-locked-no-copy");
+        app.show_queue_panel = true;
+        let uris = seed_queued_songs(&mut app);
+        app.local_ready = false;
+        assert!(!app.queue_reorderable());
+        let rows_before = app.queue.get().unwrap().queue.len();
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let payload = drag_queue_row_onto(&ctx, &mut app, "Queued 2", Some("Queued 0"));
+        assert_eq!(
+            payload.from,
+            Some((crate::model::QUEUED_ROW.to_string(), 2))
+        );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(app.queue.get().unwrap().queue.len(), rows_before);
+        assert!(
+            app.toasts.iter().any(|toast| toast.message
+                == "Spotifast has not seen this device's queue yet. Try again in a moment."),
+            "{:?}",
+            app.toasts
+        );
+        app.backend.shutdown();
+    }
+
+    /// The Now playing row dropped on Next in queue does not queue the
+    /// playing song again, and the toast says why.
+    #[test]
+    fn the_now_playing_row_dropped_on_the_queue_is_not_queued_again() {
+        let (ctx, mut app) = accessible_app("queue-now-playing-no-copy");
+        app.show_queue_panel = true;
+        let uris = seed_queued_songs(&mut app);
+        let rows_before = app.queue.get().unwrap().queue.len();
+        for _ in 0..3 {
+            frame_events(&ctx, &mut app, vec![]);
+        }
+        let playing = app.now_playing().expect("a song playing").title;
+        let payload = drag_queue_row_onto(&ctx, &mut app, &playing, Some("Queued 0"));
+        assert_eq!(
+            payload.from,
+            Some((crate::model::NOW_PLAYING_ROW.to_string(), 0))
+        );
+        assert_eq!(app.manual_queue, uris);
+        assert_eq!(app.queue.get().unwrap().queue.len(), rows_before);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message == "This song is already playing"),
+            "{:?}",
+            app.toasts
+        );
+        app.backend.shutdown();
+    }
+
+    /// A Next in queue row dropped on the player bar's Queue button is not
+    /// queued again. A Next up row moves into the manual section once.
+    #[test]
+    fn queue_rows_dropped_on_the_queue_button() {
+        for (index, name) in ["Queued 1", "Otomo"].into_iter().enumerate() {
+            let (ctx, mut app) = accessible_app(&format!("queue-button-drop-{index}"));
+            app.show_queue_panel = true;
+            let uris = seed_queued_songs(&mut app);
+            let otomo = app.queue.get().unwrap().queue[3].uri().to_string();
+            let all_rows = app.queue_origin().unwrap().rows;
+            let sequence = app.local.track_sequence;
+            for _ in 0..3 {
+                frame_events(&ctx, &mut app, vec![]);
+            }
+            let payload = drag_queue_row_onto(&ctx, &mut app, name, None);
+            let mut expected = uris;
+            if name == "Otomo" {
+                assert!(!payload.is_queued_or_playing(), "{name}");
+                expected.push(otomo);
+            } else {
+                assert!(payload.is_queued_or_playing(), "{name}");
+            }
+            assert_eq!(app.manual_queue, expected, "{name}");
+            assert_eq!(
+                app.queue_origin().unwrap().rows,
+                all_rows,
+                "the occurrence moved without a copy"
+            );
+            assert_eq!(
+                app.local.track_sequence, sequence,
+                "a queue drag does not start playback"
+            );
+            app.backend.shutdown();
+        }
     }
 
     /// Pins are pins: dropping a pinned row at the top of the block
@@ -12230,7 +12915,10 @@ mod tests {
                     let payload =
                         egui::DragAndDrop::payload::<DragTrack>(&ctx).expect("real source drag");
                     assert_eq!(payload.items[0].uri(), source_item.uri());
-                    assert_eq!(payload.from, None);
+                    assert_eq!(
+                        payload.from,
+                        from_queue.then(|| (crate::model::UPCOMING_ROW.to_string(), 0))
+                    );
                     frame_events(&ctx, &mut app, vec![egui::Event::PointerMoved(end)]);
                     frame_events(
                         &ctx,
@@ -12374,6 +13062,7 @@ mod tests {
                     image: None,
                     items: dragged,
                     from: (mode == "foreign").then(|| ("pl2".into(), 5)),
+                    queue_origin: None,
                     source_playlist: match mode {
                         "foreign" => Some("pl2".into()),
                         "own-multiple" => Some("pl1".into()),
@@ -12728,6 +13417,7 @@ mod tests {
                 ..Default::default()
             })],
             from: Some(("pl1".into(), from as u32)),
+            queue_origin: None,
             source_playlist: Some("pl1".into()),
         };
 
@@ -13351,10 +14041,11 @@ mod tests {
     fn saved_toggles_stay_green_while_hovered() {
         // alb0 is saved, its first song is liked, and so is the song in
         // the player bar, so all three save toggles show their on state.
+        // Every song's heart has the same name, so the topmost row's wins.
         type Pick = fn(&egui::accesskit::Rect) -> bool;
         let targets: [(&str, &str, Pick); 3] = [
             ("album header", "Remove from Your Library", |_| true),
-            ("song row", "Remove from Liked Songs", |b| b.y1 < 700.0),
+            ("song row", "Add to playlist", |b| b.y1 < 700.0),
             ("player bar", "Add to playlist", |b| b.y0 > 700.0),
         ];
         for theme in ["dark", "light"] {
@@ -13394,7 +14085,8 @@ mod tests {
                         node.label() == Some(label) && node.role() == egui::accesskit::Role::Button
                     })
                     .filter_map(|(_, node)| node.bounds())
-                    .find(pick)
+                    .filter(pick)
+                    .min_by(|a, b| a.y0.total_cmp(&b.y0))
                     .unwrap_or_else(|| panic!("missing {place} {label:?}"));
                 let centre = egui::pos2(
                     (bounds.x0 + bounds.x1) as f32 / 2.0,
@@ -13415,8 +14107,14 @@ mod tests {
                         _ => None,
                     })
                     .collect();
+                // The player bar's toggles keep their colour and grow instead.
+                let saved = if place == "player bar" {
+                    app.palette.accent
+                } else {
+                    app.palette.accent_hover
+                };
                 assert!(
-                    tints.contains(&app.palette.accent_hover),
+                    tints.contains(&saved),
                     "a hovered {place} button in {theme} must still look saved: {tints:?}"
                 );
                 assert!(!tints.contains(&app.palette.text), "{place} in {theme}");
